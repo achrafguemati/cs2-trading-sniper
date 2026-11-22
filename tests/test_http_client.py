@@ -1,11 +1,13 @@
-"""Unit tests for read-only HTTP client safety, status handling, and sequential serialization."""
+"""Unit tests for read-only HTTP client safety, status handling, headers, and circuit breaking."""
 
 import asyncio
 import unittest
 
 import httpx
+from pydantic import BaseModel
 
 from sniper.core.http_client import (
+    DEFAULT_HEADERS,
     ReadOnlyHttpClient,
     UnexpectedResponseError,
 )
@@ -15,6 +17,11 @@ from sniper.core.rate_limiter import (
     SecurityBlockError,
     SequentialRateLimiter,
 )
+
+
+class DummySchema(BaseModel):
+    required_key: str
+    numeric_val: int
 
 
 class TestHttpClient(unittest.IsolatedAsyncioTestCase):
@@ -33,6 +40,34 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PermissionError):
             await client.patch("https://steamcommunity.com/market/updatelisting")
 
+    async def test_exact_outgoing_headers(self):
+        """Verify client sends transparent, non-spoofed application headers and zero Sec-Fetch-* headers."""
+        captured_request: httpx.Request | None = None
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal captured_request
+            captured_request = request
+            return httpx.Response(200, json={"success": 1})
+
+        client = ReadOnlyHttpClient(transport=httpx.MockTransport(handler))
+        await client.get("https://steamcommunity.com/test", expect_json=True)
+
+        self.assertIsNotNone(captured_request)
+        headers = dict(captured_request.headers)
+
+        # User-Agent must be transparent application identifier
+        self.assertIn("user-agent", headers)
+        self.assertTrue(headers["user-agent"].startswith("CS2TradingSniper/"))
+        self.assertNotIn("Chrome", headers["user-agent"])
+
+        # No fabricated browser-navigation Sec-Fetch-* headers
+        for h in headers:
+            self.assertFalse(h.lower().startswith("sec-fetch-"), f"Disallowed header present: {h}")
+
+        # Check default configured headers
+        for expected_key, expected_val in DEFAULT_HEADERS.items():
+            self.assertEqual(headers.get(expected_key.lower()), expected_val)
+
     async def test_status_200_valid_json(self):
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"success": 1, "data": "ok"})
@@ -41,26 +76,6 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
         resp = await client.get("https://steamcommunity.com/test", expect_json=True)
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["success"], 1)
-
-    async def test_status_200_malformed_json(self):
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, content=b"{malformed json")
-
-        client = ReadOnlyHttpClient(transport=httpx.MockTransport(handler))
-        with self.assertRaises(UnexpectedResponseError):
-            await client.get_json("https://steamcommunity.com/test")
-
-    async def test_unexpected_html_response_rejection(self):
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                200,
-                headers={"Content-Type": "text/html; charset=utf-8"},
-                content=b"<!DOCTYPE html><html><body><h3>Cloudflare Challenge</h3></body></html>"
-            )
-
-        client = ReadOnlyHttpClient(transport=httpx.MockTransport(handler))
-        with self.assertRaises(UnexpectedResponseError):
-            await client.get("https://steamcommunity.com/test", expect_json=True)
 
     async def test_status_404_raises_http_status_error(self):
         def handler(request: httpx.Request) -> httpx.Response:
@@ -102,6 +117,85 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
             
         self.assertTrue(limiter.is_halted)
 
+    async def test_unexpected_html_trips_circuit_breaker_blocking_next_request(self):
+        """Unexpected HTML response trips circuit breaker and immediately blocks the subsequent request."""
+        call_count = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/html; charset=utf-8"},
+                content=b"<!DOCTYPE html><html><body><h3>Cloudflare Challenge</h3></body></html>"
+            )
+
+        limiter = SequentialRateLimiter(config=RateLimiterConfig(min_delay_seconds=0.01, max_delay_seconds=0.02, jitter_max_seconds=0.0))
+        client = ReadOnlyHttpClient(rate_limiter=limiter, transport=httpx.MockTransport(handler))
+
+        # First request receives unexpected HTML and raises UnexpectedResponseError
+        with self.assertRaises(UnexpectedResponseError):
+            await client.get("https://steamcommunity.com/test", expect_json=True)
+
+        self.assertTrue(limiter.is_halted)
+        self.assertEqual(call_count, 1)
+
+        # Subsequent request MUST fail closed and be blocked immediately by circuit breaker
+        with self.assertRaises(SecurityBlockError):
+            await client.get("https://steamcommunity.com/subsequent", expect_json=True)
+
+        # Transport was never hit for the second request
+        self.assertEqual(call_count, 1)
+
+    async def test_malformed_json_trips_circuit_breaker_blocking_next_request(self):
+        """Malformed JSON response trips circuit breaker and immediately blocks subsequent requests."""
+        call_count = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            return httpx.Response(200, content=b"{malformed json without close")
+
+        limiter = SequentialRateLimiter(config=RateLimiterConfig(min_delay_seconds=0.01, max_delay_seconds=0.02, jitter_max_seconds=0.0))
+        client = ReadOnlyHttpClient(rate_limiter=limiter, transport=httpx.MockTransport(handler))
+
+        with self.assertRaises(UnexpectedResponseError):
+            await client.get_json("https://steamcommunity.com/test")
+
+        self.assertTrue(limiter.is_halted)
+        self.assertEqual(call_count, 1)
+
+        # Subsequent request blocked
+        with self.assertRaises(SecurityBlockError):
+            await client.get_json("https://steamcommunity.com/subsequent")
+
+        self.assertEqual(call_count, 1)
+
+    async def test_schema_validation_failure_trips_circuit_breaker_blocking_next_request(self):
+        """Schema mismatch trips circuit breaker and immediately blocks subsequent requests."""
+        call_count = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            # Return JSON missing 'numeric_val' and invalid type for required_key
+            return httpx.Response(200, json={"required_key": 12345})
+
+        limiter = SequentialRateLimiter(config=RateLimiterConfig(min_delay_seconds=0.01, max_delay_seconds=0.02, jitter_max_seconds=0.0))
+        client = ReadOnlyHttpClient(rate_limiter=limiter, transport=httpx.MockTransport(handler))
+
+        with self.assertRaises(UnexpectedResponseError):
+            await client.get_json("https://steamcommunity.com/test", schema=DummySchema)
+
+        self.assertTrue(limiter.is_halted)
+        self.assertEqual(call_count, 1)
+
+        # Subsequent request blocked
+        with self.assertRaises(SecurityBlockError):
+            await client.get_json("https://steamcommunity.com/subsequent", schema=DummySchema)
+
+        self.assertEqual(call_count, 1)
+
     async def test_concurrent_request_strict_serialization(self):
         """Verify that concurrent calls to get() never overlap in the transport."""
         active_requests = 0
@@ -115,7 +209,6 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
                 if active_requests > max_concurrent_seen:
                     max_concurrent_seen = active_requests
             
-            # Simulate network latency of 60ms
             await asyncio.sleep(0.06)
             
             async with lock:
@@ -123,19 +216,16 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(200, json={"status": "ok"})
 
         transport = httpx.MockTransport(slow_handler)
-        # Fast pacing config (0.01s)
         config = RateLimiterConfig(min_delay_seconds=0.01, max_delay_seconds=0.02, jitter_max_seconds=0.0)
         limiter = SequentialRateLimiter(config=config)
         client = ReadOnlyHttpClient(rate_limiter=limiter, transport=transport)
 
-        # Launch 3 concurrent requests simultaneously
         await asyncio.gather(
             client.get("https://steamcommunity.com/req1"),
             client.get("https://steamcommunity.com/req2"),
             client.get("https://steamcommunity.com/req3"),
         )
 
-        # Strict sequential execution mandate: max_concurrent_seen must be exactly 1
         self.assertEqual(max_concurrent_seen, 1)
 
 

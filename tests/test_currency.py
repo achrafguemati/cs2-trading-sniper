@@ -32,6 +32,53 @@ class TestCurrency(unittest.TestCase):
         self.assertEqual(usd.parse_to_minor_units("-$0.01"), -1)
         self.assertEqual(usd.parse_to_minor_units("-100"), -10000)
 
+    def test_strict_minus_grammar(self):
+        """Reject misplaced, repeated, or post-symbol minus signs."""
+        usd = CurrencyConfig.get_default_usd()
+        # Misplaced in middle
+        with self.assertRaises(ValueError):
+            usd.parse_to_minor_units("2-4.88")
+        # Misplaced after symbol
+        with self.assertRaises(ValueError):
+            usd.parse_to_minor_units("$-24.88")
+        # Trailing minus
+        with self.assertRaises(ValueError):
+            usd.parse_to_minor_units("24.88-")
+        # Repeated minus
+        with self.assertRaises(ValueError):
+            usd.parse_to_minor_units("--24.88")
+
+    def test_strict_comma_grouping_grammar(self):
+        """Verify standard 3-digit comma grouping and reject malformed separators."""
+        usd = CurrencyConfig.get_default_usd()
+        # Valid groupings
+        self.assertEqual(usd.parse_to_minor_units("1,240.50"), 124050)
+        self.assertEqual(usd.parse_to_minor_units("$1,240.50"), 124050)
+        self.assertEqual(usd.parse_to_minor_units("1,000,000.00"), 100000000)
+        self.assertEqual(usd.parse_to_minor_units("2,488"), 248800)
+
+        # Malformed groupings
+        with self.assertRaises(ValueError):
+            usd.parse_to_minor_units("2,,4.88")
+        with self.assertRaises(ValueError):
+            usd.parse_to_minor_units(",24.88")
+        with self.assertRaises(ValueError):
+            usd.parse_to_minor_units("24,88.00")
+        with self.assertRaises(ValueError):
+            usd.parse_to_minor_units("24,")
+        with self.assertRaises(ValueError):
+            usd.parse_to_minor_units("1,2.50")
+
+    def test_strict_currency_symbol_grammar(self):
+        """Reject multiple or misplaced currency symbols."""
+        usd = CurrencyConfig.get_default_usd()
+        with self.assertRaises(ValueError):
+            usd.parse_to_minor_units("$$24.88")
+        with self.assertRaises(ValueError):
+            usd.parse_to_minor_units("$24.88$")
+        with self.assertRaises(ValueError):
+            usd.parse_to_minor_units("24.88$")
+
     def test_usd_excess_decimal_rejection(self):
         usd = CurrencyConfig.get_default_usd()
         with self.assertRaises(ValueError):

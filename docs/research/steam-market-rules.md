@@ -52,7 +52,15 @@ Where $B$ is the gross price in integer cents paid by the buyer. Notice that thi
     - Effective Fee Rate: $12/100 = \mathbf{12.00\%}$
 
 ### 2.3 Backward Inversion (Buyer Pays $\rightarrow$ Seller Receives)
-Due to independent flooring, not every integer buyer total is exactly reachable by a seller proceeds integer (step jumps occur, e.g., 114 cents is not reachable because $R=99 \rightarrow B=113$ and $R=100 \rightarrow B=115$).
+Due to independent flooring, not every integer buyer total is exactly reachable by a seller proceeds integer (step jumps occur). For example:
+* At $R = 99\text{ minor units}$: Steam fee is $\lfloor 99 \times 0.05 \rfloor = 4$, CS2 fee is $\lfloor 99 \times 0.10 \rfloor = 9$, producing total buyer cost $99 + 4 + 9 = 112\text{ minor units}$.
+* At $R = 100\text{ minor units}$: Steam fee is 5, CS2 fee is 10, producing total buyer cost $100 + 5 + 10 = 115\text{ minor units}$.
+* Consequently, 113 and 114 minor units are impossible buyer totals under integer seller proceeds.
+
+#### Separation of Transaction Fee Floors vs. Market Listing Minimums
+- **Transaction Fee Floors:** Mathematically, each fee component enforces a 1-minor-unit floor ($\max(1, \dots)$), giving an absolute lower bound of $1 + 1 + 1 = 3\text{ minor units}$ ($R=1$).
+- **Market Listing Minimums:** Valve enforces distinct minimum listing prices and price steps per currency. For USD and EUR, the verified market minimum is 3 minor units ($0.03 / €0.03). For other currencies (e.g. JPY), market listing minimums and allowed price steps are marked as **UNKNOWN** until verified via direct empirical captures.
+- **Empirical Basis:** Rounding behavior is modeled from Valve's public client implementation (`economy.js`) and recorded confirmation-screen fixtures. Edge cases in unverified regional currencies remain strictly marked as UNKNOWN.
 
 The inverse fee function must never return a seller amount and claim it produces the requested buyer total if the forward formula produces a different total. It must explicitly return:
 1. `seller_receives_cents`: The largest integer seller proceeds whose resulting buyer cost does not exceed the target.
@@ -62,19 +70,16 @@ The inverse fee function must never return a seller amount and claim it produces
 5. `is_exact_match`: Boolean indicating whether `actual_buyer_pays_cents == requested_buyer_pays_cents`.
 
 ```python
-def calculate_seller_receives(requested_buyer_pays_cents: int) -> dict:
-    """
-    Given what the buyer pays (gross in integer cents), returns an exact breakdown:
-    {
-        'seller_receives': int,
-        'steam_fee': int,
-        'publisher_fee': int,
-        'actual_buyer_pays': int,
-        'is_exact_match': bool
-    }
-    """
-    if requested_buyer_pays_cents < 3:
-        raise ValueError("Minimum Steam market price is 3 cents")
+def calculate_seller_receives(requested_buyer_pays_minor: int, currency: CurrencyConfig | None = None) -> FeeBreakdown:
+    min_steam = currency.min_fee_steam_minor if currency else 1
+    min_pub = currency.min_fee_publisher_minor if currency else 1
+    fee_floor = 1 + min_steam + min_pub
+    
+    if currency and currency.min_listing_price_minor is not None:
+        if requested_buyer_pays_minor < currency.min_listing_price_minor:
+            raise ValueError(f"Below currency {currency.code} listing minimum of {currency.min_listing_price_minor}")
+    elif requested_buyer_pays_minor < fee_floor:
+        raise ValueError(f"Below fee floor of {fee_floor}")
     
     # Estimate base seller amount using integer division
     # 1.15 approx divisor: (requested * 100) // 115

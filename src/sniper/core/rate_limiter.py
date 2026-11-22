@@ -5,7 +5,7 @@ Enforces:
 2. Paced delays with randomized jitter using monotonic timers.
 3. Exponential backoff on HTTP 429 respecting Retry-After (both delta-seconds and HTTP-date formats).
    Local safety minimum backoff is strictly preserved even if server sends shorter delay.
-4. Immediate halt on HTTP 403 requiring manual inspection.
+4. Immediate halt on HTTP 403, unexpected HTML challenge, malformed JSON, or schema failure.
 """
 
 from __future__ import annotations
@@ -22,7 +22,12 @@ logger = logging.getLogger("sniper.rate_limiter")
 
 
 class SecurityBlockError(Exception):
-    """Raised when an HTTP 403 or security challenge is encountered, halting all requests."""
+    """Raised when an HTTP 403, security challenge, or circuit breaker halt is active."""
+    pass
+
+
+class ProtocolViolationError(SecurityBlockError):
+    """Raised when an unexpected HTML challenge, malformed JSON, or schema failure halts requests."""
     pass
 
 
@@ -96,6 +101,10 @@ class SequentialRateLimiter:
         return self._is_permanently_halted
 
     @property
+    def halt_reason(self) -> str:
+        return self._halt_reason
+
+    @property
     def is_cooling_down(self) -> bool:
         return time.monotonic() < self._blocked_until
 
@@ -106,8 +115,9 @@ class SequentialRateLimiter:
     async def acquire(self) -> None:
         """Wait until a request is safe to execute sequentially.
         
-        Raises SecurityBlockError if halted by HTTP 403.
-        Raises RateLimitExceededError if currently within backoff cooldown.
+        Raises:
+            SecurityBlockError: If halted by HTTP 403, protocol violation, or schema failure.
+            RateLimitExceededError: If currently within backoff cooldown.
         """
         if self._is_permanently_halted:
             raise SecurityBlockError(f"Requests halted: {self._halt_reason}")
@@ -152,16 +162,13 @@ class SequentialRateLimiter:
         """
         self._consecutive_429_count += 1
         
-        # Calculate exponential backoff: 300, 600, 1200, up to max
         multiplier = 2 ** (self._consecutive_429_count - 1)
         calculated_backoff = min(
             self.config.max_backoff_seconds,
             self.config.initial_backoff_seconds * multiplier
         )
         
-        # Parse Retry-After if provided by server
         server_retry = parse_retry_after(retry_after_header)
-                
         cooldown = max(calculated_backoff, server_retry)
         self._blocked_until = time.monotonic() + cooldown
         logger.warning(
@@ -175,3 +182,9 @@ class SequentialRateLimiter:
         self._is_permanently_halted = True
         self._halt_reason = reason
         logger.critical(f"Circuit breaker tripped: {reason}. Halting all polling.")
+
+    def record_protocol_violation(self, reason: str) -> None:
+        """Trip circuit breaker and permanently halt polling due to protocol or schema failure."""
+        self._is_permanently_halted = True
+        self._halt_reason = reason
+        logger.critical(f"Circuit breaker tripped by protocol/schema violation: {reason}. Halting all polling.")

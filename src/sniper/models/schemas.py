@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
-from pydantic import BaseModel, Field, field_validator
+from typing import TYPE_CHECKING, Any
+from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from sniper.core.currency import CurrencyConfig
 
 
 class ListingAssetPointer(BaseModel):
@@ -63,6 +66,31 @@ class HistogramDepthEntry(BaseModel):
     description: str
 
 
+class NormalizedDepthEntry(BaseModel):
+    """Normalized depth entry from buy_order_graph or sell_order_graph.
+    
+    Preserves raw response value and converts to integer minor units strictly
+    without binary float arithmetic.
+    If currency context is missing or unverified, price_minor is None (UNKNOWN)
+    and financial comparison is prohibited.
+    """
+    raw_price: Any
+    cumulative_quantity: int
+    description: str
+    price_minor: int | None = None
+    currency_code: str | None = None
+    is_currency_verified: bool = False
+
+    def require_price_minor(self) -> int:
+        """Return price_minor if verified, else raise ValueError prohibiting financial comparison."""
+        if self.price_minor is None or not self.is_currency_verified:
+            raise ValueError(
+                f"Financial comparison prohibited: price_minor is UNKNOWN for raw price "
+                f"'{self.raw_price}' (currency: {self.currency_code}, verified: {self.is_currency_verified})"
+            )
+        return self.price_minor
+
+
 class OrderbookHistogramResponse(BaseModel):
     """Schema for /market/itemordershistogram response."""
     success: int | bool
@@ -116,6 +144,63 @@ class OrderbookHistogramResponse(BaseModel):
             except ValueError:
                 return 0
         return 0
+
+    def normalize_graph_entry(
+        self,
+        entry: list[Any],
+        currency: CurrencyConfig | None = None,
+    ) -> NormalizedDepthEntry:
+        """Normalize a single graph entry [raw_price, quantity, description].
+        
+        Converts decimal price to integer minor units strictly without binary float arithmetic.
+        If currency context is missing or unverified, marks price_minor as None (UNKNOWN).
+        """
+        if len(entry) < 3:
+            raise ValueError(f"Malformed graph entry: {entry}")
+
+        raw_price = entry[0]
+        qty = int(entry[1])
+        desc = str(entry[2])
+
+        if currency is None or not currency.is_verified:
+            return NormalizedDepthEntry(
+                raw_price=raw_price,
+                cumulative_quantity=qty,
+                description=desc,
+                price_minor=None,
+                currency_code=currency.code if currency else None,
+                is_currency_verified=False,
+            )
+
+        if isinstance(raw_price, float):
+            price_str = f"{raw_price:.{currency.minor_unit_precision}f}"
+        else:
+            price_str = str(raw_price)
+
+        price_minor = currency.parse_to_minor_units(price_str)
+
+        return NormalizedDepthEntry(
+            raw_price=raw_price,
+            cumulative_quantity=qty,
+            description=desc,
+            price_minor=price_minor,
+            currency_code=currency.code,
+            is_currency_verified=True,
+        )
+
+    def get_normalized_buy_graph(
+        self,
+        currency: CurrencyConfig | None = None,
+    ) -> list[NormalizedDepthEntry]:
+        """Return all buy order graph entries normalized to integer minor units."""
+        return [self.normalize_graph_entry(e, currency) for e in self.buy_order_graph]
+
+    def get_normalized_sell_graph(
+        self,
+        currency: CurrencyConfig | None = None,
+    ) -> list[NormalizedDepthEntry]:
+        """Return all sell order graph entries normalized to integer minor units."""
+        return [self.normalize_graph_entry(e, currency) for e in self.sell_order_graph]
 
 
 class SsrBucketItem(BaseModel):

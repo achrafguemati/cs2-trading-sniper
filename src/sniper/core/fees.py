@@ -73,6 +73,12 @@ def calculate_seller_receives(
 ) -> FeeBreakdown:
     """Invert gross buyer price into seller net proceeds using exact integer boundary search.
     
+    Because Valve independently floors each fee, fee step jumps occur. For instance:
+    - At seller_receives = 99: Steam fee is 4 (floor(99 * 0.05) = 4), CS2 fee is 9 (floor(99 * 0.10) = 9).
+      Total buyer pays is 99 + 4 + 9 = 112 minor units.
+    - At seller_receives = 100: Steam fee is 5, CS2 fee is 10. Total buyer pays is 100 + 5 + 10 = 115.
+    - Therefore, 113 and 114 minor units are not reachable by any integer seller amount.
+    
     Validates against:
     1. Market listing minimum: if currency has verified min_listing_price_minor, rejects below it.
     2. Fee floor minimum: seller_receives >= 1 + min_steam + min_pub.
