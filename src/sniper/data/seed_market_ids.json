@@ -1,0 +1,27 @@
+[
+  {
+    "market_hash_name": "AK-47 | Redline (Field-Tested)",
+    "item_nameid": 176000000,
+    "classid": "7993038091"
+  },
+  {
+    "market_hash_name": "AK-47 | Redline (Minimal Wear)",
+    "item_nameid": 176000001,
+    "classid": "7993038090"
+  },
+  {
+    "market_hash_name": "AK-47 | Redline (Factory New)",
+    "item_nameid": 176000002,
+    "classid": "7993038089"
+  },
+  {
+    "market_hash_name": "AK-47 | Redline (Well-Worn)",
+    "item_nameid": 176000003,
+    "classid": "7993038092"
+  },
+  {
+    "market_hash_name": "AK-47 | Redline (Battle-Scarred)",
+    "item_nameid": 176000004,
+    "classid": "7993038093"
+  }
+]

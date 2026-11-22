@@ -65,6 +65,14 @@ class TestFixtures(unittest.TestCase):
             parsed = PublicInventoryResponse.model_validate(data)
             self.assertEqual(parsed.success, 1)
 
+        # 6. Seed Market IDs
+        with open(FIXTURES_DIR / "seed_market_ids.json", "r", encoding="utf-8") as f:
+            records = json.load(f)
+            self.assertIsInstance(records, list)
+            self.assertGreater(len(records), 0)
+            self.assertIn("market_hash_name", records[0])
+            self.assertIn("item_nameid", records[0])
+
 
 if __name__ == "__main__":
     unittest.main()

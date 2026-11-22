@@ -36,6 +36,13 @@
       "currency": "N/A",
       "provenance": "Real normalized public CS2 inventory snapshot from community profile, captured during Phase 1 research. SteamID64 and owner metadata anonymized.",
       "notes": "Used for verifying PublicInventoryResponse, asset/description association, and market_marketable_restriction integer days parsing."
+    },
+    "seed_market_ids.json": {
+      "classification": "VERIFIED_COMMUNITY_DATASET",
+      "endpoint": "somespecialone/steam-market-ids",
+      "currency": "N/A",
+      "provenance": "Sample verified community mappings from somespecialone/steam-market-ids mapping market_hash_name to item_nameid and classid for offline orderbook resolution.",
+      "notes": "Used for verifying ItemNameIdDatabase import, SHA256 integrity check, and offline orderbook ID lookup."
     }
   }
 }
