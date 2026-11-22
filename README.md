@@ -25,9 +25,9 @@ See the complete rules in [AGENTS.md](AGENTS.md).
 
 ---
 
-## Current Status: Milestone 1.2.3.2 (Cross-Runtime Async Verification & Documentation Consistency)
+## Current Status: Milestone 1 Complete (CI Verified across Windows and Ubuntu)
 
-- **Milestone 1 / 1.1 / 1.2 / 1.2.1 / 1.2.2 / 1.2.3 (Implementation Complete):**
+- **Milestone 1 / 1.1 / 1.2 / 1.2.1 / 1.2.2 / 1.2.3 (Complete & CI Verified):**
   - Read-only asynchronous HTTP client (`ReadOnlyHttpClient`) with strict request-level serialization (`asyncio.Lock`), preventing concurrent execution overlap.
   - Transparent, non-spoofed application identification (`CS2TradingSniper/0.1.0`) with minimal standard headers (zero fabricated `Sec-Fetch-*` headers).
   - Strict production URL allowlist: HTTPS only, `steamcommunity.com` only, exact path matching for `/market/itemordershistogram`, boundary validation for `/market/listings/730/` and `/inventory/`, userinfo and non-default port rejection. Mock routes injected only through test configuration.
@@ -41,6 +41,7 @@ See the complete rules in [AGENTS.md](AGENTS.md).
   - Integer fee model (`calculate_buyer_pays`, `calculate_seller_receives`, `calculate_exact_breakeven_buyer_pays`) with step-jump gap handling ($R=99 \rightarrow 112, R=100 \rightarrow 115$) using exact arithmetic under the project's modeled formula. Valve's exact rounding implementation remains UNKNOWN (`calculate_exact_breakeven_buyer_pays` is exact relative to the project's model, not proof of Valve's live implementation).
   - Strict minor-unit currency model (`CurrencyConfig`) with hardened grammar and trailing zero exactness (accepts `Decimal("22.500") -> 2250`, continues rejecting `22.501`, `22.505`, `22.50001`).
   - Strict orderbook graph validation: strictly positive orderbook prices, non-negative integer quantities without silent fractional truncation.
+  - Automated CI Verification: GitHub Actions workflow executes the 76-test deterministic suite across Windows (`windows-latest`, Python 3.12 & 3.13) and Ubuntu (`ubuntu-latest`, Python 3.12 & 3.13) with 100% green runs.
   - Research skills (`.agents/skills/`) and intelligence registers (`docs/research/`).
 - **Milestones 2–9 (Planned):**
   - Item identity resolver, SQLite storage, detection algorithms, and dashboard remain deferred pending subsequent milestone approvals.
@@ -53,7 +54,7 @@ See the complete rules in [AGENTS.md](AGENTS.md).
 # 1. Install package in editable mode with dependencies
 pip install -e .
 
-# 2. Run comprehensive unit test suite (76 tests; async tests currently block during Windows asyncio event-loop/socketpair initialization in Python 3.14.6 and 3.13.17)
+# 2. Run comprehensive unit test suite (76 tests verified green across Windows and Ubuntu CI)
 python -m unittest discover -s tests -p "test_*.py" -v
 
 # 3. Run single-request read-only connectivity smoke test

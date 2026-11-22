@@ -2,7 +2,7 @@
 
 **Document Version:** 1.0  
 **Date:** 22 November 2026  
-**Testing Framework:** `pytest` + `pytest-asyncio` + recorded real-world fixtures  
+**Testing Framework:** Python Standard Library `unittest` (`unittest.IsolatedAsyncioTestCase` for async suites) + recorded real-world fixtures  
 
 ---
 
@@ -52,5 +52,5 @@ Every module must achieve high test coverage before milestone completion:
 | 8 | Alerts are deduplicated and contain exact Steam market links. | Alert manager test verifying cooldown window and URL formatting. |
 | 9 | All requests respect rate budget; 429 triggers 300s backoff and visible status. | Rate limiter test asserting 429 halts queue and updates health status. |
 | 10 | Zero credential storage; no auto-execution code paths exist in the product. | Static code security audit verifying absence of password/cookie/trade endpoints. |
-| 11 | Complete test suite passes cleanly. | `pytest` run report with 100% green tests. |
+| 11 | Complete test suite passes cleanly. | `python -m unittest` run report with 100% green tests across CI environments. |
 | 12 | User can launch locally on Windows 11 with single command. | Execution test of `launch.bat`. |
