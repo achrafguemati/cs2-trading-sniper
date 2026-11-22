@@ -271,7 +271,7 @@ class SsrBucketItem(BaseModel):
 class SsrListingLoaderData(BaseModel):
     """Schema for loaderData[3] in modern 2026 SSR hydration payload."""
     success: bool
-    appid: int = 730
+    appid: int
     buckets: list[SsrBucketItem] = Field(default_factory=list)
     initialSelectedBucketID: str | None = None
     initialFallbackBucketID: str | None = None

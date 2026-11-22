@@ -25,6 +25,14 @@ from pydantic import BaseModel, Field
 from sniper.models.schemas import SsrBucketItem, SsrListingLoaderData
 
 
+VERIFIED_MAPPING_REPOSITORY = "https://github.com/somespecialone/steam-market-ids"
+VERIFIED_MAPPING_REVISION = "caac34bd8a28578e800501da5cc9f16c7cb3fa67"
+VERIFIED_MAPPING_SOURCE_PATH = "data/CS2/item_names.json"
+VERIFIED_MAPPING_LICENSE = "WTFPL"
+VERIFIED_MAPPING_SHA256 = "9f34cee0a6f5479017d227568e1c8132c8b3c4f82b2d87123a80951e5adb3212"
+VERIFIED_MAPPING_RECORD_COUNT = 26935
+
+
 # -----------------------------------------------------------------------------
 # Enums
 # -----------------------------------------------------------------------------
@@ -124,10 +132,18 @@ class DatasetMetadata(BaseModel):
     """Provenance metadata for an imported community mapping dataset."""
     upstream_repo: str
     revision: str
-    retrieval_date: str
+    retrieval_timestamp: str
+    source_path: str
+    license: str
     sha256: str
     record_count: int
     imported_at: str | None = None
+
+
+class SsrListingContext(BaseModel):
+    """SSR payload paired with the exact grouped URL from which it was obtained."""
+    source_url: str
+    loader_data: SsrListingLoaderData
 
 
 class ItemIdentityResult(BaseModel):
@@ -142,7 +158,11 @@ class ItemIdentityResult(BaseModel):
     is_stattrak: bool = False
     is_souvenir: bool = False
     classid: str | None = None
+    classid_source: str | None = None
+    classid_revision: str | None = None
     item_nameid: int | None = None
+    item_nameid_source: str | None = None
+    item_nameid_revision: str | None = None
     resolution_status: ResolutionStatus
     resolution_source: ResolutionSource
 
@@ -152,6 +172,27 @@ class ItemIdentityResult(BaseModel):
         if self.market_hash_name:
             return f"https://steamcommunity.com/market/listings/730/{quote(self.market_hash_name, safe='')}"
         return None
+
+
+def adapt_upstream_item_names(raw_mapping: Any) -> list[dict[str, Any]]:
+    """Adapt upstream market-hash-name -> item_nameid JSON without normalizing keys.
+
+    Names are copied verbatim. No classid is synthesized because the upstream file
+    contains only item_nameid values.
+    """
+    if not isinstance(raw_mapping, dict):
+        raise ValueError("Upstream item_names JSON must be a JSON object mapping names to IDs.")
+
+    records: list[dict[str, Any]] = []
+    for market_hash_name, item_nameid in raw_mapping.items():
+        if not isinstance(market_hash_name, str) or not market_hash_name.strip():
+            raise ValueError("Upstream mapping contains a blank or non-string market_hash_name.")
+        if type(item_nameid) is not int or item_nameid <= 0:
+            raise ValueError(
+                f"Invalid item_nameid for {market_hash_name!r}: expected a positive integer."
+            )
+        records.append({"market_hash_name": market_hash_name, "item_nameid": item_nameid})
+    return records
 
 
 # -----------------------------------------------------------------------------
@@ -483,17 +524,50 @@ class ItemNameIdDatabase:
                     retrieval_date TEXT NOT NULL,
                     sha256 TEXT NOT NULL,
                     record_count INTEGER NOT NULL,
-                    imported_at TEXT NOT NULL
+                    imported_at TEXT NOT NULL,
+                    source_path TEXT NOT NULL DEFAULT 'legacy_unverified',
+                    license TEXT NOT NULL DEFAULT 'UNVERIFIED'
                 )
             """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS item_mappings (
                     market_hash_name TEXT PRIMARY KEY,
                     item_nameid INTEGER NOT NULL,
+                    item_nameid_source TEXT NOT NULL,
+                    item_nameid_revision TEXT,
                     classid TEXT,
+                    classid_source TEXT,
+                    classid_revision TEXT,
                     source TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
+            """)
+            # Migrate databases created by the earlier M2.1 prototype without
+            # upgrading their existing mappings to verified provenance.
+            metadata_columns = {row[1] for row in cur.execute("PRAGMA table_info(dataset_metadata)")}
+            if "source_path" not in metadata_columns:
+                cur.execute("ALTER TABLE dataset_metadata ADD COLUMN source_path TEXT NOT NULL DEFAULT 'legacy_unverified'")
+            if "license" not in metadata_columns:
+                cur.execute("ALTER TABLE dataset_metadata ADD COLUMN license TEXT NOT NULL DEFAULT 'UNVERIFIED'")
+
+            mapping_columns = {row[1] for row in cur.execute("PRAGMA table_info(item_mappings)")}
+            for column, sql_type in (
+                ("item_nameid_source", "TEXT"),
+                ("item_nameid_revision", "TEXT"),
+                ("classid_source", "TEXT"),
+                ("classid_revision", "TEXT"),
+            ):
+                if column not in mapping_columns:
+                    cur.execute(f"ALTER TABLE item_mappings ADD COLUMN {column} {sql_type}")
+            cur.execute("""
+                UPDATE item_mappings
+                SET item_nameid_source = 'legacy_unverified'
+                WHERE item_nameid_source IS NULL
+            """)
+            cur.execute("""
+                UPDATE item_mappings
+                SET classid_source = 'legacy_unverified'
+                WHERE classid IS NOT NULL AND classid_source IS NULL
             """)
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_item_mappings_nameid ON item_mappings(item_nameid)
@@ -502,18 +576,20 @@ class ItemNameIdDatabase:
 
     def import_verified_dataset(
         self,
-        records: Iterable[dict[str, Any]] | Path | str,
+        source_file: Path | str,
         metadata: DatasetMetadata | dict[str, Any],
     ) -> int:
-        """Import verified mapping records with provenance tracking.
+        """Import only the pinned upstream JSON file after byte and metadata checks.
         
         Args:
-            records: Iterable of dicts or path to JSON file.
-            metadata: Dataset provenance metadata.
+            source_file: Real local copy of the immutable upstream source file.
+            metadata: Provenance fields which must match the pinned source release.
             
         Returns:
-            Number of imported records.
+            Actual number of imported source mappings.
         """
+        if not isinstance(source_file, (Path, str)):
+            raise TypeError("Verified import requires a real source file path; use import_synthetic_records() for tests.")
         if isinstance(metadata, dict):
             meta = DatasetMetadata.model_validate(metadata)
         elif isinstance(metadata, DatasetMetadata):
@@ -521,60 +597,95 @@ class ItemNameIdDatabase:
         else:
             raise TypeError(f"Invalid metadata type: {type(metadata).__name__}")
 
-        if isinstance(records, (Path, str)):
-            p = Path(records)
-            if not p.is_file():
-                raise FileNotFoundError(f"Dataset file not found: {p}")
-            content_bytes = p.read_bytes()
-            computed_sha256 = hashlib.sha256(content_bytes).hexdigest()
-            if meta.sha256 and meta.sha256.lower() != computed_sha256.lower():
-                raise ValueError(
-                    f"SHA256 mismatch for {p}: expected {meta.sha256}, computed {computed_sha256}"
-                )
-            raw_records = json.loads(content_bytes.decode("utf-8"))
-            if isinstance(raw_records, dict) and "records" in raw_records:
-                raw_records = raw_records["records"]
-        else:
-            raw_records = list(records)
+        expected_metadata = {
+            "upstream_repo": VERIFIED_MAPPING_REPOSITORY,
+            "revision": VERIFIED_MAPPING_REVISION,
+            "source_path": VERIFIED_MAPPING_SOURCE_PATH,
+            "license": VERIFIED_MAPPING_LICENSE,
+        }
+        for field, expected in expected_metadata.items():
+            if getattr(meta, field) != expected:
+                raise ValueError(f"Unverified dataset {field}: expected {expected!r}.")
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", meta.sha256 or ""):
+            raise ValueError("Verified dataset SHA-256 must contain exactly 64 hexadecimal characters.")
+        if meta.sha256.lower() != VERIFIED_MAPPING_SHA256:
+            raise ValueError("Dataset SHA-256 does not match the pinned upstream source digest.")
+        try:
+            retrieved_at = datetime.fromisoformat(meta.retrieval_timestamp.replace("Z", "+00:00"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Verified dataset retrieval_timestamp must be an ISO-8601 timestamp.") from exc
+        if retrieved_at.tzinfo is None:
+            raise ValueError("Verified dataset retrieval_timestamp must include a timezone.")
+
+        p = Path(source_file)
+        if not p.is_file():
+            raise FileNotFoundError(f"Dataset source file not found: {p}")
+        content_bytes = p.read_bytes()
+        computed_sha256 = hashlib.sha256(content_bytes).hexdigest()
+        if computed_sha256 != VERIFIED_MAPPING_SHA256 or computed_sha256 != meta.sha256.lower():
+            raise ValueError(
+                f"SHA-256 mismatch for {p}: expected pinned {VERIFIED_MAPPING_SHA256}, computed {computed_sha256}"
+            )
+        try:
+            raw_mapping = json.loads(content_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("Upstream dataset must be valid UTF-8 JSON.") from exc
+        raw_records = adapt_upstream_item_names(raw_mapping)
+        imported_count = len(raw_records)
+        if imported_count != VERIFIED_MAPPING_RECORD_COUNT or meta.record_count != imported_count:
+            raise ValueError(
+                f"Dataset record-count mismatch: metadata={meta.record_count}, actual={imported_count}, "
+                f"pinned={VERIFIED_MAPPING_RECORD_COUNT}."
+            )
 
         now_iso = datetime.now(timezone.utc).isoformat()
-        imported_count = 0
-
-        with self._lock:
+        with self._lock, self._conn:
             cur = self._conn.cursor()
             for rec in raw_records:
-                name = rec.get("market_hash_name")
-                nameid = rec.get("item_nameid")
-                classid = rec.get("classid")
-
-                if not name or not isinstance(name, str):
-                    raise ValueError(f"Record missing valid market_hash_name: {rec}")
-                if nameid is None or not isinstance(nameid, int) or nameid <= 0:
-                    raise ValueError(f"Record has invalid item_nameid: {rec}")
-
-                source = rec.get("source", meta.upstream_repo)
                 cur.execute("""
-                    INSERT OR REPLACE INTO item_mappings 
-                    (market_hash_name, item_nameid, classid, source, updated_at)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (name, nameid, str(classid) if classid else None, source, now_iso))
-                imported_count += 1
+                    INSERT OR REPLACE INTO item_mappings
+                    (market_hash_name, item_nameid, item_nameid_source, item_nameid_revision,
+                     classid, classid_source, classid_revision, source, updated_at)
+                    VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?)
+                """, (
+                    rec["market_hash_name"], rec["item_nameid"], meta.upstream_repo,
+                    meta.revision, meta.upstream_repo, now_iso,
+                ))
 
             cur.execute("""
                 INSERT INTO dataset_metadata
-                (upstream_repo, revision, retrieval_date, sha256, record_count, imported_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (upstream_repo, revision, retrieval_date, sha256, record_count, imported_at, source_path, license)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                meta.upstream_repo,
-                meta.revision,
-                meta.retrieval_date,
-                meta.sha256,
-                imported_count,
-                now_iso,
+                meta.upstream_repo, meta.revision, meta.retrieval_timestamp, computed_sha256,
+                imported_count, now_iso, meta.source_path, meta.license,
             ))
-            self._conn.commit()
 
         return imported_count
+
+    def import_synthetic_records(self, records: Iterable[dict[str, Any]]) -> int:
+        """Import explicitly synthetic records for tests; never writes verified metadata."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        normalized: list[tuple[str, int, str | None]] = []
+        for rec in records:
+            name = rec.get("market_hash_name")
+            nameid = rec.get("item_nameid")
+            classid = rec.get("classid")
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("Synthetic record requires a nonblank market_hash_name.")
+            if type(nameid) is not int or nameid <= 0:
+                raise ValueError("Synthetic record item_nameid must be a positive integer.")
+            normalized.append((name, nameid, str(classid) if classid is not None else None))
+
+        with self._lock, self._conn:
+            for name, nameid, classid in normalized:
+                self._conn.execute("""
+                    INSERT OR REPLACE INTO item_mappings
+                    (market_hash_name, item_nameid, item_nameid_source, item_nameid_revision,
+                     classid, classid_source, classid_revision, source, updated_at)
+                    VALUES (?, ?, 'SYNTHETIC_TEST_DATA', NULL, ?, ?, NULL, 'SYNTHETIC_TEST_DATA', ?)
+                """, (name, nameid, classid, "SYNTHETIC_TEST_DATA" if classid else None, now_iso))
+        return len(normalized)
 
     def lookup_item_nameid(self, market_hash_name: str) -> tuple[int | None, str | None]:
         """Look up item_nameid and classid by market_hash_name.
@@ -585,22 +696,41 @@ class ItemNameIdDatabase:
         if not market_hash_name:
             return None, None
 
+        provenance = self.lookup_item_provenance(market_hash_name)
+        if provenance is None or provenance["item_nameid_source"] == "legacy_unverified":
+            return None, None
+        return int(provenance["item_nameid"]), provenance["classid"]
+
+    def lookup_item_provenance(self, market_hash_name: str) -> dict[str, Any] | None:
+        """Return separate source/revision metadata for item_nameid and classid."""
+        if not market_hash_name:
+            return None
         with self._lock:
             cur = self._conn.cursor()
             cur.execute("""
-                SELECT item_nameid, classid FROM item_mappings WHERE market_hash_name = ?
+                SELECT item_nameid, item_nameid_source, item_nameid_revision,
+                       classid, classid_source, classid_revision
+                FROM item_mappings WHERE market_hash_name = ?
             """, (market_hash_name,))
             row = cur.fetchone()
-            if row is not None:
-                return int(row["item_nameid"]), row["classid"]
-            return None, None
+            if row is None:
+                return None
+            return {
+                "item_nameid": int(row["item_nameid"]),
+                "item_nameid_source": row["item_nameid_source"],
+                "item_nameid_revision": row["item_nameid_revision"],
+                "classid": row["classid"],
+                "classid_source": row["classid_source"],
+                "classid_revision": row["classid_revision"],
+            }
 
     def get_metadata(self) -> list[DatasetMetadata]:
         """Return list of imported dataset provenance records."""
         with self._lock:
             cur = self._conn.cursor()
             cur.execute("""
-                SELECT upstream_repo, revision, retrieval_date, sha256, record_count, imported_at
+                SELECT upstream_repo, revision, retrieval_date, source_path, license,
+                       sha256, record_count, imported_at
                 FROM dataset_metadata ORDER BY id ASC
             """)
             rows = cur.fetchall()
@@ -608,7 +738,9 @@ class ItemNameIdDatabase:
                 DatasetMetadata(
                     upstream_repo=r["upstream_repo"],
                     revision=r["revision"],
-                    retrieval_date=r["retrieval_date"],
+                    retrieval_timestamp=r["retrieval_date"],
+                    source_path=r["source_path"],
+                    license=r["license"],
                     sha256=r["sha256"],
                     record_count=int(r["record_count"]),
                     imported_at=r["imported_at"],
@@ -634,7 +766,7 @@ class ItemNameIdDatabase:
 
 def resolve_item_identity(
     url: str,
-    ssr_data: SsrListingLoaderData | dict[str, Any] | None = None,
+    ssr_data: SsrListingContext | SsrListingLoaderData | dict[str, Any] | None = None,
     db: ItemNameIdDatabase | None = None,
 ) -> ItemIdentityResult:
     """Resolve item identity across URL, SSR hydration data, and offline mapping database.
@@ -647,22 +779,55 @@ def resolve_item_identity(
     """
     result = parse_steam_market_url(url)
 
-    # 1. SSR bucket resolution for grouped listings
+    # 1. SSR bucket resolution/enrichment. Validate every supplied loader before
+    # reading any bucket, including canonical enrichment and selected-bucket paths.
     if ssr_data is not None:
+        context: SsrListingContext | None = None
+        if isinstance(ssr_data, SsrListingContext):
+            context = ssr_data
+            loader = context.loader_data
+        elif isinstance(ssr_data, dict) and {"source_url", "loader_data"}.issubset(ssr_data):
+            context = SsrListingContext.model_validate(ssr_data)
+            loader = context.loader_data
+        elif isinstance(ssr_data, dict):
+            loader = SsrListingLoaderData.model_validate(ssr_data)
+        elif isinstance(ssr_data, SsrListingLoaderData):
+            loader = ssr_data
+        else:
+            raise TypeError(f"Invalid ssr_data type: {type(ssr_data).__name__}")
+
+        if loader.success is not True:
+            raise SsrBucketResolutionError("SSR loader data is unsuccessful; refusing SSR identity use.")
+        if loader.appid != 730:
+            raise SsrBucketResolutionError(f"SSR loader appid {loader.appid} does not match CS2 appid 730.")
+
         if result.url_type == UrlType.GROUPED:
-            if isinstance(ssr_data, dict):
-                loader = SsrListingLoaderData.model_validate(ssr_data)
-            else:
-                loader = ssr_data
+            if context is None:
+                raise SsrBucketResolutionError(
+                    "Grouped SSR data requires a source_url context tied to the requested group URL."
+                )
+            try:
+                source_identity = parse_steam_market_url(context.source_url)
+            except (IdentityResolutionError, ValueError) as exc:
+                raise SsrBucketResolutionError("SSR source_url context is invalid.") from exc
+            if source_identity.url_type != UrlType.GROUPED or source_identity.group_id != result.group_id:
+                raise SsrBucketResolutionError(
+                    f"SSR source group {source_identity.group_id!r} does not match requested group {result.group_id!r}."
+                )
 
             if result.exterior is not None:
                 bucket = resolve_grouped_ssr_bucket(loader, result.exterior)
             elif loader.initialSelectedBucketID:
-                bucket = next((b for b in loader.buckets if b.bucket_id == loader.initialSelectedBucketID), None)
-                if bucket is None:
+                selected = [b for b in loader.buckets if b.bucket_id == loader.initialSelectedBucketID]
+                if not selected:
                     raise SsrBucketResolutionError(
                         f"initialSelectedBucketID '{loader.initialSelectedBucketID}' not found in SSR buckets."
                     )
+                if len(selected) != 1:
+                    raise SsrBucketResolutionError(
+                        f"initialSelectedBucketID '{loader.initialSelectedBucketID}' is ambiguous ({len(selected)} buckets)."
+                    )
+                bucket = selected[0]
             else:
                 raise SsrBucketResolutionError(
                     "Cannot resolve grouped listing without exterior filter or initialSelectedBucketID."
@@ -675,26 +840,33 @@ def resolve_item_identity(
             result.is_stattrak = is_st
             result.is_souvenir = is_souv
             result.classid = bucket.classid
+            result.classid_source = "steam_ssr_bucket"
             result.resolution_status = ResolutionStatus.CANONICAL_RESOLVED
             result.resolution_source = ResolutionSource.SSR_BUCKET
         elif result.url_type == UrlType.CANONICAL:
             # Optionally enrich classid from SSR buckets if matching
-            if isinstance(ssr_data, dict):
-                loader = SsrListingLoaderData.model_validate(ssr_data)
-            else:
-                loader = ssr_data
-            for b in loader.buckets:
-                if b.bucket_id == result.market_hash_name and b.classid:
-                    result.classid = b.classid
-                    break
+            if context is not None:
+                source_identity = parse_steam_market_url(context.source_url)
+                if source_identity.url_type != UrlType.CANONICAL or source_identity.market_hash_name != result.market_hash_name:
+                    raise SsrBucketResolutionError("SSR source_url does not match the canonical item being enriched.")
+            matches = [b for b in loader.buckets if b.bucket_id == result.market_hash_name and b.classid]
+            if len(matches) > 1:
+                raise SsrBucketResolutionError("Canonical SSR enrichment has duplicate matching buckets.")
+            if matches:
+                result.classid = matches[0].classid
+                result.classid_source = "steam_ssr_bucket"
 
     # 2. Offline item_nameid resolution
     if db is not None and result.market_hash_name:
-        nameid, db_classid = db.lookup_item_nameid(result.market_hash_name)
-        if nameid is not None:
-            result.item_nameid = nameid
-            if not result.classid and db_classid:
-                result.classid = db_classid
+        provenance = db.lookup_item_provenance(result.market_hash_name)
+        if provenance is not None and provenance["item_nameid_source"] != "legacy_unverified":
+            result.item_nameid = int(provenance["item_nameid"])
+            result.item_nameid_source = provenance["item_nameid_source"]
+            result.item_nameid_revision = provenance["item_nameid_revision"]
+            if not result.classid and provenance["classid"]:
+                result.classid = provenance["classid"]
+                result.classid_source = provenance["classid_source"]
+                result.classid_revision = provenance["classid_revision"]
             result.resolution_status = ResolutionStatus.ITEM_NAMEID_RESOLVED
             if result.resolution_source == ResolutionSource.SSR_BUCKET:
                 result.resolution_source = ResolutionSource.COMBINED

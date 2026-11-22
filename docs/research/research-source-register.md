@@ -96,3 +96,17 @@ This register tracks official primary sources, API endpoints, protocol structure
 * **Project Relevance:** Supports currency/precision metadata and the Tunisia USD_MENA context. It does not prove a universal market listing minimum.
 * **Recommended Action:** Keep metadata verification separate from market listing-rule verification; represent unknown listing rules explicitly.
 * **Changes Project Requirements:** No.
+
+---
+
+### 6. Upstream CS2 `item_nameid` Mapping Dataset
+* **Repository:** https://github.com/somespecialone/steam-market-ids
+* **Immutable revision:** `caac34bd8a28578e800501da5cc9f16c7cb3fa67`
+* **Source file:** [data/CS2/item_names.json](https://github.com/somespecialone/steam-market-ids/blob/caac34bd8a28578e800501da5cc9f16c7cb3fa67/data/CS2/item_names.json)
+* **License file:** [WTFPL v2 LICENSE](https://github.com/somespecialone/steam-market-ids/blob/caac34bd8a28578e800501da5cc9f16c7cb3fa67/LICENSE); retrieved content identifies “DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE, Version 2, December 2004.” Prior MIT attribution was incorrect.
+* **Retrieved at (UTC):** Dataset `2026-11-22T22:13:43.352247Z`; license `2026-11-22T22:11:33Z`.
+* **Dataset response:** HTTP 200, ETag `"e7dda9cb66d8c8b8591c35bcf8c8ef385934527eda62d2c5f8be554d7fcc9460"`, Content-Length `1491818`, body size `1,491,818` bytes.
+* **SHA-256:** `9f34cee0a6f5479017d227568e1c8132c8b3c4f82b2d87123a80951e5adb3212`.
+* **Format and coverage:** JSON object `market_hash_name -> item_nameid`; 26,935 positive-integer entries in this pinned snapshot. This is partial coverage of the changing Steam Market namespace; absent mappings remain unresolved. The source has no `classid` field.
+* **Spot checks:** Redline FT `7178002`, MW `7179644`, WW `7181849`, BS `7179463`; Factory New absent; StatTrak™ FT `7180207` is a distinct key/value.
+* **Confidence Classification:** Source-byte verified against the immutable commit and pinned digest. SSR `classid` is tracked separately from upstream `item_nameid` provenance.

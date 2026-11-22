@@ -54,10 +54,11 @@
   - Complete automated test suite (`tests/test_storage.py`, `tests/test_client.py`, `tests/test_worker.py`).
 * **Reuse Scope:** Provides the ideal structural skeleton for our Windows 11 local-first dashboard. Its separation between API client, storage layer, and UI state matches our project requirements.
 
-### 2.3 somespecialone/steam-item-name-ids & cs2-items-schema (Data Assets)
-* **The Problem:** Querying Steam's order-book histogram endpoint (`/market/itemordershistogram`) requires an internal numeric `item_nameid` (e.g. `176000000`). There is no official lookup route.
-* **The Solution:** `somespecialone/steam-item-name-ids` contains pre-compiled, community-verified mappings of exact CS2 market hash names to their corresponding `item_nameid`.
-* **License:** WTFPL (Do What The Fuck You Want To Public License) and MIT. Safe for direct inclusion in our local SQLite database.
+### 2.3 somespecialone/steam-market-ids (Pinned Data Asset)
+* **The Problem:** Querying Steam's order-book histogram endpoint (`/market/itemordershistogram`) requires an internal numeric `item_nameid`; there is no official lookup route.
+* **Source:** `data/CS2/item_names.json`, immutable revision `caac34bd8a28578e800501da5cc9f16c7cb3fa67`, maps exact `market_hash_name` keys to positive integer IDs. It does not supply `classid`.
+* **License:** WTFPL 2.0, verified against that revision's `LICENSE` file. This mapping snapshot is partial coverage; absent entries remain unresolved.
+* **Integrity:** The vendored bytes and SHA-256 are recorded in `docs/research/research-source-register.md`; never import arbitrary in-memory records as verified data.
 
 ---
 

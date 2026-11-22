@@ -35,6 +35,8 @@ class TestFixtures(unittest.TestCase):
             self.assertIn("currency", metadata)
 
     def test_all_fixtures_parse_successfully(self):
+        manifest = json.loads((FIXTURES_DIR / "manifest.json").read_text(encoding="utf-8"))
+
         # 1. Orderbook Histogram
         with open(FIXTURES_DIR / "orderbook_histogram.json", "r", encoding="utf-8") as f:
             data = json.load(f, parse_float=Decimal)
@@ -67,11 +69,11 @@ class TestFixtures(unittest.TestCase):
 
         # 6. Seed Market IDs
         with open(FIXTURES_DIR / "seed_market_ids.json", "r", encoding="utf-8") as f:
-            records = json.load(f)
-            self.assertIsInstance(records, list)
-            self.assertGreater(len(records), 0)
-            self.assertIn("market_hash_name", records[0])
-            self.assertIn("item_nameid", records[0])
+            mapping = json.load(f)
+            self.assertIsInstance(mapping, dict)
+            self.assertGreater(len(mapping), 0)
+            self.assertTrue(all(type(value) is int and value > 0 for value in mapping.values()))
+            self.assertEqual(manifest["fixtures"]["seed_market_ids.json"]["classification"], "SYNTHETIC_TEST_VECTOR")
 
 
 if __name__ == "__main__":

@@ -141,9 +141,7 @@ When a user or client issues an HTTP `GET` request to a market listing URL, Stea
 * **HTTP Method:** `GET`
 * **URL Structure:**
   `https://steamcommunity.com/market/itemordershistogram?country=US&language=english&currency=1&item_nameid={item_nameid}&two_factor=0`
-* **Crucial Dependency (`item_nameid`):** This endpoint requires an internal numeric item ID (e.g., `176000000`). It does NOT accept `market_hash_name`. The application must resolve `item_nameid` using:
-  1. Offline static mapping database (`somespecialone/steam-item-name-ids`).
-  2. Fallback regex extraction from the listing page HTML (`Market_LoadOrderSpread(\s*(\d+)\s*)`).
+* **Crucial Dependency (`item_nameid`):** This endpoint requires an internal numeric item ID and does NOT accept `market_hash_name`. The packaged offline mapping is the JSON object from `somespecialone/steam-market-ids`, pinned in M2.1 to revision `caac34bd8a28578e800501da5cc9f16c7cb3fa67` and verified by SHA-256. Missing mappings stay unresolved (`None`); do not invent or derive IDs.
 * **Verified Response Payload Shape:**
   ```json
   {

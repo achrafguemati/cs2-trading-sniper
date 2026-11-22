@@ -1,0 +1,10 @@
+{
+  "upstream_repo": "https://github.com/somespecialone/steam-market-ids",
+  "revision": "caac34bd8a28578e800501da5cc9f16c7cb3fa67",
+  "source_path": "data/CS2/item_names.json",
+  "retrieval_timestamp": "2026-11-22T22:13:43.352247+00:00",
+  "license": "WTFPL",
+  "sha256": "9f34cee0a6f5479017d227568e1c8132c8b3c4f82b2d87123a80951e5adb3212",
+  "record_count": 26935,
+  "coverage": "PARTIAL_UPSTREAM_SNAPSHOT; mappings missing from this file remain unresolved"
+}

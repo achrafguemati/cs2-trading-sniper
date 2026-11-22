@@ -1,27 +1,7 @@
-[
-  {
-    "market_hash_name": "AK-47 | Redline (Field-Tested)",
-    "item_nameid": 176000000,
-    "classid": "7993038091"
-  },
-  {
-    "market_hash_name": "AK-47 | Redline (Minimal Wear)",
-    "item_nameid": 176000001,
-    "classid": "7993038090"
-  },
-  {
-    "market_hash_name": "AK-47 | Redline (Factory New)",
-    "item_nameid": 176000002,
-    "classid": "7993038089"
-  },
-  {
-    "market_hash_name": "AK-47 | Redline (Well-Worn)",
-    "item_nameid": 176000003,
-    "classid": "7993038092"
-  },
-  {
-    "market_hash_name": "AK-47 | Redline (Battle-Scarred)",
-    "item_nameid": 176000004,
-    "classid": "7993038093"
-  }
-]
+{
+  "ak-47 | test item (Field-Tested)": 9100001,
+  "AK-47 | Test Item (Field-Tested)": 9100002,
+  "StatTrak™ AK-47 | Test Item (Minimal Wear)": 9100003,
+  "Souvenir M4A4 | Test Item (Factory New)": 9100004,
+  "★ Karambit | Test Item (Well-Worn)": 9100005
+}

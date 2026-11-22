@@ -2,21 +2,21 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 import tempfile
 import unittest
+from urllib.parse import quote
 
 from sniper.core.identity import (
-    DatasetMetadata,
-    ItemIdentityResult,
     ItemNameIdDatabase,
     ResolutionSource,
     ResolutionStatus,
+    SsrListingContext,
     SsrBucketResolutionError,
     UrlType,
     WearCategory,
+    adapt_upstream_item_names,
     compose_market_hash_name,
     decompose_market_hash_name,
     parse_steam_market_url,
@@ -26,6 +26,13 @@ from sniper.core.identity import (
 from sniper.models.schemas import SsrBucketItem, SsrListingLoaderData
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+DATA_DIR = Path(__file__).parents[1] / "src" / "sniper" / "data"
+VERIFIED_SEED_PATH = DATA_DIR / "seed_market_ids.json"
+VERIFIED_METADATA_PATH = DATA_DIR / "seed_market_ids.metadata.json"
+
+
+def verified_seed_metadata():
+    return json.loads(VERIFIED_METADATA_PATH.read_text(encoding="utf-8"))
 
 
 class TestItemIdentityResolver(unittest.TestCase):
@@ -381,38 +388,83 @@ class TestItemIdentityResolver(unittest.TestCase):
         with self.assertRaises(ValueError):
             resolve_grouped_ssr_bucket(data, WearCategory.FACTORY_NEW)
 
+    def test_ssr_bucket_resolution_failure_wrong_appid(self):
+        data = {"success": True, "appid": 440, "buckets": []}
+        with self.assertRaises(ValueError):
+            resolve_grouped_ssr_bucket(data, WearCategory.FACTORY_NEW)
+
+    def test_top_level_grouped_ssr_rejects_unsuccessful_and_wrong_appid(self):
+        url = "https://steamcommunity.com/market/listings/730/G1807209A023004?category_Exterior=WearCategory2&appid=730"
+        base = json.loads((FIXTURES_DIR / "grouped_ssr_data.json").read_text(encoding="utf-8"))
+        for change in ({"success": False}, {"appid": 440}):
+            with self.subTest(change=change):
+                invalid_data = {**base, **change}
+                with self.assertRaises(SsrBucketResolutionError):
+                    resolve_item_identity(url, ssr_data={"source_url": url, "loader_data": invalid_data})
+
+    def test_top_level_grouped_ssr_requires_matching_verified_context(self):
+        requested = "https://steamcommunity.com/market/listings/730/G1807209A023004?category_Exterior=WearCategory2&appid=730"
+        mismatched = "https://steamcommunity.com/market/listings/730/G999999?category_Exterior=WearCategory2&appid=730"
+        loader = json.loads((FIXTURES_DIR / "grouped_ssr_data.json").read_text(encoding="utf-8"))
+
+        with self.assertRaises(SsrBucketResolutionError):
+            resolve_item_identity(requested, ssr_data=loader)
+        with self.assertRaises(SsrBucketResolutionError):
+            resolve_item_identity(requested, ssr_data={"source_url": mismatched, "loader_data": loader})
+
+        valid = resolve_item_identity(requested, ssr_data={"source_url": requested, "loader_data": loader})
+        self.assertEqual(valid.group_id, "G1807209A023004")
+        self.assertEqual(valid.market_hash_name, "AK-47 | Redline (Field-Tested)")
+        self.assertEqual(valid.classid_source, "steam_ssr_bucket")
+
+    def test_initial_selected_bucket_missing_or_duplicated_fails_closed(self):
+        url = "https://steamcommunity.com/market/listings/730/G1807209A023004?appid=730"
+        base = json.loads((FIXTURES_DIR / "grouped_ssr_data.json").read_text(encoding="utf-8"))
+        missing = {**base, "initialSelectedBucketID": "AK-47 | Missing (Field-Tested)"}
+        with self.assertRaises(SsrBucketResolutionError):
+            resolve_item_identity(url, ssr_data={"source_url": url, "loader_data": missing})
+
+        selected = next(bucket for bucket in base["buckets"] if bucket["bucket_id"] == base["initialSelectedBucketID"])
+        duplicate = {**base, "buckets": [*base["buckets"], dict(selected)]}
+        with self.assertRaises(SsrBucketResolutionError):
+            resolve_item_identity(url, ssr_data={"source_url": url, "loader_data": duplicate})
+
+    def test_canonical_ssr_enrichment_rejects_invalid_context(self):
+        url = "https://steamcommunity.com/market/listings/730/AK-47%20%7C%20Redline%20%28Field-Tested%29"
+        base = json.loads((FIXTURES_DIR / "grouped_ssr_data.json").read_text(encoding="utf-8"))
+        for change in ({"success": False}, {"appid": 440}):
+            with self.subTest(change=change), self.assertRaises(SsrBucketResolutionError):
+                resolve_item_identity(url, ssr_data={**base, **change})
+
+        resolved = resolve_item_identity(url, ssr_data=base)
+        self.assertEqual(resolved.classid, "7993038091")
+        self.assertEqual(resolved.classid_source, "steam_ssr_bucket")
+
     # -------------------------------------------------------------------------
     # 12. Offline SQLite Database Import & Item NameID Resolution
     # -------------------------------------------------------------------------
 
-    def test_offline_database_import_and_lookup(self):
+    def test_synthetic_import_and_lookup_is_never_verified(self):
         with ItemNameIdDatabase(":memory:") as db:
-            meta = DatasetMetadata(
-                upstream_repo="somespecialone/steam-market-ids",
-                revision="test-rev-123",
-                retrieval_date="2026-01-15T00:00:00Z",
-                sha256="fake-sha256-for-test",
-                record_count=2,
-            )
             records = [
                 {
                     "market_hash_name": "AK-47 | Redline (Field-Tested)",
-                    "item_nameid": 176000000,
+                    "item_nameid": 900000001,
                     "classid": "7993038091",
                 },
                 {
                     "market_hash_name": "AK-47 | Redline (Minimal Wear)",
-                    "item_nameid": 176000001,
+                    "item_nameid": 900000002,
                     "classid": "7993038090",
                 },
             ]
 
-            count = db.import_verified_dataset(records, meta)
+            count = db.import_synthetic_records(records)
             self.assertEqual(count, 2)
 
             # Lookup known item
             nameid, classid = db.lookup_item_nameid("AK-47 | Redline (Field-Tested)")
-            self.assertEqual(nameid, 176000000)
+            self.assertEqual(nameid, 900000001)
             self.assertEqual(classid, "7993038091")
 
             # Lookup unknown item
@@ -420,44 +472,104 @@ class TestItemIdentityResolver(unittest.TestCase):
             self.assertIsNone(unknown_nameid)
             self.assertIsNone(unknown_classid)
 
-            # Check provenance metadata
-            meta_list = db.get_metadata()
-            self.assertEqual(len(meta_list), 1)
-            self.assertEqual(meta_list[0].upstream_repo, "somespecialone/steam-market-ids")
-            self.assertEqual(meta_list[0].record_count, 2)
+            provenance = db.lookup_item_provenance("AK-47 | Redline (Field-Tested)")
+            self.assertEqual(provenance["item_nameid_source"], "SYNTHETIC_TEST_DATA")
+            self.assertEqual(provenance["classid_source"], "SYNTHETIC_TEST_DATA")
+            self.assertEqual(db.get_metadata(), [])
 
-    def test_offline_database_file_import_with_sha256(self):
-        seed_path = FIXTURES_DIR / "seed_market_ids.json"
-        content = seed_path.read_bytes()
-        actual_sha = hashlib.sha256(content).hexdigest()
-
+    def test_verified_upstream_dataset_import_ids_and_provenance(self):
         with ItemNameIdDatabase(":memory:") as db:
-            meta = DatasetMetadata(
-                upstream_repo="somespecialone/steam-market-ids",
-                revision="v1.0.0",
-                retrieval_date="2026-01-15T00:00:00Z",
-                sha256=actual_sha,
-                record_count=5,
+            count = db.import_verified_dataset(VERIFIED_SEED_PATH, verified_seed_metadata())
+            self.assertEqual(count, 26935)
+
+            expected = {
+                "AK-47 | Redline (Field-Tested)": 7178002,
+                "AK-47 | Redline (Minimal Wear)": 7179644,
+                "AK-47 | Redline (Well-Worn)": 7181849,
+                "AK-47 | Redline (Battle-Scarred)": 7179463,
+                "StatTrak™ AK-47 | Redline (Field-Tested)": 7180207,
+            }
+            for name, expected_id in expected.items():
+                nameid, classid = db.lookup_item_nameid(name)
+                self.assertEqual(nameid, expected_id, name)
+                self.assertIsNone(classid, "The item_names upstream does not provide classid.")
+                url = f"https://steamcommunity.com/market/listings/730/{quote(name, safe='')}"
+                resolved = resolve_item_identity(url, db=db)
+                self.assertEqual(resolved.item_nameid, expected_id, name)
+                self.assertEqual(resolved.item_nameid_source, "https://github.com/somespecialone/steam-market-ids")
+
+            missing_nameid, missing_classid = db.lookup_item_nameid("AK-47 | Redline (Factory New)")
+            self.assertIsNone(missing_nameid)
+            self.assertIsNone(missing_classid)
+            unresolved = resolve_item_identity(
+                "https://steamcommunity.com/market/listings/730/AK-47%20%7C%20Redline%20%28Factory%20New%29",
+                db=db,
             )
-            count = db.import_verified_dataset(seed_path, meta)
-            self.assertEqual(count, 5)
+            self.assertIsNone(unresolved.item_nameid)
 
-            nameid, classid = db.lookup_item_nameid("AK-47 | Redline (Field-Tested)")
-            self.assertEqual(nameid, 176000000)
-            self.assertEqual(classid, "7993038091")
+            provenance = db.lookup_item_provenance("AK-47 | Redline (Field-Tested)")
+            self.assertEqual(provenance["item_nameid_source"], "https://github.com/somespecialone/steam-market-ids")
+            self.assertEqual(provenance["item_nameid_revision"], "caac34bd8a28578e800501da5cc9f16c7cb3fa67")
+            self.assertIsNone(provenance["classid_source"])
+            self.assertIsNone(provenance["classid_revision"])
 
-    def test_offline_database_sha256_mismatch_fails_closed(self):
-        seed_path = FIXTURES_DIR / "seed_market_ids.json"
+            metadata = db.get_metadata()
+            self.assertEqual(len(metadata), 1)
+            self.assertEqual(metadata[0].record_count, count)
+            self.assertEqual(metadata[0].source_path, "data/CS2/item_names.json")
+            self.assertEqual(metadata[0].license, "WTFPL")
+            self.assertEqual(metadata[0].retrieval_timestamp, verified_seed_metadata()["retrieval_timestamp"])
+
+    def test_upstream_object_adapter_preserves_exact_keys_without_classid(self):
+        mapping = json.loads((FIXTURES_DIR / "seed_market_ids.json").read_text(encoding="utf-8"))
+        records = adapt_upstream_item_names(mapping)
+        self.assertEqual([record["market_hash_name"] for record in records], list(mapping))
+        self.assertEqual(records[0]["market_hash_name"], "ak-47 | test item (Field-Tested)")
+        self.assertEqual(records[2]["market_hash_name"], "StatTrak™ AK-47 | Test Item (Minimal Wear)")
+        self.assertEqual(records[4]["market_hash_name"], "★ Karambit | Test Item (Well-Worn)")
+        self.assertTrue(all("classid" not in record for record in records))
+
+    def test_upstream_adapter_rejects_invalid_ids_and_non_object_payloads(self):
+        for invalid_id in (None, 0, -1, True, 1.5, "123"):
+            with self.subTest(invalid_id=invalid_id):
+                with self.assertRaises(ValueError):
+                    adapt_upstream_item_names({"AK-47 | Test": invalid_id})
+        with self.assertRaises(ValueError):
+            adapt_upstream_item_names([{"market_hash_name": "AK-47 | Test", "item_nameid": 1}])
+
+    def test_verified_import_rejects_synthetic_in_memory_records(self):
         with ItemNameIdDatabase(":memory:") as db:
-            meta = DatasetMetadata(
-                upstream_repo="somespecialone/steam-market-ids",
-                revision="v1.0.0",
-                retrieval_date="2026-01-15T00:00:00Z",
-                sha256="wrong-sha256-hash",
-                record_count=5,
-            )
-            with self.assertRaises(ValueError):
-                db.import_verified_dataset(seed_path, meta)
+            with self.assertRaises(TypeError):
+                db.import_verified_dataset(
+                    [{"market_hash_name": "AK-47 | Test", "item_nameid": 123}],
+                    verified_seed_metadata(),
+                )
+
+    def test_verified_import_rejects_fake_metadata_and_count_mismatches(self):
+        valid = verified_seed_metadata()
+        invalid_updates = (
+            {"sha256": ""},
+            {"sha256": "a" * 64},
+            {"revision": "main"},
+            {"source_path": "data/other.json"},
+            {"license": "MIT"},
+            {"record_count": valid["record_count"] - 1},
+            {"retrieval_timestamp": "2026-11-22"},
+        )
+        for update in invalid_updates:
+            with self.subTest(update=update), ItemNameIdDatabase(":memory:") as db:
+                invalid = {**valid, **update}
+                with self.assertRaises(ValueError):
+                    db.import_verified_dataset(VERIFIED_SEED_PATH, invalid)
+
+    def test_verified_import_rejects_file_byte_hash_mismatch(self):
+        valid = verified_seed_metadata()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tampered_path = Path(tmpdir) / "item_names.json"
+            tampered_path.write_bytes(VERIFIED_SEED_PATH.read_bytes() + b" ")
+            with ItemNameIdDatabase(":memory:") as db:
+                with self.assertRaises(ValueError):
+                    db.import_verified_dataset(tampered_path, valid)
 
     # -------------------------------------------------------------------------
     # 13. Top-Level End-to-End Identity Resolution
@@ -465,15 +577,8 @@ class TestItemIdentityResolver(unittest.TestCase):
 
     def test_top_level_resolution_canonical_with_db(self):
         with ItemNameIdDatabase(":memory:") as db:
-            db.import_verified_dataset(
+            db.import_synthetic_records(
                 [{"market_hash_name": "AK-47 | Redline (Field-Tested)", "item_nameid": 176000000, "classid": "7993038091"}],
-                DatasetMetadata(
-                    upstream_repo="somespecialone/steam-market-ids",
-                    revision="rev",
-                    retrieval_date="2026-01-15",
-                    sha256="sha",
-                    record_count=1,
-                ),
             )
 
             url = "https://steamcommunity.com/market/listings/730/AK-47%20%7C%20Redline%20%28Field-Tested%29"
@@ -489,19 +594,13 @@ class TestItemIdentityResolver(unittest.TestCase):
             ssr_data = json.load(f)
 
         with ItemNameIdDatabase(":memory:") as db:
-            db.import_verified_dataset(
+            db.import_synthetic_records(
                 [{"market_hash_name": "AK-47 | Redline (Field-Tested)", "item_nameid": 176000000, "classid": "7993038091"}],
-                DatasetMetadata(
-                    upstream_repo="somespecialone/steam-market-ids",
-                    revision="rev",
-                    retrieval_date="2026-01-15",
-                    sha256="sha",
-                    record_count=1,
-                ),
             )
 
             grouped_url = "https://steamcommunity.com/market/listings/730/G1807209A023004?category_Exterior=WearCategory2&appid=730"
-            res = resolve_item_identity(grouped_url, ssr_data=ssr_data, db=db)
+            context = SsrListingContext(source_url=grouped_url, loader_data=ssr_data)
+            res = resolve_item_identity(grouped_url, ssr_data=context, db=db)
 
             self.assertEqual(res.resolution_status, ResolutionStatus.ITEM_NAMEID_RESOLVED)
             self.assertEqual(res.resolution_source, ResolutionSource.COMBINED)
@@ -511,6 +610,8 @@ class TestItemIdentityResolver(unittest.TestCase):
             self.assertEqual(res.exterior, WearCategory.FIELD_TESTED)
             self.assertEqual(res.item_nameid, 176000000)
             self.assertEqual(res.classid, "7993038091")
+            self.assertEqual(res.classid_source, "steam_ssr_bucket")
+            self.assertEqual(res.item_nameid_source, "SYNTHETIC_TEST_DATA")
 
     def test_unknown_item_nameid_returns_none_with_canonical_resolved(self):
         with ItemNameIdDatabase(":memory:") as db:

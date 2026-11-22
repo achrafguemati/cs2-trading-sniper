@@ -38,7 +38,7 @@ The engine accepts two input formats from the user:
    - `is_stattrak`: False
    - `is_souvenir`: False
    - `market_hash_name`: "AK-47 | Redline (Field-Tested)"
-   - `item_nameid`: e.g., 176000000
+   - `item_nameid`: e.g., `7178002` for source-mapped `AK-47 | Redline (Field-Tested)` at the pinned M2.1 upstream revision; otherwise unresolved (`None`).
 
 ---
 

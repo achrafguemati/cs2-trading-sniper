@@ -25,9 +25,9 @@ See the complete rules in [AGENTS.md](AGENTS.md).
 
 ---
 
-## Current Status: Milestone 1 Complete (CI Verified across Windows and Ubuntu)
+## Current Status: M2.1 Identity Data Integrity & SSR Resolution
 
-- **Milestone 1 / 1.1 / 1.2 / 1.2.1 / 1.2.2 / 1.2.3 (Complete & CI Verified):**
+- **Milestone 1 / 1.1 / 1.2 / 1.2.1 / 1.2.2 / 1.2.3 (Previously completed):**
   - Read-only asynchronous HTTP client (`ReadOnlyHttpClient`) with strict request-level serialization (`asyncio.Lock`), preventing concurrent execution overlap.
   - Transparent, non-spoofed application identification (`CS2TradingSniper/0.1.0`) with minimal standard headers (zero fabricated `Sec-Fetch-*` headers).
   - Strict production URL allowlist: HTTPS only, `steamcommunity.com` only, exact path matching for `/market/itemordershistogram`, boundary validation for `/market/listings/730/` and `/inventory/`, userinfo and non-default port rejection. Mock routes injected only through test configuration.
@@ -41,10 +41,13 @@ See the complete rules in [AGENTS.md](AGENTS.md).
   - Integer fee model (`calculate_buyer_pays`, `calculate_seller_receives`, `calculate_exact_breakeven_buyer_pays`) with step-jump gap handling ($R=99 \rightarrow 112, R=100 \rightarrow 115$) using exact arithmetic under the project's modeled formula. Valve's exact rounding implementation remains UNKNOWN (`calculate_exact_breakeven_buyer_pays` is exact relative to the project's model, not proof of Valve's live implementation).
   - Strict minor-unit currency model (`CurrencyConfig`) with hardened grammar and trailing zero exactness (accepts `Decimal("22.500") -> 2250`, continues rejecting `22.501`, `22.505`, `22.50001`).
   - Strict orderbook graph validation: strictly positive orderbook prices, non-negative integer quantities without silent fractional truncation.
-  - Automated CI Verification: GitHub Actions workflow executes the 76-test deterministic suite across Windows (`windows-latest`, Python 3.12 & 3.13) and Ubuntu (`ubuntu-latest`, Python 3.12 & 3.13) with 100% green runs.
   - Research skills (`.agents/skills/`) and intelligence registers (`docs/research/`).
-- **Milestones 2–9 (Planned):**
-  - Item identity resolver, SQLite storage, detection algorithms, and dashboard remain deferred pending subsequent milestone approvals.
+- **M2.1 (Identity source integrity & SSR fail-closed resolution):**
+  - The packaged `item_nameid` mapping is pinned to upstream commit `caac34bd8a28578e800501da5cc9f16c7cb3fa67`, WTFPL 2.0, source SHA-256 `9f34cee0a6f5479017d227568e1c8132c8b3c4f82b2d87123a80951e5adb3212`, with 26,935 entries in a partial upstream snapshot.
+  - Upstream `item_nameid` provenance and SSR-derived `classid` provenance are stored separately. The upstream file contains no `classid` values.
+  - Unknown names remain unresolved (`None`); no ID is inferred from a neighboring wear variant.
+  - Verified imports require the actual pinned source bytes and matching revision, path, timestamp, license, SHA-256, and imported record count. Synthetic imports have a separate API and are never written as verified dataset provenance.
+  - Grouped SSR resolution requires a source URL context matching the requested `G...` group and validates loader success/appid before any resolution. M2.2 and M3 work remains out of scope here.
 
 ---
 
@@ -54,7 +57,7 @@ See the complete rules in [AGENTS.md](AGENTS.md).
 # 1. Install package in editable mode with dependencies
 pip install -e .
 
-# 2. Run comprehensive unit test suite (76 tests verified green across Windows and Ubuntu CI)
+# 2. Run comprehensive offline unit test suite
 python -m unittest discover -s tests -p "test_*.py" -v
 
 # 3. Run single-request read-only connectivity smoke test
@@ -99,4 +102,4 @@ All technical specifications, empirical research, and architectural blueprints a
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+Project code is licensed under MIT. The vendored `src/sniper/data/seed_market_ids.json` mapping data is separately licensed under upstream WTFPL 2.0 at the pinned repository revision documented in [`research-source-register.md`](docs/research/research-source-register.md).
