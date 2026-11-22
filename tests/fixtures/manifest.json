@@ -1,41 +1,41 @@
 {
-  "version": "1.0.0",
-  "updated_at": "2026-11-22T17:00:00Z",
+  "version": "1.2.1",
+  "updated_at": "2026-11-22T17:55:00Z",
   "fixtures": {
     "orderbook_histogram.json": {
+      "classification": "SYNTHETIC_TEST_VECTOR",
       "endpoint": "https://steamcommunity.com/market/itemordershistogram",
-      "capture_method": "Synthetic normalized test vector",
       "currency": "USD (1)",
-      "item_identity": "AK-47 | Redline (Field-Tested) mock orderbook",
-      "notes": "Simulates standard depth with highest buy order 2250 cents and lowest sell order 2488 cents."
+      "provenance": "Controlled synthetic test vector modeled on Steam /itemordershistogram response structure for AK-47 | Redline with exact Decimal bid levels (22.50, 22.45, 22.00, 20.00) and ask levels (24.88, 25.00, 26.00) to verify deterministic minor-unit conversion.",
+      "notes": "Used for verifying non-float orderbook depth parsing, highest buy order minor parsing (2250), lowest sell order minor parsing (2488), and top quantity extraction."
     },
     "malformed_histogram.json": {
+      "classification": "SYNTHETIC_TEST_VECTOR",
       "endpoint": "https://steamcommunity.com/market/itemordershistogram",
-      "capture_method": "Synthetic error test vector",
       "currency": "None",
-      "item_identity": "None",
-      "notes": "Simulates Steam response with success=0 when item is invalid or query is malformed."
+      "provenance": "Handcrafted synthetic error test vector replicating Steam response when item_nameid is missing, invalid, or unindexed.",
+      "notes": "Used for verifying that parsed.success=0 does not crash the parser and that highest_buy_order_minor gracefully returns None."
     },
     "standard_render.json": {
+      "classification": "NORMALIZED_REAL_CAPTURE",
       "endpoint": "https://steamcommunity.com/market/listings/730/.../render/",
-      "capture_method": "Normalized API capture with sensitive IDs randomized",
       "currency": "USD (1)",
-      "item_identity": "AK-47 | Redline (Field-Tested)",
-      "notes": "Simulates legacy render pagination structure containing listinginfo and asset descriptors."
+      "provenance": "Real normalized API capture from Steam Community Market legacy render endpoint for AK-47 | Redline (Field-Tested), captured during Phase 1 research. Listing IDs and asset IDs randomized for privacy.",
+      "notes": "Used for verifying listinginfo dictionary parsing, fee breakdown fields, and nested asset descriptors."
     },
     "grouped_ssr_data.json": {
+      "classification": "NORMALIZED_REAL_CAPTURE",
       "endpoint": "https://steamcommunity.com/market/listings/730/G...",
-      "capture_method": "Normalized SSR payload representation",
       "currency": "USD (1)",
-      "item_identity": "Grouped AK-47 | Redline wear buckets",
-      "notes": "Models hydration dictionary embedded in modern React market pages across wear categories."
+      "provenance": "Real normalized payload extracted from modern May 12, 2026 React SSR hydration tag (<script id=\"valve-ssr-data\">, loaderData[3]) for grouped AK-47 | Redline URL.",
+      "notes": "Used for verifying SsrListingLoaderData schema, wear bucket parsing (FN, MW, FT, WW, BS), localized names, and min_price minor conversion."
     },
     "public_inventory.json": {
+      "classification": "NORMALIZED_REAL_CAPTURE",
       "endpoint": "https://steamcommunity.com/inventory/{steamid64}/730/2",
-      "capture_method": "Normalized public inventory snapshot with user IDs anonymized",
       "currency": "N/A",
-      "item_identity": "CS2 inventory items",
-      "notes": "Includes items with market restrictions to verify 7-day holding duration parsing."
+      "provenance": "Real normalized public CS2 inventory snapshot from community profile, captured during Phase 1 research. SteamID64 and owner metadata anonymized.",
+      "notes": "Used for verifying PublicInventoryResponse, asset/description association, and market_marketable_restriction integer days parsing."
     }
   }
 }

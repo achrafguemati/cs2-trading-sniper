@@ -1,7 +1,8 @@
-"""Explicit currency model and minor-unit financial formatting without floating-point math."""
+"""Explicit currency model and minor-unit financial formatting with exact Decimal precision."""
 
 from __future__ import annotations
 
+from decimal import Decimal
 import re
 from dataclasses import dataclass
 from typing import ClassVar
@@ -15,11 +16,11 @@ class CurrencyConfig:
     Minor unit precision indicates decimal places (e.g. 2 for USD/EUR, 0 for JPY).
     All conversions and calculations operate strictly without floating-point arithmetic.
     
-    Separates:
-    - Fee component minimums (min_fee_steam_minor, min_fee_publisher_minor)
-    - Market listing minimums (min_listing_price_minor)
-    - Price increment steps (price_step_minor)
-    - Verification status (is_verified)
+    Separates independent verification flags:
+    - is_metadata_verified: Currency ID, code, symbol, and minor unit precision verified.
+    - is_fee_verified: Steam 5% and publisher fee percentage rules verified.
+    - is_listing_min_verified: Steam Community Market listing minimum price verified.
+    - is_price_step_verified: Steam Community Market allowed price increment verified.
     """
     currency_id: int
     code: str
@@ -30,10 +31,23 @@ class CurrencyConfig:
     price_step_minor: int = 1
     min_fee_steam_minor: int = 1
     min_fee_publisher_minor: int = 1
-    is_verified: bool = False
+    is_metadata_verified: bool = False
+    is_fee_verified: bool = False
+    is_listing_min_verified: bool = False
+    is_price_step_verified: bool = False
     notes: str = ""
 
     KNOWN_CURRENCIES: ClassVar[dict[int, CurrencyConfig]] = {}
+
+    @property
+    def is_verified(self) -> bool:
+        """Return True only if all metadata, fee, and listing rules are verified."""
+        return (
+            self.is_metadata_verified
+            and self.is_fee_verified
+            and self.is_listing_min_verified
+            and self.is_price_step_verified
+        )
 
     @classmethod
     def get_default_usd(cls) -> CurrencyConfig:
@@ -47,8 +61,11 @@ class CurrencyConfig:
             price_step_minor=1,
             min_fee_steam_minor=1,
             min_fee_publisher_minor=1,
-            is_verified=True,
-            notes="Empirically verified against Steam FAQ and live fixtures. Minimum buyer pays is $0.03.",
+            is_metadata_verified=True,
+            is_fee_verified=True,
+            is_listing_min_verified=True,
+            is_price_step_verified=True,
+            notes="Empirically verified against Steam FAQ and live orderbook fixtures. Minimum buyer pays is $0.03.",
         )
 
     @classmethod
@@ -63,8 +80,11 @@ class CurrencyConfig:
             price_step_minor=1,
             min_fee_steam_minor=1,
             min_fee_publisher_minor=1,
-            is_verified=True,
-            notes="Empirically verified against Steam FAQ and live fixtures. Minimum buyer pays is €0.03.",
+            is_metadata_verified=True,
+            is_fee_verified=True,
+            is_listing_min_verified=True,
+            is_price_step_verified=True,
+            notes="Empirically verified against Steam FAQ and live orderbook fixtures. Minimum buyer pays is €0.03.",
         )
 
     @classmethod
@@ -75,12 +95,15 @@ class CurrencyConfig:
             symbol="¥",
             minor_unit_precision=0,
             country="JP",
-            min_listing_price_minor=None,  # UNKNOWN / unverified minimum listing threshold
+            min_listing_price_minor=None,  # UNKNOWN
             price_step_minor=1,
             min_fee_steam_minor=1,
             min_fee_publisher_minor=1,
-            is_verified=False,
-            notes="Zero-decimal currency. Minimum market listing price is UNKNOWN pending official Steam verification.",
+            is_metadata_verified=True,     # ID 8, JPY, ¥, 0 decimals verified in Steamworks
+            is_fee_verified=False,         # UNKNOWN: Fee rounding edge cases unverified
+            is_listing_min_verified=False, # UNKNOWN: Listing minimum unverified
+            is_price_step_verified=False,  # UNKNOWN: Price step unverified
+            notes="Zero-decimal currency. Fee rounding and listing minimum are UNKNOWN pending official Steam verification.",
         )
 
     @classmethod
@@ -100,7 +123,10 @@ class CurrencyConfig:
             price_step_minor=1,
             min_fee_steam_minor=1,
             min_fee_publisher_minor=1,
-            is_verified=True,
+            is_metadata_verified=True,
+            is_fee_verified=True,
+            is_listing_min_verified=True,
+            is_price_step_verified=True,
             notes="Tunisian accounts operate in USD on Steam. TND is not a supported Steam wallet currency.",
         )
 
@@ -122,23 +148,32 @@ class CurrencyConfig:
 
         return f"-{formatted}" if is_negative else formatted
 
-    def parse_to_minor_units(self, amount_str: str) -> int:
-        """Parse monetary amount string into exact integer minor units.
+    def parse_to_minor_units(self, amount: str | Decimal | int) -> int:
+        """Parse monetary amount string or Decimal into exact integer minor units.
         
-        Strict grammar rules:
+        Strict grammar & precision rules:
         1. Negative amounts: Must start with a single '-' (e.g. '-$24.88' or '-24.88').
            Misplaced ('2-4.88', '$-24.88', '24.88-') or repeated ('--24.88') minus signs are rejected.
         2. Currency symbol: Optional, but if present must be single and precede the digits (e.g. '$24.88', '-$24.88').
            Multiple symbols ('$$24.88', '$24.88$') are rejected.
         3. Grouping separators (commas): Only valid in the integer part when grouping 3 digits ('1,240.50').
            Malformed groupings ('2,,4.88', ',24.88', '24,88.00', '24,') are rejected.
-        4. Fractional precision:
-           - Zero-decimal currencies (JPY) reject any decimal points.
-           - Multi-decimal currencies (USD/EUR) reject excess decimal places.
+        4. Fractional precision & exact representation:
+           - Zero-decimal currencies (JPY) reject any decimal places.
+           - Multi-decimal currencies (USD/EUR) reject values that cannot be represented
+             exactly in the configured minor unit precision (e.g. '22.501', '22.505').
+           - Never silently rounds a financial price.
         5. Zero arbitrary character stripping: Malformed or unparseable inputs raise ValueError.
         """
-        if not amount_str or not isinstance(amount_str, str):
-            raise ValueError("Monetary amount must be a non-empty string")
+        if amount is None:
+            raise ValueError("Monetary amount cannot be None")
+
+        if isinstance(amount, (int, Decimal)):
+            amount_str = str(amount)
+        elif isinstance(amount, str):
+            amount_str = amount
+        else:
+            raise TypeError(f"Unsupported amount type: {type(amount).__name__}")
 
         raw = amount_str.strip()
         if not raw:
@@ -191,7 +226,7 @@ class CurrencyConfig:
                     raise ValueError(f"Invalid integer component in '{amount_str}'")
                 int_num = int(int_part)
 
-        # 5. Precision validation
+        # 5. Exact precision validation using Decimal
         if self.minor_unit_precision == 0:
             if dec_part is not None:
                 raise ValueError(
@@ -200,10 +235,11 @@ class CurrencyConfig:
             val = int_num
         else:
             if dec_part is not None:
+                # Reject excess decimal precision (e.g. 22.501 or 22.505 for precision=2)
                 if len(dec_part) > self.minor_unit_precision:
                     raise ValueError(
-                        f"Excess decimal precision: {len(dec_part)} digits provided, "
-                        f"maximum allowed for {self.code} is {self.minor_unit_precision} in '{amount_str}'"
+                        f"Exact decimal error: amount '{amount_str}' provides {len(dec_part)} decimal places, "
+                        f"exceeding exact minor unit precision of {self.minor_unit_precision} for {self.code}"
                     )
                 dec_num = int(dec_part.ljust(self.minor_unit_precision, "0"))
             else:

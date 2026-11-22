@@ -25,16 +25,19 @@ See the complete rules in [AGENTS.md](AGENTS.md).
 
 ---
 
-## Current Status: Milestone 1.2 Complete (Foundations Hardened & Research Ready)
+## Current Status: Milestone 1.2.1 Complete (Final Correctness & Safety Gate)
 
-- **Milestone 1 / 1.1 / 1.2 (Complete):**
+- **Milestone 1 / 1.1 / 1.2 / 1.2.1 (Complete):**
   - Read-only asynchronous HTTP client (`ReadOnlyHttpClient`) with strict request-level serialization (`asyncio.Lock`), preventing concurrent execution overlap.
-  - Transparent, non-spoofed application identification with minimal standard headers (zero fabricated `Sec-Fetch-*` headers).
+  - Transparent, non-spoofed application identification (`CS2TradingSniper/0.1.0`) with minimal standard headers (zero fabricated `Sec-Fetch-*` headers).
+  - Strict URL allowlist (HTTPS only, `steamcommunity.com` only, approved endpoint paths only) and safe redirect validation (rejects cross-host redirects and HTTPS-to-HTTP downgrade before following).
+  - Unified, fail-closed JSON processing path (`get_json(schema=...)`) with exact Decimal token parsing (`parse_float=Decimal`) and schema validation inside the serialized request lock.
   - Fail-closed circuit breaker: unexpected HTML challenges, malformed JSON, and schema failures immediately halt subsequent polling.
   - Sequential rate limiter (`SequentialRateLimiter`) with monotonic timers (`time.monotonic()`), exponential backoff, and full RFC 7231 `Retry-After` support (delta-seconds and HTTP-date).
-  - Exact dual-floor integer-cents fee engine (`calculate_buyer_pays`, `calculate_seller_receives`, `calculate_exact_breakeven_buyer_pays`) with step-jump gap handling and separation of fee floors from market listing minimums.
+  - Fail-closed financial engine: fee calculations on unverified currencies (like JPY) are strictly rejected with `ValueError`.
+  - Exact dual-floor integer-cents fee engine (`calculate_buyer_pays`, `calculate_seller_receives`, `calculate_exact_breakeven_buyer_pays`) with step-jump gap handling ($R=99 \rightarrow 112, R=100 \rightarrow 115$).
   - Strict minor-unit currency model (`CurrencyConfig`) with hardened grammar (rejects misplaced signs, invalid comma groupings, and multiple symbols).
-  - Normalized depth entries preserving raw values and converting to exact integer minor units without binary float arithmetic.
+  - Exact Decimal orderbook depth normalization rejecting values with excess precision (e.g. `22.501`, `22.505`) and prohibiting comparisons for unverified currencies.
   - Research skills (`.agents/skills/`) and intelligence registers (`docs/research/`).
 - **Milestones 2–9 (Planned):**
   - Item identity resolver, SQLite storage, detection algorithms, and dashboard remain deferred pending subsequent milestone approvals.
@@ -47,7 +50,7 @@ See the complete rules in [AGENTS.md](AGENTS.md).
 # 1. Install package in editable mode with dependencies
 pip install -e .
 
-# 2. Run comprehensive unit test suite (50 deterministic tests)
+# 2. Run comprehensive unit test suite (55 deterministic tests)
 python -m unittest discover -s tests -p "test_*.py" -v
 
 # 3. Run single-request read-only connectivity smoke test

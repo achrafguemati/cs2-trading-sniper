@@ -8,8 +8,8 @@ This watchlist tracks open-source repositories audited for potential code reuse,
 
 | Repository | License | Activity / Last Push | Safety & Read-Only | Classification | Primary Use / Note |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| [`somespecialone/steam-market-ids`](https://github.com/somespecialone/steam-market-ids) | MIT | Active (2025–2026) | ✅ Safe (Static Data) | **Reuse Candidate** | Maps `market_hash_name` to `item_name_id`. |
-| [`somespecialone/cs2-items-schema`](https://github.com/somespecialone/cs2-items-schema) | MIT | Active (Automated CI) | ✅ Safe (Static Data) | **Reuse Candidate** | Maps game item definitions, paint index, rarity. |
+| [`somespecialone/steam-market-ids`](https://github.com/somespecialone/steam-market-ids) | MIT | Active (`main` branch) | ✅ Safe (Static Data) | **Reuse Candidate** | Maps `market_hash_name` to `item_name_id`. |
+| [`somespecialone/cs2-items-schema`](https://github.com/somespecialone/cs2-items-schema) | MIT | Active (`main` branch) | ✅ Safe (Static Data) | **Reuse Candidate** | Maps game item definitions, paint index, rarity. |
 | [`i4cobus/cs2-cross-market-arbitrage-analyzer`](https://github.com/i4cobus/cs2-cross-market-arbitrage-analyzer) | MIT | Maintained | ✅ Safe (Read-Only) | **Reference Only** | Multi-market fee logic (uses floating point). |
 | [`Luca-Ospel/cs2-market-scraper`](https://github.com/Luca-Ospel/cs2-market-scraper) | MIT | Inactive | ⚠️ Unbuffered Scraper | **Reference Only** | Legacy scraper; superseded by our async client. |
 | [`MhmdMK277/CSFloatPriceChecker`](https://github.com/MhmdMK277/CSFloatPriceChecker) | MIT | Maintained | ✅ Safe (Public API) | **Reference Only** | CSFloat public API queries; lacks backoff. |
@@ -21,10 +21,11 @@ This watchlist tracks open-source repositories audited for potential code reuse,
 
 ### 1. `somespecialone/steam-market-ids`
 * **Source URL:** `https://github.com/somespecialone/steam-market-ids`
+* **Target Ref / Branch:** `main` (tracked for dataset updates)
 * **Date Checked (UTC):** 2026-11-22T17:25:00Z
-* **SPDX License:** MIT (Permissive, commercial reuse permitted with attribution).
-* **Language & Tech:** Python, JSON datasets.
-* **Project Relevance:** Essential for Milestone 2 (Item Identity Resolver). It provides pre-mapped JSON dictionaries connecting canonical `market_hash_name` strings to Steam's internal integer `item_name_id` values.
+* **SPDX License & Evidence:** MIT License. Root `LICENSE` file verified; contains standard permissive MIT grant permitting commercial use, modification, and private use with copyright attribution preserved.
+* **Language & Tech:** Python, JSON mapping tables.
+* **Project Relevance:** Essential candidate for Milestone 2 (Item Identity Resolver). It provides pre-mapped JSON dictionaries (`item_names.json`, `market_bucket_groups.json`) connecting canonical `market_hash_name` strings to Steam's internal integer `item_name_id` values.
 * **Safety Evaluation:** Strictly read-only data assets. No network mutations, no credential requests, no proxy rotation.
 * **Reusable Assets:** `item_names.json` mapping tables.
 * **Classification:** **Reuse Candidate**
@@ -32,9 +33,10 @@ This watchlist tracks open-source repositories audited for potential code reuse,
 
 ### 2. `somespecialone/cs2-items-schema`
 * **Source URL:** `https://github.com/somespecialone/cs2-items-schema`
+* **Target Ref / Branch:** `main` (automated daily extraction workflow)
 * **Date Checked (UTC):** 2026-11-22T17:25:00Z
-* **SPDX License:** MIT (Permissive).
-* **Language & Tech:** Python, GitHub Actions automation.
+* **SPDX License & Evidence:** MIT License. Permissive open-source license file verified in repository root.
+* **Language & Tech:** Python, GitHub Actions automated CI extraction from CS2 VPK files.
 * **Project Relevance:** Provides static item schema extracted from CS2 VPK/game files, detailing weapon names, paint wear boundaries, and skin categories.
 * **Safety Evaluation:** 100% static data generated via automated CI. Zero security risks.
 * **Reusable Assets:** Schema validation fixtures and skin classification rules.

@@ -200,7 +200,7 @@ When a user or client issues an HTTP `GET` request to a market listing URL, Stea
 * **Direct Test Result:** Direct unauthenticated requests from a single residential IP triggered `HTTP Error 429: Too Many Requests` after only **2 to 3 rapid requests within 5 seconds**.
 * **Global Backoff Mandate:**
   - Every HTTP request must pass through an asynchronous Token Bucket / Leaky Bucket rate limiter.
-  - Base request rate: **1 request every 4.0 to 6.0 seconds** (10–15 RPM max).
+  - Base request rate: **1 request every 4.0 to 6.0 seconds** (conservative local pacing target of ~10–15 RPM; this is an internal safety policy, not an official Valve quota or SLA).
   - Jitter: Add random delay of 0.5s to 2.0s per request.
   - Backoff algorithm on 429:
     1. Immediately freeze all market polling.

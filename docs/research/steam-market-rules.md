@@ -70,54 +70,28 @@ The inverse fee function must never return a seller amount and claim it produces
 5. `is_exact_match`: Boolean indicating whether `actual_buyer_pays_cents == requested_buyer_pays_cents`.
 
 ```python
-def calculate_seller_receives(requested_buyer_pays_minor: int, currency: CurrencyConfig | None = None) -> FeeBreakdown:
+def calculate_seller_receives(
+    requested_buyer_pays_minor: int,
+    publisher_fee_pct: int = 10,
+    currency: CurrencyConfig | None = None,
+) -> FeeBreakdown:
+    """Invert gross buyer price into seller net proceeds using exact integer boundary search.
+    
+    Validates against currency-specific listing minimums and fee floors.
+    Fails closed if currency fee rules are unverified/UNKNOWN.
+    """
+    if currency is not None and not currency.is_fee_verified:
+        raise ValueError(f"Financial calculation rejected: fee rules for {currency.code} are unverified/UNKNOWN")
+
     min_steam = currency.min_fee_steam_minor if currency else 1
     min_pub = currency.min_fee_publisher_minor if currency else 1
     fee_floor = 1 + min_steam + min_pub
-    
+
     if currency and currency.min_listing_price_minor is not None:
         if requested_buyer_pays_minor < currency.min_listing_price_minor:
             raise ValueError(f"Below currency {currency.code} listing minimum of {currency.min_listing_price_minor}")
     elif requested_buyer_pays_minor < fee_floor:
         raise ValueError(f"Below fee floor of {fee_floor}")
-    
-    # Estimate base seller amount using integer division
-    # 1.15 approx divisor: (requested * 100) // 115
-    estimated_r = (requested_buyer_pays_cents * 100) // 115
-    
-    # Search locally within +/- 3 cents of estimate
-    best_r = 1
-    best_buyer = 3
-    best_steam = 1
-    best_pub = 1
-    
-    for r in range(max(1, estimated_r - 3), estimated_r + 4):
-        steam_fee = max(1, (r * 5) // 100)
-        pub_fee = max(1, (r * 10) // 100)
-        buyer_pays = r + steam_fee + pub_fee
-        
-        if buyer_pays == requested_buyer_pays_cents:
-            return {
-                "seller_receives": r,
-                "steam_fee": steam_fee,
-                "publisher_fee": pub_fee,
-                "actual_buyer_pays": buyer_pays,
-                "is_exact_match": True
-            }
-        elif buyer_pays < requested_buyer_pays_cents:
-            if buyer_pays > best_buyer:
-                best_r = r
-                best_buyer = buyer_pays
-                best_steam = steam_fee
-                best_pub = pub_fee
-                
-    return {
-        "seller_receives": best_r,
-        "steam_fee": best_steam,
-        "publisher_fee": best_pub,
-        "actual_buyer_pays": best_buyer,
-        "is_exact_match": False
-    }
 ```
 
 ### 2.4 Exact Break-Even Calculation
@@ -138,8 +112,9 @@ Source: Valve Community Market FAQ (<https://help.steampowered.com/en/faqs/view/
 * **Seller Proceeds Rule:** A seller who lists below the highest buy order **does NOT automatically receive the highest buy order price**. The transaction matches at the seller's listing price, meaning the seller receives the proceeds corresponding to their listed price, and the buyer gets the discount.
 
 ### 3.2 Matching Priority: Oldest Matching Buy Order
-* When a new sell listing is posted that could fulfill multiple active buy orders, Valve's matching engine selects the **oldest matching buy order** (the buy order that was placed first among all orders whose bid is $\ge$ the listing price).
-* Price priority: Higher buy orders take precedence. Among buy orders at the same price, FIFO (oldest timestamp) determines execution order.
+* **Valve Official Rule:** When a new sell listing is posted that can fulfill multiple active buy orders, Valve's matching engine selects the **oldest matching buy order**.
+* **Direct Valve Example:** If User A places a buy order for $10.00 at 12:00, and User B places a buy order for $15.00 at 12:05, and a seller subsequently lists the item for $5.00, **User A's order ($10.00 bid placed first) is selected to fulfill the transaction**. User A pays the listed price of $5.00. Higher bid amounts do NOT jump ahead of older matching orders.
+* **FIFO Execution:** Order matching priority is strictly governed by timestamp (first-in, first-out among all matching bids $\ge$ listing price). Higher bids do not override earlier matching bids.
 
 ### 3.3 Buy Order Cancellation & Wallet Funds
 * Valve's official documentation states: **"Orders are automatically cancelled if your wallet balance falls below the amount needed to fulfill the buy order."**

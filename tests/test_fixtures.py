@@ -1,5 +1,6 @@
 """Unit tests validating fixture integrity, authenticity manifest, and schema compliance."""
 
+from decimal import Decimal
 import json
 from pathlib import Path
 import unittest
@@ -29,19 +30,20 @@ class TestFixtures(unittest.TestCase):
             fixture_file = FIXTURES_DIR / filename
             self.assertTrue(fixture_file.exists(), f"Fixture file {filename} referenced in manifest does not exist")
             self.assertIn("endpoint", metadata)
-            self.assertIn("capture_method", metadata)
+            self.assertIn("classification", metadata)
+            self.assertIn("provenance", metadata)
             self.assertIn("currency", metadata)
 
     def test_all_fixtures_parse_successfully(self):
         # 1. Orderbook Histogram
         with open(FIXTURES_DIR / "orderbook_histogram.json", "r", encoding="utf-8") as f:
-            data = json.load(f)
+            data = json.load(f, parse_float=Decimal)
             parsed = OrderbookHistogramResponse.model_validate(data)
             self.assertEqual(parsed.success, 1)
 
         # 2. Malformed Histogram
         with open(FIXTURES_DIR / "malformed_histogram.json", "r", encoding="utf-8") as f:
-            data = json.load(f)
+            data = json.load(f, parse_float=Decimal)
             parsed = OrderbookHistogramResponse.model_validate(data)
             self.assertEqual(parsed.success, 0)
 

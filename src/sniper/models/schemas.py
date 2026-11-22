@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field
 
@@ -61,7 +62,8 @@ class ListingRenderResponse(BaseModel):
 
 
 class HistogramDepthEntry(BaseModel):
-    price: float
+    """Depth entry using exact Decimal representation for orderbook price."""
+    price: Decimal | int | str
     cumulative_quantity: int
     description: str
 
@@ -152,7 +154,8 @@ class OrderbookHistogramResponse(BaseModel):
     ) -> NormalizedDepthEntry:
         """Normalize a single graph entry [raw_price, quantity, description].
         
-        Converts decimal price to integer minor units strictly without binary float arithmetic.
+        Converts exact Decimal price to integer minor units strictly without binary float arithmetic.
+        Rejects values that cannot be represented exactly in minor units (e.g. 22.501).
         If currency context is missing or unverified, marks price_minor as None (UNKNOWN).
         """
         if len(entry) < 3:
@@ -173,11 +176,15 @@ class OrderbookHistogramResponse(BaseModel):
             )
 
         if isinstance(raw_price, float):
-            price_str = f"{raw_price:.{currency.minor_unit_precision}f}"
+            d = Decimal(str(raw_price))
+        elif isinstance(raw_price, (Decimal, int)):
+            d = Decimal(raw_price)
+        elif isinstance(raw_price, str):
+            d = Decimal(raw_price.strip())
         else:
-            price_str = str(raw_price)
+            raise TypeError(f"Unsupported price token type: {type(raw_price).__name__}")
 
-        price_minor = currency.parse_to_minor_units(price_str)
+        price_minor = currency.parse_to_minor_units(d)
 
         return NormalizedDepthEntry(
             raw_price=raw_price,

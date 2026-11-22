@@ -1,4 +1,4 @@
-"""Unit tests for Steam fee calculations, currency-specific minimums, and integer cents precision."""
+"""Unit tests for Steam fee calculations, currency-specific minimums, and fail-closed safety."""
 
 import unittest
 from sniper.core.currency import CurrencyConfig
@@ -80,23 +80,23 @@ class TestFees(unittest.TestCase):
         with self.assertRaises(ValueError):
             calculate_seller_receives(2, currency=eur)
 
-    def test_currency_jpy_unknown_listing_minimum(self):
-        """JPY has zero decimals and its exact listing minimum is UNKNOWN (marked unverified)."""
+    def test_unverified_currency_fails_closed(self):
+        """Unverified currencies (like JPY) must strictly fail closed on financial fee calculations."""
         jpy = CurrencyConfig.get_jpy()
+        self.assertFalse(jpy.is_fee_verified)
+        self.assertFalse(jpy.is_listing_min_verified)
         self.assertFalse(jpy.is_verified)
-        self.assertIsNone(jpy.min_listing_price_minor)
 
-        # Fee floor for JPY with 1 yen min fees is 3 yen
-        res_jpy = calculate_seller_receives(3, currency=jpy)
-        self.assertEqual(res_jpy.seller_receives, 1)
-        self.assertEqual(res_jpy.actual_buyer_pays, 3)
-
-        # Below fee floor (2 yen) raises ValueError
+        # calculate_buyer_pays on unverified currency must raise ValueError
         with self.assertRaises(ValueError):
-            calculate_seller_receives(2, currency=jpy)
+            calculate_buyer_pays(100, currency=jpy)
+
+        # calculate_seller_receives on unverified currency must raise ValueError
+        with self.assertRaises(ValueError):
+            calculate_seller_receives(100, currency=jpy)
 
     def test_custom_currency_with_price_step_and_higher_minimum(self):
-        """Test custom currency configuration with non-standard price step and minimum."""
+        """Test custom currency configuration with verified non-standard price step and minimum."""
         custom = CurrencyConfig(
             currency_id=99,
             code="CUST",
@@ -104,7 +104,10 @@ class TestFees(unittest.TestCase):
             minor_unit_precision=2,
             min_listing_price_minor=10,
             price_step_minor=5,
-            is_verified=True,
+            is_metadata_verified=True,
+            is_fee_verified=True,
+            is_listing_min_verified=True,
+            is_price_step_verified=True,
         )
         # 10 is >= min_listing_price and divisible by price_step (5)
         res = calculate_seller_receives(10, currency=custom)

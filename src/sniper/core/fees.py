@@ -2,7 +2,7 @@
 
 Implements Valve's dual-floor fee schedule using integer minor currency units (cents).
 All operations avoid floating-point math to guarantee deterministic results.
-Separates fee component floors from currency-specific market listing minimums.
+Enforces fail-closed safety: rejects financial calculations on unverified currencies.
 """
 
 from __future__ import annotations
@@ -37,16 +37,26 @@ def calculate_buyer_pays(
     - Publisher fee: publisher_fee_pct% (10% for CS2, floor), minimum min_fee_publisher_minor (default 1)
     - Total buyer pays: seller_receives + steam_fee + publisher_fee
     
+    Fail-closed policy:
+    If currency is provided, its fee rules MUST be verified (is_fee_verified=True).
+    Unverified currency fee calculations are strictly rejected.
+    
     Args:
         seller_receives_minor: Integer minor units desired by seller.
         publisher_fee_pct: Integer percentage for publisher fee (10 for CS2).
-        currency: Optional CurrencyConfig specifying fee floors.
+        currency: Optional CurrencyConfig specifying verified fee floors.
         
     Returns:
         FeeBreakdown with exact components.
     """
     if seller_receives_minor < 1:
         raise ValueError("Seller proceeds must be at least 1 minor unit")
+
+    if currency is not None and not currency.is_fee_verified:
+        raise ValueError(
+            f"Financial calculation rejected: fee rules for currency '{currency.code}' "
+            f"are unverified/UNKNOWN. Fail-closed safety prohibits unverified fee calculations."
+        )
 
     min_steam = currency.min_fee_steam_minor if currency else 1
     min_pub = currency.min_fee_publisher_minor if currency else 1
@@ -79,10 +89,8 @@ def calculate_seller_receives(
     - At seller_receives = 100: Steam fee is 5, CS2 fee is 10. Total buyer pays is 100 + 5 + 10 = 115.
     - Therefore, 113 and 114 minor units are not reachable by any integer seller amount.
     
-    Validates against:
-    1. Market listing minimum: if currency has verified min_listing_price_minor, rejects below it.
-    2. Fee floor minimum: seller_receives >= 1 + min_steam + min_pub.
-    3. Allowed price increments: if currency.price_step_minor > 1.
+    Fail-closed policy:
+    Rejects financial calculations if currency fee rules, listing minimum, or price steps are unverified.
     
     Args:
         requested_buyer_pays_minor: Integer minor units the buyer pays.
@@ -92,11 +100,28 @@ def calculate_seller_receives(
     Returns:
         FeeBreakdown detailing seller proceeds, fees, resulting buyer price, and exact match flag.
     """
+    if currency is not None:
+        if not currency.is_fee_verified:
+            raise ValueError(
+                f"Financial calculation rejected: fee rules for currency '{currency.code}' "
+                f"are unverified/UNKNOWN. Fail-closed safety prohibits unverified fee calculations."
+            )
+        if currency.min_listing_price_minor is not None and not currency.is_listing_min_verified:
+            raise ValueError(
+                f"Financial calculation rejected: listing minimum for currency '{currency.code}' "
+                f"is unverified/UNKNOWN."
+            )
+        if currency.price_step_minor > 1 and not currency.is_price_step_verified:
+            raise ValueError(
+                f"Financial calculation rejected: price step for currency '{currency.code}' "
+                f"is unverified/UNKNOWN."
+            )
+
     min_steam = currency.min_fee_steam_minor if currency else 1
     min_pub = currency.min_fee_publisher_minor if currency else 1
     fee_floor = 1 + min_steam + min_pub
 
-    # Check market listing minimum if defined for currency
+    # Check market listing minimum if verified for currency
     if currency and currency.min_listing_price_minor is not None:
         if requested_buyer_pays_minor < currency.min_listing_price_minor:
             raise ValueError(
@@ -104,7 +129,7 @@ def calculate_seller_receives(
                 f"of {currency.min_listing_price_minor} for {currency.code}"
             )
     else:
-        # Check universal fee floor
+        # Check universal mathematical fee floor
         if requested_buyer_pays_minor < fee_floor:
             raise ValueError(
                 f"Requested price {requested_buyer_pays_minor} cannot be less than fee floor of {fee_floor}"

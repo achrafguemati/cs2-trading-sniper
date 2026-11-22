@@ -19,7 +19,7 @@ These rules are non-negotiable across all development phases of this project. Ev
 
 3. **No Rate-Limit Evasion or Proxy Rotation:**
    - **NEVER** rotate proxies, spoof IP addresses, bypass CAPTCHAs, or attempt to defeat Cloudflare/Akamai protections.
-   - Respect Steam's rate limits. Max single-IP unauthenticated polling rate: **10–15 requests per minute** with randomized jitter.
+   - Respect Steam's rate limits. Local pacing target: **conservative sequential pacing of ~10–15 requests per minute with randomized jitter**. This is an internal project safety policy, not an official Steam rate limit or guaranteed safe quota. Any HTTP 429 triggers immediate global backoff.
 4. **Global Backoff Mandate:**
    - On `HTTP 429 Too Many Requests`, `HTTP 403 Forbidden`, unexpected HTML challenge, or malformed schema, pause all polling immediately.
    - Implement exponential backoff starting at 300 seconds (5 minutes) before canary re-probing.
