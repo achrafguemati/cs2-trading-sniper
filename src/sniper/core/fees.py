@@ -2,11 +2,16 @@
 
 Implements Valve's dual-floor fee schedule using integer minor currency units (cents).
 All operations avoid floating-point math to guarantee deterministic results.
+Separates fee component floors from currency-specific market listing minimums.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sniper.core.currency import CurrencyConfig
 
 
 @dataclass(frozen=True)
@@ -20,74 +25,106 @@ class FeeBreakdown:
     is_exact_match: bool
 
 
-def calculate_buyer_pays(seller_receives_minor: int, publisher_fee_pct: int = 10) -> FeeBreakdown:
+def calculate_buyer_pays(
+    seller_receives_minor: int,
+    publisher_fee_pct: int = 10,
+    currency: CurrencyConfig | None = None,
+) -> FeeBreakdown:
     """Calculate exact gross buyer cost from seller proceeds.
     
     Formula based on official Valve client logic (economy.js):
-    - Steam fee: 5% (floor), minimum 1 minor unit
-    - Publisher fee: publisher_fee_pct% (10% for CS2, floor), minimum 1 minor unit
+    - Steam fee: 5% (floor), minimum min_fee_steam_minor (default 1)
+    - Publisher fee: publisher_fee_pct% (10% for CS2, floor), minimum min_fee_publisher_minor (default 1)
     - Total buyer pays: seller_receives + steam_fee + publisher_fee
     
     Args:
-        seller_receives_minor: Integer minor units (e.g. cents) desired by seller.
+        seller_receives_minor: Integer minor units desired by seller.
         publisher_fee_pct: Integer percentage for publisher fee (10 for CS2).
+        currency: Optional CurrencyConfig specifying fee floors.
         
     Returns:
         FeeBreakdown with exact components.
     """
     if seller_receives_minor < 1:
         raise ValueError("Seller proceeds must be at least 1 minor unit")
-        
-    steam_fee = max(1, (seller_receives_minor * 5) // 100)
-    publisher_fee = max(1, (seller_receives_minor * publisher_fee_pct) // 100)
+
+    min_steam = currency.min_fee_steam_minor if currency else 1
+    min_pub = currency.min_fee_publisher_minor if currency else 1
+
+    steam_fee = max(min_steam, (seller_receives_minor * 5) // 100)
+    publisher_fee = max(min_pub, (seller_receives_minor * publisher_fee_pct) // 100)
     total_fee = steam_fee + publisher_fee
     buyer_pays = seller_receives_minor + total_fee
-    
+
     return FeeBreakdown(
         seller_receives=seller_receives_minor,
         steam_fee=steam_fee,
         publisher_fee=publisher_fee,
         total_fee=total_fee,
         actual_buyer_pays=buyer_pays,
-        is_exact_match=True
+        is_exact_match=True,
     )
 
 
-def calculate_seller_receives(requested_buyer_pays_minor: int, publisher_fee_pct: int = 10) -> FeeBreakdown:
+def calculate_seller_receives(
+    requested_buyer_pays_minor: int,
+    publisher_fee_pct: int = 10,
+    currency: CurrencyConfig | None = None,
+) -> FeeBreakdown:
     """Invert gross buyer price into seller net proceeds using exact integer boundary search.
     
-    Because Valve independently floors each fee, fee step jumps occur. For instance,
-    at 114 cents requested buyer price, seller_receives=99 produces 113 cents buyer pays,
-    while seller_receives=100 produces 115 cents buyer pays. 114 cents is not exactly reachable.
-    
-    This function finds the highest seller amount such that forward buyer pays <= requested.
-    It returns `is_exact_match=False` when the requested price lands in a gap.
+    Validates against:
+    1. Market listing minimum: if currency has verified min_listing_price_minor, rejects below it.
+    2. Fee floor minimum: seller_receives >= 1 + min_steam + min_pub.
+    3. Allowed price increments: if currency.price_step_minor > 1.
     
     Args:
         requested_buyer_pays_minor: Integer minor units the buyer pays.
         publisher_fee_pct: Publisher fee percentage (10 for CS2).
+        currency: Optional CurrencyConfig with currency-specific listing rules.
         
     Returns:
         FeeBreakdown detailing seller proceeds, fees, resulting buyer price, and exact match flag.
     """
-    if requested_buyer_pays_minor < 3:
-        raise ValueError("Minimum Steam Community Market price is 3 minor units ($0.03)")
-        
-    # Baseline integer estimate using 1.15 divisor
-    # Total percentage is roughly 100 + 5 + 10 = 115
+    min_steam = currency.min_fee_steam_minor if currency else 1
+    min_pub = currency.min_fee_publisher_minor if currency else 1
+    fee_floor = 1 + min_steam + min_pub
+
+    # Check market listing minimum if defined for currency
+    if currency and currency.min_listing_price_minor is not None:
+        if requested_buyer_pays_minor < currency.min_listing_price_minor:
+            raise ValueError(
+                f"Requested price {requested_buyer_pays_minor} is below minimum market listing price "
+                f"of {currency.min_listing_price_minor} for {currency.code}"
+            )
+    else:
+        # Check universal fee floor
+        if requested_buyer_pays_minor < fee_floor:
+            raise ValueError(
+                f"Requested price {requested_buyer_pays_minor} cannot be less than fee floor of {fee_floor}"
+            )
+
+    # Validate allowed price increment if configured
+    if currency and currency.price_step_minor > 1:
+        if requested_buyer_pays_minor % currency.price_step_minor != 0:
+            raise ValueError(
+                f"Requested price {requested_buyer_pays_minor} does not conform to allowed price step "
+                f"of {currency.price_step_minor} for {currency.code}"
+            )
+
+    # Baseline integer estimate
     estimated_r = (requested_buyer_pays_minor * 100) // (100 + 5 + publisher_fee_pct)
-    
-    # Search locally within +/- 4 units of estimate
+
     best_breakdown: FeeBreakdown | None = None
-    
+
     for r in range(max(1, estimated_r - 4), estimated_r + 5):
-        forward = calculate_buyer_pays(r, publisher_fee_pct=publisher_fee_pct)
+        forward = calculate_buyer_pays(r, publisher_fee_pct=publisher_fee_pct, currency=currency)
         if forward.actual_buyer_pays == requested_buyer_pays_minor:
             return forward
         elif forward.actual_buyer_pays < requested_buyer_pays_minor:
             if best_breakdown is None or forward.actual_buyer_pays > best_breakdown.actual_buyer_pays:
                 best_breakdown = forward
-                
+
     if best_breakdown is not None:
         return FeeBreakdown(
             seller_receives=best_breakdown.seller_receives,
@@ -95,26 +132,26 @@ def calculate_seller_receives(requested_buyer_pays_minor: int, publisher_fee_pct
             publisher_fee=best_breakdown.publisher_fee,
             total_fee=best_breakdown.total_fee,
             actual_buyer_pays=best_breakdown.actual_buyer_pays,
-            is_exact_match=False
+            is_exact_match=False,
         )
-        
-    # Fallback for extreme low boundary
-    fallback = calculate_buyer_pays(1, publisher_fee_pct=publisher_fee_pct)
+
+    # Fallback for lowest possible price
+    fallback = calculate_buyer_pays(1, publisher_fee_pct=publisher_fee_pct, currency=currency)
     return FeeBreakdown(
         seller_receives=fallback.seller_receives,
         steam_fee=fallback.steam_fee,
         publisher_fee=fallback.publisher_fee,
         total_fee=fallback.total_fee,
         actual_buyer_pays=fallback.actual_buyer_pays,
-        is_exact_match=(fallback.actual_buyer_pays == requested_buyer_pays_minor)
+        is_exact_match=(fallback.actual_buyer_pays == requested_buyer_pays_minor),
     )
 
 
-def calculate_exact_breakeven_buyer_pays(cost_basis_minor: int, publisher_fee_pct: int = 10) -> int:
-    """Calculate the exact minimum gross listing price (buyer pays) to recover cost basis.
-    
-    Avoids naive approximations like `cost * 1.15`. Computes the exact forward price
-    when seller proceeds equals cost basis.
-    """
-    forward = calculate_buyer_pays(cost_basis_minor, publisher_fee_pct=publisher_fee_pct)
+def calculate_exact_breakeven_buyer_pays(
+    cost_basis_minor: int,
+    publisher_fee_pct: int = 10,
+    currency: CurrencyConfig | None = None,
+) -> int:
+    """Calculate the exact minimum gross listing price (buyer pays) to recover cost basis."""
+    forward = calculate_buyer_pays(cost_basis_minor, publisher_fee_pct=publisher_fee_pct, currency=currency)
     return forward.actual_buyer_pays
