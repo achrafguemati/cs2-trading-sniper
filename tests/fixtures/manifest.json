@@ -1,0 +1,41 @@
+{
+  "version": "1.0.0",
+  "updated_at": "2026-11-22T17:00:00Z",
+  "fixtures": {
+    "orderbook_histogram.json": {
+      "endpoint": "https://steamcommunity.com/market/itemordershistogram",
+      "capture_method": "Synthetic normalized test vector",
+      "currency": "USD (1)",
+      "item_identity": "AK-47 | Redline (Field-Tested) mock orderbook",
+      "notes": "Simulates standard depth with highest buy order 2250 cents and lowest sell order 2488 cents."
+    },
+    "malformed_histogram.json": {
+      "endpoint": "https://steamcommunity.com/market/itemordershistogram",
+      "capture_method": "Synthetic error test vector",
+      "currency": "None",
+      "item_identity": "None",
+      "notes": "Simulates Steam response with success=0 when item is invalid or query is malformed."
+    },
+    "standard_render.json": {
+      "endpoint": "https://steamcommunity.com/market/listings/730/.../render/",
+      "capture_method": "Normalized API capture with sensitive IDs randomized",
+      "currency": "USD (1)",
+      "item_identity": "AK-47 | Redline (Field-Tested)",
+      "notes": "Simulates legacy render pagination structure containing listinginfo and asset descriptors."
+    },
+    "grouped_ssr_data.json": {
+      "endpoint": "https://steamcommunity.com/market/listings/730/G...",
+      "capture_method": "Normalized SSR payload representation",
+      "currency": "USD (1)",
+      "item_identity": "Grouped AK-47 | Redline wear buckets",
+      "notes": "Models hydration dictionary embedded in modern React market pages across wear categories."
+    },
+    "public_inventory.json": {
+      "endpoint": "https://steamcommunity.com/inventory/{steamid64}/730/2",
+      "capture_method": "Normalized public inventory snapshot with user IDs anonymized",
+      "currency": "N/A",
+      "item_identity": "CS2 inventory items",
+      "notes": "Includes items with market restrictions to verify 7-day holding duration parsing."
+    }
+  }
+}

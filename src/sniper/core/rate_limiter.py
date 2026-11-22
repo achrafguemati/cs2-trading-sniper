@@ -1,15 +1,18 @@
 """Sequential asynchronous rate limiter with circuit breaker and stop-on-block safety.
 
 Enforces:
-1. Strict sequential execution (max 1 concurrent request).
-2. Paced delays with randomized jitter (10-15 requests per minute target).
-3. Exponential backoff on HTTP 429 respecting Retry-After header.
+1. Strict sequential request serialization (max 1 concurrent request).
+2. Paced delays with randomized jitter using monotonic timers.
+3. Exponential backoff on HTTP 429 respecting Retry-After (both delta-seconds and HTTP-date formats).
+   Local safety minimum backoff is strictly preserved even if server sends shorter delay.
 4. Immediate halt on HTTP 403 requiring manual inspection.
 """
 
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
+import email.utils
 import logging
 import random
 import time
@@ -28,6 +31,41 @@ class RateLimitExceededError(Exception):
     pass
 
 
+def parse_retry_after(header_value: str | None) -> float:
+    """Parse Retry-After header into delay in seconds.
+    
+    Supports:
+    1. Delta-seconds: e.g. '120'.
+    2. HTTP-date format (RFC 7231 / IMF-fixdate): e.g. 'Sun, 22 Nov 2026 18:30:00 GMT'.
+    
+    Returns 0.0 if header is missing, malformed, or specifies a date in the past.
+    """
+    if not header_value:
+        return 0.0
+        
+    cleaned = header_value.strip()
+    if not cleaned:
+        return 0.0
+        
+    # 1. Delta-seconds
+    try:
+        val = float(cleaned)
+        return max(0.0, val)
+    except ValueError:
+        pass
+        
+    # 2. HTTP-date format
+    try:
+        dt = email.utils.parsedate_to_datetime(cleaned)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        now_utc = datetime.now(timezone.utc)
+        delay = (dt - now_utc).total_seconds()
+        return max(0.0, delay)
+    except Exception:
+        return 0.0
+
+
 @dataclass
 class RateLimiterConfig:
     min_delay_seconds: float = 4.0
@@ -39,9 +77,14 @@ class RateLimiterConfig:
 
 @dataclass
 class SequentialRateLimiter:
-    """Strictly sequential rate limiter managing request pacing and circuit breaking."""
+    """Strictly sequential rate limiter managing request pacing and circuit breaking.
+    
+    Uses monotonic time throughout to prevent wall-clock shifts from corrupting pacing
+    or cooldown intervals.
+    """
     config: RateLimiterConfig = field(default_factory=RateLimiterConfig)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _request_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _last_request_timestamp: float = 0.0
     _consecutive_429_count: int = 0
     _blocked_until: float = 0.0
@@ -54,11 +97,11 @@ class SequentialRateLimiter:
 
     @property
     def is_cooling_down(self) -> bool:
-        return time.time() < self._blocked_until
+        return time.monotonic() < self._blocked_until
 
     @property
     def cooldown_seconds_remaining(self) -> float:
-        return max(0.0, self._blocked_until - time.time())
+        return max(0.0, self._blocked_until - time.monotonic())
 
     async def acquire(self) -> None:
         """Wait until a request is safe to execute sequentially.
@@ -70,8 +113,8 @@ class SequentialRateLimiter:
             raise SecurityBlockError(f"Requests halted: {self._halt_reason}")
 
         async with self._lock:
-            # Check cooldown
-            now = time.time()
+            # Check cooldown using monotonic time
+            now = time.monotonic()
             if now < self._blocked_until:
                 remaining = self._blocked_until - now
                 raise RateLimitExceededError(
@@ -89,14 +132,24 @@ class SequentialRateLimiter:
                 logger.debug(f"Pacing delay: sleeping {sleep_time:.2f}s")
                 await asyncio.sleep(sleep_time)
 
-            self._last_request_timestamp = time.time()
+            self._last_request_timestamp = time.monotonic()
+
+    def record_request_completed(self) -> None:
+        """Record the completion timestamp of an HTTP request to pace from response end."""
+        self._last_request_timestamp = time.monotonic()
 
     def record_success(self) -> None:
         """Reset consecutive 429 counter on successful response."""
         self._consecutive_429_count = 0
 
     def record_429(self, retry_after_header: str | None = None) -> float:
-        """Trigger exponential backoff on HTTP 429 and return cooldown duration in seconds."""
+        """Trigger exponential backoff on HTTP 429 and return cooldown duration in seconds.
+        
+        Evaluates Retry-After header (both delta-seconds and HTTP-date).
+        Conservative safety mandate: A server-provided retry delay shorter than our local
+        minimum safety backoff does NOT reduce or override our local backoff. We always
+        use max(calculated_backoff, server_retry).
+        """
         self._consecutive_429_count += 1
         
         # Calculate exponential backoff: 300, 600, 1200, up to max
@@ -106,16 +159,11 @@ class SequentialRateLimiter:
             self.config.initial_backoff_seconds * multiplier
         )
         
-        # Respect Retry-After if provided by server
-        server_retry = 0.0
-        if retry_after_header:
-            try:
-                server_retry = float(retry_after_header.strip())
-            except ValueError:
-                pass
+        # Parse Retry-After if provided by server
+        server_retry = parse_retry_after(retry_after_header)
                 
         cooldown = max(calculated_backoff, server_retry)
-        self._blocked_until = time.time() + cooldown
+        self._blocked_until = time.monotonic() + cooldown
         logger.warning(
             f"HTTP 429 received (strike #{self._consecutive_429_count}). "
             f"Backing off globally for {cooldown:.1f}s."

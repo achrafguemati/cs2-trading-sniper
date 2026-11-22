@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cs2-trading-sniper"
+version = "0.1.0"
+description = "Read-only CS2 Steam Community Market research, opportunity detection, and inventory alerting tool."
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "Achraf Guemati"}
+]
+dependencies = [
+    "httpx>=0.27.0,<0.29.0",
+    "pydantic>=2.7.0,<3.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

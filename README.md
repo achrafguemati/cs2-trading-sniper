@@ -17,11 +17,39 @@ The application features two independent, quantitative market engines sharing a 
 
 1. **Strictly Read-Only:** Zero automated buying, selling, listing, or trade execution. All market actions are manually executed by the human user.
 2. **Zero Credential Storage:** The application **never** asks for, stores, or transmits Steam passwords, Steam Guard codes, `maFile` secrets, or browser session cookies.
-3. **No Proxy Rotation or Anti-Bot Bypass:** Operates within a respectful, single-IP rate budget (10–15 requests/min) with automated exponential backoff on HTTP 429.
-4. **Integer Cents Financial Precision:** All pricing and fee calculations operate strictly in integer minor currency units (cents), implementing Valve's exact dual-floor fee schedule.
+3. **No Rate-Limit Evasion or Proxy Rotation:** Operates within conservative sequential request pacing (target ~10 requests/min with strict sequential serialization and randomized jitter) with automated exponential backoff on HTTP 429 and immediate circuit breaker halt on HTTP 403.
+4. **Integer Cents Financial Precision:** All pricing and fee calculations operate strictly in integer minor currency units (cents), implementing Valve's exact dual-floor fee schedule without floating-point math.
 5. **Steam Wallet $\ne$ Cash:** Virtual Steam Wallet balances are strictly segregated from external cashout estimates.
 
 See the complete rules in [AGENTS.md](AGENTS.md).
+
+---
+
+## Current Status: Milestone 1.1 Complete (Core Foundations Hardened)
+
+- **Milestone 1 / 1.1 (Complete):**
+  - Read-only asynchronous HTTP client (`ReadOnlyHttpClient`) with strict request-level serialization (`asyncio.Lock`), preventing concurrent execution overlap.
+  - Sequential rate limiter (`SequentialRateLimiter`) with monotonic timers (`time.monotonic()`), exponential backoff, and full RFC 7231 `Retry-After` support (delta-seconds and HTTP-date).
+  - Exact dual-floor integer-cents fee engine (`calculate_buyer_pays`, `calculate_seller_receives`, `calculate_exact_breakeven_buyer_pays`) with step-jump gap detection.
+  - Strict minor-unit currency model (`CurrencyConfig`) with negative value formatting/parsing and non-float precision enforcement.
+  - Pydantic response models and verified fixture manifest (`tests/fixtures/manifest.json`).
+- **Milestones 2–9 (Planned):**
+  - Item identity resolver, SQLite storage, detection algorithms, and dashboard are deferred pending subsequent milestone approvals.
+
+---
+
+## Installation & Verification
+
+```bash
+# 1. Install dependencies
+pip install -r requirements.txt
+
+# 2. Run unit test suite (38 deterministic tests)
+python -m unittest discover -s tests -p "test_*.py" -v
+
+# 3. Run single-request read-only connectivity smoke test
+python scripts/smoke_test.py
+```
 
 ---
 
@@ -61,4 +89,4 @@ All technical specifications, empirical research, and architectural blueprints a
 
 ## License
 
-This project is open-source under the [MIT License](LICENSE).
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
