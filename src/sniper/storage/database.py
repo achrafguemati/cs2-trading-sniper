@@ -1,0 +1,158 @@
+"""SQLite database connection and transaction management."""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from pathlib import Path
+import sqlite3
+import threading
+from typing import Any, Generator, Sequence
+
+from sniper.storage.migrations import (
+    apply_migrations,
+    get_current_version,
+)
+
+
+class Database:
+    """Thread-safe SQLite database manager for read-only market monitor storage.
+
+    Guarantees:
+    - Foreign keys strictly enabled on every connection.
+    - WAL journal mode and normal synchronous mode for file-backed databases.
+    - Explicit transaction boundary management with automatic rollback on error.
+    - Parameterized query enforcement.
+    - Thread-safe operations via re-entrant lock.
+    """
+
+    def __init__(
+        self,
+        db_path: str | Path = ":memory:",
+        timeout_seconds: float = 30.0,
+    ) -> None:
+        self._db_path = str(db_path)
+        self._is_memory = self._db_path == ":memory:" or ":memory:" in self._db_path
+        self._timeout = timeout_seconds
+        self._lock = threading.RLock()
+        self._conn: sqlite3.Connection | None = None
+        self._connect()
+
+    def _connect(self) -> None:
+        """Establish connection and configure SQLite pragmas."""
+        with self._lock:
+            if self._conn is not None:
+                return
+
+            self._conn = sqlite3.connect(
+                self._db_path,
+                timeout=self._timeout,
+                check_same_thread=False,
+                isolation_level=None,  # Explicit transaction control without python DDL interference
+            )
+            self._conn.row_factory = sqlite3.Row
+
+            # Enforce foreign keys on every connection
+            self._conn.execute("PRAGMA foreign_keys = ON;")
+
+            # Configure performance pragmas for persistent file-backed databases
+            if not self._is_memory:
+                self._conn.execute("PRAGMA journal_mode = WAL;")
+                self._conn.execute("PRAGMA synchronous = NORMAL;")
+                self._conn.execute(f"PRAGMA busy_timeout = {int(self._timeout * 1000)};")
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """Return the underlying SQLite connection."""
+        if self._conn is None:
+            raise RuntimeError("Database connection is closed.")
+        return self._conn
+
+    @property
+    def is_memory(self) -> bool:
+        """Return True if database is in-memory."""
+        return self._is_memory
+
+    @property
+    def db_path(self) -> str:
+        """Return path or uri to database."""
+        return self._db_path
+
+    def initialize(self, target_version: int | None = None) -> list[int]:
+        """Idempotently initialize schema and apply pending migrations up to target_version."""
+        with self._lock:
+            return apply_migrations(self.connection, target_version=target_version)
+
+    def get_version(self) -> int:
+        """Return current database schema version."""
+        with self._lock:
+            return get_current_version(self.connection)
+
+    @contextmanager
+    def transaction(self) -> Generator[sqlite3.Cursor, None, None]:
+        """Context manager for an atomic database transaction.
+
+        Commits upon clean block exit, rolls back on exception.
+        """
+        with self._lock:
+            in_tx = self.connection.in_transaction
+            if not in_tx:
+                self.connection.execute("BEGIN IMMEDIATE")
+            cur = self.connection.cursor()
+            try:
+                yield cur
+                if not in_tx:
+                    self.connection.execute("COMMIT")
+            except Exception:
+                if not in_tx:
+                    try:
+                        self.connection.execute("ROLLBACK")
+                    except Exception:
+                        pass
+                raise
+            finally:
+                cur.close()
+
+    def execute(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Cursor:
+        """Execute a single parameterized SQL statement within a transaction."""
+        with self.transaction() as cur:
+            cur.execute(sql, params)
+            return cur
+
+    def executemany(self, sql: str, seq_of_params: Sequence[Sequence[Any]]) -> sqlite3.Cursor:
+        """Execute a parameterized SQL statement against multiple parameter tuples within a transaction."""
+        with self.transaction() as cur:
+            cur.executemany(sql, seq_of_params)
+            return cur
+
+    def fetch_one(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Row | None:
+        """Execute a parameterized query and fetch a single row."""
+        with self._lock:
+            cur = self.connection.cursor()
+            try:
+                cur.execute(sql, params)
+                return cur.fetchone()
+            finally:
+                cur.close()
+
+    def fetch_all(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
+        """Execute a parameterized query and fetch all matching rows."""
+        with self._lock:
+            cur = self.connection.cursor()
+            try:
+                cur.execute(sql, params)
+                return cur.fetchall()
+            finally:
+                cur.close()
+
+    def close(self) -> None:
+        """Close the database connection."""
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
+
+    def __enter__(self) -> Database:
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
