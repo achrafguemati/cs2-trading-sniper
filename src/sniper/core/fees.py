@@ -1,8 +1,8 @@
-"""Integer-arithmetic fee model for Steam Community Market Counter-Strike 2 transactions.
+"""Integer fee model for Steam Community Market Counter-Strike 2 transactions.
 
-Models the documented fee rates/minimum components with an independent-floor formula
-using integer minor currency units. Valve's exact rounding implementation has not
-been verified from the captured public client script. All operations avoid floats.
+Models documented fee rates and minimum components using exact arithmetic under
+the project's modeled formula (integer minor currency units). Valve's exact rounding
+implementation remains UNKNOWN. All operations avoid floating-point math.
 Enforces fail-closed safety: rejects financial calculations on unverified currencies.
 """
 
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class FeeBreakdown:
-    """Exact arithmetic breakdown under this application's fee model."""
+    """Exact arithmetic breakdown under the project's integer fee model."""
     seller_receives: int
     steam_fee: int
     publisher_fee: int
@@ -33,8 +33,8 @@ def calculate_buyer_pays(
 ) -> FeeBreakdown:
     """Calculate modeled gross buyer cost from seller proceeds.
     
-    Formula modeled from documented rates/minimum components; exact Valve rounding
-    implementation remains unverified:
+    Formula modeled from documented rates/minimum components; Valve's exact rounding
+    implementation remains UNKNOWN.
     - Steam fee: 5% (floor), minimum min_fee_steam_minor (default 1)
     - Publisher fee: publisher_fee_pct% (10% for CS2, floor), minimum min_fee_publisher_minor (default 1)
     - Total buyer pays: seller_receives + steam_fee + publisher_fee
@@ -49,7 +49,7 @@ def calculate_buyer_pays(
         currency: Optional CurrencyConfig specifying verified fee floors.
         
     Returns:
-        FeeBreakdown with exact integer components under the modeled formula.
+        FeeBreakdown with exact arithmetic under the project's modeled formula.
     """
     if seller_receives_minor < 1:
         raise ValueError("Seller proceeds must be at least 1 minor unit")
@@ -206,6 +206,11 @@ def calculate_exact_breakeven_buyer_pays(
     publisher_fee_pct: int = 10,
     currency: CurrencyConfig | None = None,
 ) -> int:
-    """Calculate the exact minimum gross listing price (buyer pays) to recover cost basis."""
+    """Calculate the exact minimum gross listing price (buyer pays) to recover cost basis under the modeled formula.
+    
+    Uses exact arithmetic under the project's modeled formula (integer fee model).
+    Valve's exact rounding implementation remains UNKNOWN; this calculation is
+    exact relative to the project's model, not proof of Valve's live implementation.
+    """
     forward = calculate_buyer_pays(cost_basis_minor, publisher_fee_pct=publisher_fee_pct, currency=currency)
     return forward.actual_buyer_pays

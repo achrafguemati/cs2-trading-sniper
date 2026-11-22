@@ -9,10 +9,10 @@
 ## 1. Executive Summary
 
 This document separates documented market rules from the application's fee model. It provides:
-1. An integer-arithmetic fee model (avoiding floating-point math); Valve's exact rounding implementation remains unverified.
+1. An integer fee model with exact arithmetic under the project's modeled formula (avoiding floating-point math); Valve's exact rounding implementation remains UNKNOWN.
 2. The integer boundary search function for backward fee inversion, reporting exact reachability.
 3. Official buy-order matching behavior, pricing rules, and FIFO priority semantics based directly on Valve's official FAQ.
-4. Exact break-even calculation rules (avoiding approximate multipliers).
+4. Exact break-even calculation rules under the project's modeled formula (avoiding approximate multipliers).
 5. 7-day re-market restriction vs player Trade Protection distinction.
 6. Steam Wallet virtual balance boundaries.
 
@@ -25,7 +25,7 @@ Every Counter-Strike 2 transaction on the Steam Community Market incurs two dist
 1. **Steam Transaction Fee:** 5% of seller proceeds, minimum **1 minor unit** ($0.01 USD).
 2. **Counter-Strike 2 Publisher Fee:** 10% of seller proceeds, minimum **1 minor unit** ($0.01 USD).
 
-Nominal combined fee rate is 15%. The model below uses independent mathematical floors and a one-minor-unit floor for each component. Its effective modeled percentage varies across price tiers; the captured source did not verify Valve's exact rounding implementation.
+Nominal combined fee rate is 15%. The model below uses independent mathematical floors and a one-minor-unit floor for each component. Its effective modeled percentage varies across price tiers; Valve's exact rounding implementation remains UNKNOWN.
 
 ### 2.2 Forward Formula (Seller Receives $\rightarrow$ Buyer Pays)
 The application models buyer prices from seller net proceeds using the formula below. The FAQ supports fee rates and minimum components but does not specify this rounding formula.
@@ -60,7 +60,7 @@ Due to independent flooring, not every integer buyer total is exactly reachable 
 #### Separation of Transaction Fee Floors vs. Market Listing Minimums
 - **Transaction Fee Floors:** Mathematically, each fee component enforces a 1-minor-unit floor ($\max(1, \dots)$), giving an absolute mathematical lower bound of $1 + 1 + 1 = 3\text{ minor units}$ ($R=1$).
 - **Market Listing Minimums:** Valve's Community Market FAQ says that some currencies may have a minimum sale price but does not explicitly state that USD's minimum is $0.03. USD, EUR, JPY, and Tunisia regional listing minimums and price steps are **UNKNOWN** until a direct reproducible Community Market/client capture or explicit official documentation establishes them. The 3-cent amount above is only a mathematical fee-floor example, not listing-minimum evidence. Synthetic orderbook fixtures are not empirical evidence of live listing rules.
-- **Evidence Status:** Fee percentages and minimum fee components are attributed to the Community Market FAQ. The independent-floor calculation is a tested mathematical model but remains **UNKNOWN as Valve's live implementation**: the 2026-11-22 `economy.js` capture returned HTTP 200 but contained no fee token or relevant conversion function (see `docs/research/evidence/economy-js-capture-2026-11-22.json`). Listing minimums without primary empirical or official documentation evidence remain **UNKNOWN**.
+- **Evidence Status:** Fee percentages and minimum fee components are attributed to the Community Market FAQ. The independent-floor calculation is a tested integer fee model with exact arithmetic under the project's modeled formula, but **Valve's exact rounding implementation remains UNKNOWN**: the 2026-11-22 `economy.js` capture returned HTTP 200 but contained no fee token or relevant conversion function (see `docs/research/evidence/economy-js-capture-2026-11-22.json`). Listing minimums without primary empirical or official documentation evidence remain **UNKNOWN**.
 
 The inverse fee function must never return a seller amount and claim it produces the requested buyer total if the forward formula produces a different total. It must explicitly return:
 1. `seller_receives_cents`: The largest integer seller proceeds whose resulting buyer cost does not exceed the target.
@@ -98,9 +98,11 @@ def calculate_seller_receives(
 
 ### 2.4 Exact Break-Even Calculation
 Never approximate break-even sale price with `cost * 1.15`.
-The exact break-even gross listing price $B_{\text{breakeven}}$ is the smallest integer buyer price whose resulting seller proceeds equal or exceed the acquisition cost $C_{\text{acq}}$:
+The exact break-even gross listing price $B_{\text{breakeven}}$ is the smallest integer buyer price whose resulting seller proceeds equal or exceed the acquisition cost $C_{\text{acq}}$ under the project's modeled formula:
 
 $$B_{\text{breakeven}} = C_{\text{acq}} + \max\left(1, \, (C_{\text{acq}} \times 5) // 100\right) + \max\left(1, \, (C_{\text{acq}} \times 10) // 100\right)$$
+
+*Clarification on exactness:* `calculate_exact_breakeven_buyer_pays` implements exact arithmetic under the project's modeled formula (integer fee model). Valve's exact rounding implementation remains UNKNOWN; this calculation is exact relative to the project's model, not proof of Valve's live implementation.
 
 ---
 

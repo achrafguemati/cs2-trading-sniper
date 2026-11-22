@@ -18,14 +18,14 @@ The application features two independent, quantitative market engines sharing a 
 1. **Strictly Read-Only:** Zero automated buying, selling, listing, or trade execution. All market actions are manually executed by the human user.
 2. **Zero Credential Storage:** The application **never** asks for, stores, or transmits Steam passwords, Steam Guard codes, `maFile` secrets, or browser session cookies.
 3. **No Rate-Limit Evasion or Proxy Rotation:** Operates within conservative sequential request pacing (target ~10 requests/min with strict sequential serialization and randomized jitter) with automated exponential backoff on HTTP 429 and immediate circuit breaker halt on HTTP 403.
-4. **Integer Minor-Unit Financial Precision:** Price and fee calculations avoid floating-point arithmetic. The dual-floor fee formula is an exact integer model; Valve's exact rounding implementation remains unverified by available client-script evidence.
+4. **Integer Minor-Unit Financial Precision:** Price and fee calculations avoid floating-point arithmetic. The application uses an integer fee model with exact arithmetic under the project's modeled formula; Valve's exact rounding implementation remains UNKNOWN.
 5. **Steam Wallet $\ne$ Cash:** Virtual Steam Wallet balances are strictly segregated from external cashout estimates.
 
 See the complete rules in [AGENTS.md](AGENTS.md).
 
 ---
 
-## Current Status: M1.2.3.1 Changes Complete (Async Verification Blocked by Runtime Environment)
+## Current Status: Milestone 1.2.3.2 (Cross-Runtime Async Verification & Documentation Consistency)
 
 - **Milestone 1 / 1.1 / 1.2 / 1.2.1 / 1.2.2 / 1.2.3 (Implementation Complete):**
   - Read-only asynchronous HTTP client (`ReadOnlyHttpClient`) with strict request-level serialization (`asyncio.Lock`), preventing concurrent execution overlap.
@@ -38,7 +38,7 @@ See the complete rules in [AGENTS.md](AGENTS.md).
   - Fail-closed currency semantics: currency metadata, fee rules, and market listing rules are verified independently. USD, EUR, JPY, and Tunisia listing minimums/price steps remain UNKNOWN absent direct Community Market evidence; pure mathematical inversion requires `validate_market_listing=False`.
   - `calculate_seller_receives` requires explicit currency context for market listing validation; pure mathematical inversion requires the caller to explicitly disable listing validation.
   - Orderbook normalization requires verified currency metadata and minor-unit precision, independently of market listing rules; fee calculations with currency require both verified metadata and fee rules.
-  - Integer fee model (`calculate_buyer_pays`, `calculate_seller_receives`, `calculate_exact_breakeven_buyer_pays`) with step-jump gap handling ($R=99 \rightarrow 112, R=100 \rightarrow 115$); exact Valve rounding is unverified.
+  - Integer fee model (`calculate_buyer_pays`, `calculate_seller_receives`, `calculate_exact_breakeven_buyer_pays`) with step-jump gap handling ($R=99 \rightarrow 112, R=100 \rightarrow 115$) using exact arithmetic under the project's modeled formula. Valve's exact rounding implementation remains UNKNOWN (`calculate_exact_breakeven_buyer_pays` is exact relative to the project's model, not proof of Valve's live implementation).
   - Strict minor-unit currency model (`CurrencyConfig`) with hardened grammar and trailing zero exactness (accepts `Decimal("22.500") -> 2250`, continues rejecting `22.501`, `22.505`, `22.50001`).
   - Strict orderbook graph validation: strictly positive orderbook prices, non-negative integer quantities without silent fractional truncation.
   - Research skills (`.agents/skills/`) and intelligence registers (`docs/research/`).
