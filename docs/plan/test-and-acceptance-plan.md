@@ -12,7 +12,7 @@ Every module must achieve high test coverage before milestone completion:
 
 | Test Module | Coverage Scope | Target Test Cases |
 | :--- | :--- | :--- |
-| **`test_fees.py`** | Exact Valve fee calculations in integer cents | Minimum price ($0.03 $\rightarrow$ $0.01 net), $1.00 $\rightarrow$ $0.88 net, high-tier ($500 $\rightarrow$ $434.79 net), rounding edge cases, backward inversion verification against forward formula. |
+| **`test_fees.py`** | Exact integer fee calculations and currency validation | Mathematical fee-floor example (not a market minimum), $1.00 $\rightarrow$ $0.88 net, high-tier ($500 $\rightarrow$ $434.79 net), rounding gaps, currency-required market validation, and explicit pure inversion. |
 | **`test_identity.py`** | URL parsing and variant normalization | Canonical URLs, grouped `G...` URLs with `category_Exterior=WearCategory0-4`, StatTrak/Souvenir preservation, invalid URL rejection, ambiguous token handling. |
 | **`test_orderbook.py`** | Order-book depth & quantity parsing | Top-level quantity extraction, cumulative quantity extraction, empty order book, single-bid book, crossed-book detection (`highest_bid >= lowest_ask`). |
 | **`test_listings.py`** | Listing-level JSON & HTML parsing | Extraction of `listingid`, `assetid`, integer cents price, inspect link parsing, sticker extraction from description tags, currency validation. |

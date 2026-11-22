@@ -52,9 +52,9 @@ def calculate_buyer_pays(
     if seller_receives_minor < 1:
         raise ValueError("Seller proceeds must be at least 1 minor unit")
 
-    if currency is not None and not currency.is_fee_verified:
+    if currency is not None and (not currency.is_metadata_verified or not currency.is_fee_verified):
         raise ValueError(
-            f"Financial calculation rejected: fee rules for currency '{currency.code}' "
+            f"Financial calculation rejected: currency metadata or fee rules for '{currency.code}' "
             f"are unverified/UNKNOWN. Fail-closed safety prohibits unverified fee calculations."
         )
 
@@ -138,14 +138,20 @@ def calculate_seller_receives(
     Returns:
         FeeBreakdown detailing seller proceeds, fees, resulting buyer price, and exact match flag.
     """
+    if validate_market_listing and currency is None:
+        raise ValueError(
+            "Market listing validation requires a CurrencyConfig. "
+            "For pure mathematical inversion, explicitly pass validate_market_listing=False."
+        )
+
     min_steam = currency.min_fee_steam_minor if currency else 1
     min_pub = currency.min_fee_publisher_minor if currency else 1
     fee_floor = 1 + min_steam + min_pub
 
     if currency is not None:
-        if not currency.is_fee_verified:
+        if not currency.is_metadata_verified or not currency.is_fee_verified:
             raise ValueError(
-                f"Financial calculation rejected: fee rules for currency '{currency.code}' "
+                f"Financial calculation rejected: currency metadata or fee rules for '{currency.code}' "
                 f"are unverified/UNKNOWN. Fail-closed safety prohibits unverified fee calculations."
             )
         if validate_market_listing:

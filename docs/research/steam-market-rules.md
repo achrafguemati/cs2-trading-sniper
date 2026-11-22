@@ -38,7 +38,7 @@ $$B = R + \text{steam\_fee} + \text{publisher\_fee}$$
 Where $B$ is the gross price in integer cents paid by the buyer. Notice that this formula uses purely integer operations (`// 100` and `*`), eliminating floating-point imprecision.
 
 #### Boundary Examples:
-* **Minimum Item Price ($0.03 USD):**
+* **Mathematical Fee Floor Example (not evidence of a market listing minimum):**
   - Seller Receives: $R = 1\text{ cent}$
   - Steam Fee: $\max(1, (1 \times 5) // 100) = 1\text{ cent}$
   - CS2 Fee: $\max(1, (1 \times 10) // 100) = 1\text{ cent}$
@@ -59,7 +59,7 @@ Due to independent flooring, not every integer buyer total is exactly reachable 
 
 #### Separation of Transaction Fee Floors vs. Market Listing Minimums
 - **Transaction Fee Floors:** Mathematically, each fee component enforces a 1-minor-unit floor ($\max(1, \dots)$), giving an absolute mathematical lower bound of $1 + 1 + 1 = 3\text{ minor units}$ ($R=1$).
-- **Market Listing Minimums:** Valve enforces distinct minimum listing prices and price steps per currency. For USD, the official Valve Community Market FAQ states: *"Currently the minimum listing price is $0.03."* For EUR, JPY, and all other currencies, listing minimums and allowed price steps are marked as **UNKNOWN** until verified via direct primary captures or official documentation. Synthetic orderbook fixtures are not empirical evidence of live listing minimums.
+- **Market Listing Minimums:** Valve's Community Market FAQ says that some currencies may have a minimum sale price but does not explicitly state that USD's minimum is $0.03. USD, EUR, JPY, and Tunisia regional listing minimums and price steps are **UNKNOWN** until a direct reproducible Community Market/client capture or explicit official documentation establishes them. The 3-cent amount above is only a mathematical fee-floor example, not listing-minimum evidence. Synthetic orderbook fixtures are not empirical evidence of live listing rules.
 - **Empirical Basis:** Fee rules are verified from Valve's public client implementation (`economy.js`). Listing minimums without primary empirical or official documentation evidence remain strictly marked as UNKNOWN.
 
 The inverse fee function must never return a seller amount and claim it produces the requested buyer total if the forward formula produces a different total. It must explicitly return:

@@ -14,8 +14,8 @@ from sniper.core.fees import (
 
 
 class TestFees(unittest.TestCase):
-    def test_minimum_price_forward(self):
-        """At 1 cent seller proceeds, Steam fee is 1 cent and CS2 fee is 1 cent, buyer pays 3 cents."""
+    def test_mathematical_fee_floor_forward(self):
+        """The fee formula maps 1 cent proceeds to 3 cents gross; this is not listing-minimum evidence."""
         res = calculate_buyer_pays(1)
         self.assertEqual(res.seller_receives, 1)
         self.assertEqual(res.steam_fee, 1)
@@ -35,7 +35,7 @@ class TestFees(unittest.TestCase):
 
     def test_one_dollar_inverse(self):
         """Inverting 100 cents buyer pays yields 88 cents seller proceeds with exact match."""
-        res = calculate_seller_receives(100)
+        res = calculate_seller_receives(100, validate_market_listing=False)
         self.assertEqual(res.seller_receives, 88)
         self.assertEqual(res.actual_buyer_pays, 100)
         self.assertTrue(res.is_exact_match)
@@ -45,14 +45,14 @@ class TestFees(unittest.TestCase):
         
         The function must return R=99, actual_buyer_pays=112, and is_exact_match=False.
         """
-        res = calculate_seller_receives(114)
+        res = calculate_seller_receives(114, validate_market_listing=False)
         self.assertEqual(res.seller_receives, 99)
         self.assertEqual(res.actual_buyer_pays, 112)
         self.assertFalse(res.is_exact_match)
 
     def test_high_tier_price(self):
         """Test high tier item: $500.00 (50000 cents)."""
-        res = calculate_seller_receives(50000)
+        res = calculate_seller_receives(50000, validate_market_listing=False)
         forward = calculate_buyer_pays(res.seller_receives)
         self.assertEqual(forward.actual_buyer_pays, res.actual_buyer_pays)
         self.assertLessEqual(res.actual_buyer_pays, 50000)
@@ -61,23 +61,35 @@ class TestFees(unittest.TestCase):
         """Exact break-even buyer price must yield at least the cost basis."""
         cost = 2488  # $24.88
         breakeven_buyer = calculate_exact_breakeven_buyer_pays(cost)
-        res = calculate_seller_receives(breakeven_buyer)
+        res = calculate_seller_receives(breakeven_buyer, validate_market_listing=False)
         self.assertGreaterEqual(res.seller_receives, cost)
 
-    def test_currency_specific_minimum_usd(self):
-        """USD has verified minimum buyer pays of 3 minor units ($0.03) from Valve FAQ."""
+    def test_usd_listing_minimum_is_unknown(self):
+        """Fee floor is mathematical; Valve FAQ does not establish a USD listing minimum."""
         usd = CurrencyConfig.get_default_usd()
-        self.assertTrue(usd.is_verified)
-        self.assertEqual(usd.min_listing_price_minor, 3)
-
-        # 3 minor units succeeds
-        res_usd = calculate_seller_receives(3, currency=usd)
-        self.assertEqual(res_usd.seller_receives, 1)
-        self.assertEqual(res_usd.actual_buyer_pays, 3)
-
-        # 2 minor units raises ValueError due to currency min listing price
+        self.assertTrue(usd.is_metadata_verified)
+        self.assertTrue(usd.is_fee_verified)
+        self.assertFalse(usd.is_listing_min_verified)
+        self.assertIsNone(usd.min_listing_price_minor)
         with self.assertRaises(ValueError):
-            calculate_seller_receives(2, currency=usd)
+            calculate_seller_receives(100, currency=usd)
+
+    def test_market_validation_requires_currency_and_pure_inverse_is_explicit(self):
+        with self.assertRaises(ValueError):
+            calculate_seller_receives(100)
+        res = calculate_seller_receives(100, validate_market_listing=False)
+        self.assertEqual(res.seller_receives, 88)
+        self.assertEqual(res.actual_buyer_pays, 100)
+
+    def test_fee_math_with_currency_requires_verified_metadata(self):
+        cfg = CurrencyConfig(
+            currency_id=96, code="TEST3", symbol="T", minor_unit_precision=2,
+            is_metadata_verified=False, is_fee_verified=True,
+        )
+        with self.assertRaises(ValueError):
+            calculate_buyer_pays(100, currency=cfg)
+        with self.assertRaises(ValueError):
+            calculate_seller_receives(100, currency=cfg, validate_market_listing=False)
 
     def test_eur_unverified_listing_rules_fails_closed_on_market_validation(self):
         """EUR fee rules are verified, but listing minimum is UNKNOWN without primary evidence.
@@ -85,6 +97,7 @@ class TestFees(unittest.TestCase):
         Market listing validation fails closed; pure fee calculation succeeds.
         """
         eur = CurrencyConfig.get_eur()
+        self.assertTrue(eur.is_metadata_verified)
         self.assertTrue(eur.is_fee_verified)
         self.assertFalse(eur.is_listing_min_verified)
         self.assertIsNone(eur.min_listing_price_minor)
@@ -101,6 +114,7 @@ class TestFees(unittest.TestCase):
         pure_res = calculate_seller_receives(100, currency=eur, validate_market_listing=False)
         self.assertEqual(pure_res.seller_receives, 88)
         self.assertEqual(pure_res.actual_buyer_pays, 100)
+        self.assertEqual(calculate_buyer_pays(88, currency=eur).actual_buyer_pays, 100)
 
     def test_fee_verified_true_but_listing_min_unknown(self):
         """Currency with verified fees but UNKNOWN listing minimum must fail market validation."""
@@ -196,14 +210,15 @@ class TestFees(unittest.TestCase):
         with self.assertRaises(ValueError):
             calculate_seller_receives(12, currency=custom)
 
-    def test_tunisia_context_billing(self):
-        """Tunisia context maps to USD billing; regional listing rules are UNKNOWN."""
+    def test_tunisia_usd_metadata_and_unknown_listing_rules(self):
+        """Steamworks USD_MENA metadata does not establish Community Market listing rules."""
         tn = CurrencyConfig.get_tunisia_context()
         self.assertEqual(tn.code, "USD")
         self.assertEqual(tn.country, "TN")
         self.assertIsNone(tn.min_listing_price_minor)
         self.assertFalse(tn.is_listing_min_verified)
         self.assertFalse(tn.is_price_step_verified)
+        self.assertTrue(tn.is_metadata_verified)
         self.assertTrue(tn.is_fee_verified)
 
         # Market listing validation fails closed
@@ -218,7 +233,7 @@ class TestFees(unittest.TestCase):
         with self.assertRaises(ValueError):
             calculate_buyer_pays(0)
         with self.assertRaises(ValueError):
-            calculate_seller_receives(2)  # Below universal fee floor of 3 cents
+            calculate_seller_receives(2, validate_market_listing=False)  # Below mathematical fee floor
 
 
 if __name__ == "__main__":

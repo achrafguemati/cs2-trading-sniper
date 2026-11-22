@@ -7,19 +7,27 @@ This register tracks official primary sources, API endpoints, protocol structure
 ## Primary Sources & API Endpoints
 
 ### 1. Official Steam Community Market FAQ
-* **Source URL:** `https://support.steampowered.com/kb_article.php?ref=6088-UDXM-7214` / `https://steamcommunity.com/market/`
+* **Source URL:** https://help.steampowered.com/en/faqs/view/61F0-72B7-9A18-C70B
 * **Date Checked (UTC):** 2026-11-22T17:35:00Z
 * **Authority Level:** Official Valve Primary Source
 * **Evidence Summary:**
   - **Steam Transaction Fee:** 5% charged to buyer, collected by Steam (minimum 1 minor unit).
   - **CS2 Publisher Fee:** 10% charged to buyer, collected by Valve for CS2 (minimum 1 minor unit).
-  - **Rounding Logic:** Both fees are independently floored ($\lfloor \dots \rfloor$).
+  - **Rounding Logic:** The FAQ does not specify the exact rounding or independent-floor algorithm. The dual-floor implementation is based on Valve's public client script below and remains distinct from listing minimum rules.
   - **Buy Order Matching:** "If multiple buy orders can fulfill a new listing, the oldest buy order is selected. The buyer pays the price of the listing that fulfills their order."
   - **Over-Allocated Wallets:** "When a buy order is created, funds are not removed from your wallet... when an order is matched, if you don't have enough funds, the order will be cancelled."
-* **Confidence Classification:** **CONFIRMED BY PRIMARY SOURCE**
-* **Project Relevance:** Establishes non-negotiable foundations for fee calculation, inverse price solving, and buy-order execution modeling.
-* **Recommended Action:** Preserve exact integer dual-floor implementation in `src/sniper/core/fees.py`.
+* **Confidence Classification:** Fee percentages and fee minimums: **CONFIRMED BY PRIMARY SOURCE**. Exact rounding algorithm: **EMPIRICAL CLIENT-SCRIPT EVIDENCE**, not explicitly stated by the FAQ.
+* **Project Relevance:** Establishes stated fee percentages/minima and buy-order semantics. It does not establish a USD Community Market listing minimum of $0.03.
+* **Recommended Action:** Keep fee algorithm evidence and currency listing minimum evidence separate.
 * **Changes Project Requirements:** No.
+
+### 1a. Valve Community Market Client Fee Calculation
+* **Source URL:** https://steamcommunity.com/public/javascript/economy.js
+* **Date Checked (UTC):** 2026-11-22
+* **Authority Level:** Official Valve client script; implementation may change and should be re-captured with its response hash/version.
+* **Evidence Summary:** Client code contains market fee calculation and buyer/seller amount conversion. This is the evidence source for the independent fee calculation behavior; the FAQ alone establishes rates/minima, not the rounding algorithm.
+* **Listing Minimum Evidence:** This script uses wallet information for market-specific minimums; it is not evidence that all USD market listings have a $0.03 minimum.
+* **Confidence Classification:** **EMPIRICAL OFFICIAL-CLIENT EVIDENCE**; reproducible capture/version/hash should accompany future verification.
 
 ---
 
@@ -72,15 +80,16 @@ This register tracks official primary sources, API endpoints, protocol structure
 ---
 
 ### 5. Steamworks Currency & Regional Pricing Documentation
-* **Source:** Steamworks Partner Documentation / Public Steam Currency Enum Table
-* **Date Checked (UTC):** 2026-11-22T17:35:00Z
+* **Source URL:** https://partner.steamgames.com/doc/store/pricing/currencies
+* **Date Checked (UTC):** 2026-11-22
 * **Authority Level:** Official Valve Partner Documentation
 * **Evidence Summary:**
   - Currencies are mapped to numeric IDs (1 = USD, 3 = EUR, 8 = JPY, etc.).
   - Currencies vary by minor unit precision (USD/EUR = 2 decimals, JPY = 0 decimals).
   - Certain regional currencies have specific minimum transaction amounts and allowed price increments.
-  - Tunisia is not assigned a native currency (TND); accounts registered in Tunisia are billed in USD.
-* **Confidence Classification:** **CONFIRMED BY PRIMARY SOURCE**
-* **Project Relevance:** Validates currency configuration and eliminates incorrect assumptions regarding universal 3-minor-unit minimums.
-* **Recommended Action:** Maintain `CurrencyConfig` with explicit precision, verified listing minimums, and explicit UNKNOWN flags for unverified currencies.
+  - Steamworks lists Tunisia in the `USD_MENA` regional group. This supports USD regional pricing context; it does not establish Community Market listing minimum or price-step rules.
+  - EUR is listed in eurocents, supporting two-decimal orderbook metadata. This does not establish EUR Community Market listing minimum or price-step rules.
+* **Confidence Classification:** Currency metadata and store pricing regional group: **CONFIRMED BY PRIMARY SOURCE**. Market-specific listing minimum and price steps: **UNKNOWN** unless supported by a Community Market capture.
+* **Project Relevance:** Supports currency/precision metadata and the Tunisia USD_MENA context. It does not prove a universal market listing minimum.
+* **Recommended Action:** Keep metadata verification separate from market listing-rule verification; represent unknown listing rules explicitly.
 * **Changes Project Requirements:** No.

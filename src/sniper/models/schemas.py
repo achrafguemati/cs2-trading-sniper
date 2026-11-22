@@ -158,7 +158,8 @@ class OrderbookHistogramResponse(BaseModel):
         Rejects non-positive prices and values that cannot be represented exactly in minor units (e.g. 22.501).
         Accepts trailing zeroes representing the exact same minor unit amount (e.g. 22.500 -> 2250).
         Validates quantity as non-negative integer without silently truncating fractional quantities.
-        If currency context is missing or unverified, marks price_minor as None (UNKNOWN).
+        If currency metadata or minor-unit precision is unverified, marks price_minor as None (UNKNOWN).
+        Listing minimums and listing price steps are intentionally not required for orderbook normalization.
         """
         if len(entry) < 3:
             raise ValueError(f"Malformed graph entry: {entry}")
@@ -207,7 +208,14 @@ class OrderbookHistogramResponse(BaseModel):
         if d <= 0:
             raise ValueError(f"Invalid orderbook price: {d}. Orderbook prices must be strictly positive.")
 
-        if currency is None or not currency.is_verified:
+        precision = currency.minor_unit_precision if currency is not None else None
+        if (
+            currency is None
+            or not currency.is_metadata_verified
+            or isinstance(precision, bool)
+            or not isinstance(precision, int)
+            or precision < 0
+        ):
             return NormalizedDepthEntry(
                 raw_price=raw_price,
                 cumulative_quantity=qty,

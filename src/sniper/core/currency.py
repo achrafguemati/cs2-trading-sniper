@@ -57,15 +57,15 @@ class CurrencyConfig:
             symbol="$",
             minor_unit_precision=2,
             country="US",
-            min_listing_price_minor=3,
+            min_listing_price_minor=None,  # UNKNOWN: official FAQ does not specify a USD market minimum
             price_step_minor=1,
             min_fee_steam_minor=1,
             min_fee_publisher_minor=1,
             is_metadata_verified=True,
             is_fee_verified=True,
-            is_listing_min_verified=True,
-            is_price_step_verified=True,
-            notes="Fee rules verified from economy.js; listing minimum ($0.03) verified from Valve Community Market FAQ.",
+            is_listing_min_verified=False,
+            is_price_step_verified=False,
+            notes="USD currency metadata and fee rules verified. Community Market listing minimum and price step are UNKNOWN; the FAQ does not state a USD $0.03 minimum.",
         )
 
     @classmethod
@@ -108,10 +108,10 @@ class CurrencyConfig:
 
     @classmethod
     def get_tunisia_context(cls) -> CurrencyConfig:
-        """Tunisia regional billing context.
+        """Tunisia USD_MENA regional pricing metadata context.
         
-        Steam bills Tunisian accounts in USD, but regional listing minimums and
-        price step increments are UNKNOWN without primary evidence.
+        Steamworks lists Tunisia in USD_MENA. Account wallet currency and Community
+        Market listing minimum/price-step rules require their own evidence.
         """
         return cls(
             currency_id=1,
@@ -127,7 +127,7 @@ class CurrencyConfig:
             is_fee_verified=True,          # USD fee rules verified
             is_listing_min_verified=False, # UNKNOWN: regional minimum unverified without primary evidence
             is_price_step_verified=False,  # UNKNOWN: regional price step unverified without primary evidence
-            notes="Regional Steam billing context for Tunisia: operates in USD, but regional listing minimums and price step increments are UNKNOWN without primary evidence.",
+            notes="Steamworks lists Tunisia in USD_MENA. USD metadata and fee rules apply; Community Market listing minimum and price step increments are UNKNOWN without direct market evidence.",
         )
 
     def format_amount(self, minor_units: int) -> str:

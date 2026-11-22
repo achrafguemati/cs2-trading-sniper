@@ -25,9 +25,9 @@ See the complete rules in [AGENTS.md](AGENTS.md).
 
 ---
 
-## Current Status: Milestone 1.2.2 Complete (Final Edge-Case Hardening)
+## Current Status: Milestone 1.2.3 Implementation Complete (Async Verification Pending)
 
-- **Milestone 1 / 1.1 / 1.2 / 1.2.1 / 1.2.2 (Complete):**
+- **Milestone 1 / 1.1 / 1.2 / 1.2.1 / 1.2.2 / 1.2.3 (Implementation Complete):**
   - Read-only asynchronous HTTP client (`ReadOnlyHttpClient`) with strict request-level serialization (`asyncio.Lock`), preventing concurrent execution overlap.
   - Transparent, non-spoofed application identification (`CS2TradingSniper/0.1.0`) with minimal standard headers (zero fabricated `Sec-Fetch-*` headers).
   - Strict production URL allowlist: HTTPS only, `steamcommunity.com` only, exact path matching for `/market/itemordershistogram`, boundary validation for `/market/listings/730/` and `/inventory/`, userinfo and non-default port rejection. Mock routes injected only through test configuration.
@@ -35,7 +35,9 @@ See the complete rules in [AGENTS.md](AGENTS.md).
   - Unified, fail-closed JSON processing path (`get_json(schema=...)`) with exact Decimal token parsing (`parse_float=Decimal`) and schema validation inside the serialized request lock.
   - Fail-closed circuit breaker: unexpected HTML challenges, malformed JSON, and schema failures immediately halt subsequent polling.
   - Sequential rate limiter (`SequentialRateLimiter`) with monotonic timers (`time.monotonic()`), exponential backoff, and full RFC 7231 `Retry-After` support (delta-seconds and HTTP-date).
-  - Fail-closed currency semantics: unverified listing minimums and unverified price steps strictly fail closed on market listing validation (`validate_market_listing=True`), while separating pure mathematical fee inversion (`validate_market_listing=False`). JPY, EUR listing minimums, and regional Tunisia listing rules remain strictly marked UNKNOWN.
+  - Fail-closed currency semantics: currency metadata, fee rules, and market listing rules are verified independently. USD, EUR, JPY, and Tunisia listing minimums/price steps remain UNKNOWN absent direct Community Market evidence; pure mathematical inversion requires `validate_market_listing=False`.
+  - `calculate_seller_receives` requires explicit currency context for market listing validation; pure mathematical inversion requires the caller to explicitly disable listing validation.
+  - Orderbook normalization requires verified currency metadata and minor-unit precision, independently of market listing rules; fee calculations with currency require both verified metadata and fee rules.
   - Exact dual-floor integer-cents fee engine (`calculate_buyer_pays`, `calculate_seller_receives`, `calculate_exact_breakeven_buyer_pays`) with step-jump gap handling ($R=99 \rightarrow 112, R=100 \rightarrow 115$).
   - Strict minor-unit currency model (`CurrencyConfig`) with hardened grammar and trailing zero exactness (accepts `Decimal("22.500") -> 2250`, continues rejecting `22.501`, `22.505`, `22.50001`).
   - Strict orderbook graph validation: strictly positive orderbook prices, non-negative integer quantities without silent fractional truncation.
@@ -51,7 +53,7 @@ See the complete rules in [AGENTS.md](AGENTS.md).
 # 1. Install package in editable mode with dependencies
 pip install -e .
 
-# 2. Run comprehensive unit test suite (68 deterministic tests)
+# 2. Run comprehensive unit test suite (73 deterministic tests; async verification pending in the current Python 3.14 environment)
 python -m unittest discover -s tests -p "test_*.py" -v
 
 # 3. Run single-request read-only connectivity smoke test

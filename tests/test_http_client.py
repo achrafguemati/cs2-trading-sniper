@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import unittest
 
 import httpx
@@ -183,11 +184,13 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(data["final"])
 
     async def test_redirect_pacing_and_multirequest_rate_limiter_acquisition(self):
-        """Every redirect hop must acquire the rate limiter separately, maintaining pacing."""
+        """Every redirect hop must acquire the limiter and pace actual network requests."""
         hop_requests = []
+        hop_timestamps = []
         acquire_count = 0
 
         def handler(request: httpx.Request) -> httpx.Response:
+            hop_timestamps.append(time.monotonic())
             hop_requests.append(str(request.url))
             if request.url.path == "/market/listings/730/hop1":
                 return httpx.Response(302, headers={"Location": "/market/listings/730/hop2"})
@@ -217,6 +220,10 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(hop_requests), 3)
         # Exactly 3 acquires for 3 requests (1 initial + 2 redirect hops)
         self.assertEqual(acquire_count, 3)
+        # Prove the interval exists between successive redirect network requests.
+        self.assertEqual(len(hop_timestamps), 3)
+        self.assertGreaterEqual(hop_timestamps[1] - hop_timestamps[0], 0.009)
+        self.assertGreaterEqual(hop_timestamps[2] - hop_timestamps[1], 0.009)
 
     async def test_exact_outgoing_headers(self):
         """Verify client sends transparent, non-spoofed application headers and zero Sec-Fetch-* headers."""

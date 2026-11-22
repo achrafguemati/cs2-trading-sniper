@@ -207,15 +207,18 @@ class TestSchemas(unittest.TestCase):
             self.assertEqual(normalized.price_minor, expected_minor)
             self.assertEqual(normalized.require_price_minor(), expected_minor)
 
-    def test_graph_normalization_unverified_currency_prohibits_comparison(self):
-        """When currency is unverified (or None), price_minor is UNKNOWN and comparisons are prohibited."""
+    def test_graph_normalization_unverified_metadata_prohibits_comparison(self):
+        """When currency metadata is unverified (or absent), price_minor is UNKNOWN."""
         with open(FIXTURES_DIR / "orderbook_histogram.json", "r", encoding="utf-8") as f:
             data = json.load(f, parse_float=Decimal)
             
         parsed = OrderbookHistogramResponse.model_validate(data)
-        jpy = CurrencyConfig.get_jpy()  # is_verified = False
+        unknown = CurrencyConfig(
+            currency_id=96, code="UNKNOWN", symbol="?", minor_unit_precision=2,
+            is_metadata_verified=False,
+        )
 
-        normalized_buys = parsed.get_normalized_buy_graph(jpy)
+        normalized_buys = parsed.get_normalized_buy_graph(unknown)
         top_bid = normalized_buys[0]
         self.assertIsNone(top_bid.price_minor)
         self.assertFalse(top_bid.is_currency_verified)
@@ -227,6 +230,33 @@ class TestSchemas(unittest.TestCase):
         self.assertIsNone(normalized_none[0].price_minor)
         with self.assertRaises(ValueError):
             normalized_none[0].require_price_minor()
+
+    def test_verified_jpy_metadata_normalizes_integer_minor_units(self):
+        jpy = CurrencyConfig.get_jpy()
+        histogram = OrderbookHistogramResponse(success=1)
+        entry = histogram.normalize_graph_entry([Decimal("22"), 1, "desc"], jpy)
+        self.assertEqual(entry.require_price_minor(), 22)
+        self.assertEqual(entry.currency_code, "JPY")
+
+    def test_eur_metadata_allows_exact_orderbook_normalization_without_listing_rules(self):
+        eur = CurrencyConfig.get_eur()
+        self.assertTrue(eur.is_metadata_verified)
+        self.assertFalse(eur.is_listing_min_verified)
+        self.assertFalse(eur.is_price_step_verified)
+        histogram = OrderbookHistogramResponse(success=1)
+        entry = histogram.normalize_graph_entry([Decimal("22.50"), 3, "desc"], eur)
+        self.assertEqual(entry.price_minor, 2250)
+        self.assertEqual(entry.require_price_minor(), 2250)
+        self.assertTrue(entry.is_currency_verified)
+        self.assertEqual(entry.currency_code, "EUR")
+
+    def test_tunisia_usd_metadata_allows_orderbook_normalization_but_listing_unknown(self):
+        tn = CurrencyConfig.get_tunisia_context()
+        self.assertTrue(tn.is_metadata_verified)
+        self.assertFalse(tn.is_listing_min_verified)
+        histogram = OrderbookHistogramResponse(success=1)
+        entry = histogram.normalize_graph_entry([Decimal("22.50"), 1, "desc"], tn)
+        self.assertEqual(entry.require_price_minor(), 2250)
 
     def test_public_inventory_fixture(self):
         with open(FIXTURES_DIR / "public_inventory.json", "r", encoding="utf-8") as f:
