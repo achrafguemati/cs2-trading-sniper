@@ -16,15 +16,32 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from sniper.core.currency import CurrencyConfig
-from sniper.core.fees import calculate_seller_receives
+from sniper.core.fees import FeeBreakdown, calculate_seller_receives
 from sniper.core.http_client import ReadOnlyHttpClient, SecurityError, UnexpectedResponseError
 from sniper.core.rate_limiter import RateLimitExceededError, SecurityBlockError
 from sniper.models.schemas import OrderbookHistogramResponse
 
 
+def calculate_probe_fee_estimate(
+    parsed: OrderbookHistogramResponse,
+    currency: CurrencyConfig,
+) -> FeeBreakdown | None:
+    """Return a mathematical fee estimate for a successful probe payload.
+
+    This deliberately does not validate the Steam Community Market listing rules.
+    """
+    if parsed.success != 1 or parsed.highest_buy_order_minor is None or parsed.highest_buy_order_minor <= 0:
+        return None
+    return calculate_seller_receives(
+        parsed.highest_buy_order_minor,
+        currency=currency,
+        validate_market_listing=False,
+    )
+
+
 async def main() -> None:
     print("=" * 65)
-    print("CS2 Trading Sniper - Milestone 1.2.2 Read-Only Smoke Test")
+    print("CS2 Trading Sniper - Milestone 1.2.3.1 Read-Only Smoke Test")
     print("Mode: Single-Request Connectivity & Schema Validation (Serialized)")
     print("=" * 65)
 
@@ -63,9 +80,15 @@ async def main() -> None:
                 print(f"      Highest Buy Bid       : {currency.format_amount(parsed.highest_buy_order_minor or 0)}")
                 print(f"      Lowest Sell Ask       : {currency.format_amount(parsed.lowest_sell_order_minor or 0)}")
                 print(f"      Top Buy Quantity      : {parsed.top_level_buy_quantity}")
-                if parsed.highest_buy_order_minor:
-                    fees = calculate_seller_receives(parsed.highest_buy_order_minor, currency=currency)
-                    print(f"      Top Bid Seller Net    : {currency.format_amount(fees.seller_receives)} (exact: {fees.is_exact_match})")
+                fees = calculate_probe_fee_estimate(parsed, currency)
+                if fees is not None:
+                    print(
+                        "      Mathematical Fee Estimate (not listing validation): "
+                        f"seller net {currency.format_amount(fees.seller_receives)} "
+                        f"(requested gross {currency.format_amount(parsed.highest_buy_order_minor)}, "
+                        f"actual gross {currency.format_amount(fees.actual_buyer_pays)}, "
+                        f"exact: {fees.is_exact_match})"
+                    )
                 print("[3/3] Item Identity         : UNVERIFIED (ID 176000000 is a raw probe; resolver deferred to M2)")
                 print("\nSmoke test passed successfully without state mutations.")
                 sys.exit(0)

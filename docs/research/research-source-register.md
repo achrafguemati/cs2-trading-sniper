@@ -13,21 +13,23 @@ This register tracks official primary sources, API endpoints, protocol structure
 * **Evidence Summary:**
   - **Steam Transaction Fee:** 5% charged to buyer, collected by Steam (minimum 1 minor unit).
   - **CS2 Publisher Fee:** 10% charged to buyer, collected by Valve for CS2 (minimum 1 minor unit).
-  - **Rounding Logic:** The FAQ does not specify the exact rounding or independent-floor algorithm. The dual-floor implementation is based on Valve's public client script below and remains distinct from listing minimum rules.
+  - **Rounding Logic:** The FAQ does not specify the exact rounding or independent-floor algorithm. Fee percentages and minimum components are recorded separately from the unverified exact rounding implementation.
   - **Buy Order Matching:** "If multiple buy orders can fulfill a new listing, the oldest buy order is selected. The buyer pays the price of the listing that fulfills their order."
   - **Over-Allocated Wallets:** "When a buy order is created, funds are not removed from your wallet... when an order is matched, if you don't have enough funds, the order will be cancelled."
-* **Confidence Classification:** Fee percentages and fee minimums: **CONFIRMED BY PRIMARY SOURCE**. Exact rounding algorithm: **EMPIRICAL CLIENT-SCRIPT EVIDENCE**, not explicitly stated by the FAQ.
+* **Confidence Classification:** Fee percentages and fee minimums: **CONFIRMED BY PRIMARY SOURCE**. Exact rounding algorithm: **UNKNOWN** from this FAQ.
 * **Project Relevance:** Establishes stated fee percentages/minima and buy-order semantics. It does not establish a USD Community Market listing minimum of $0.03.
 * **Recommended Action:** Keep fee algorithm evidence and currency listing minimum evidence separate.
 * **Changes Project Requirements:** No.
 
-### 1a. Valve Community Market Client Fee Calculation
+### 1a. Valve Community Market Client Script Capture (Fee Algorithm Check)
 * **Source URL:** https://steamcommunity.com/public/javascript/economy.js
-* **Date Checked (UTC):** 2026-11-22
-* **Authority Level:** Official Valve client script; implementation may change and should be re-captured with its response hash/version.
-* **Evidence Summary:** Client code contains market fee calculation and buyer/seller amount conversion. This is the evidence source for the independent fee calculation behavior; the FAQ alone establishes rates/minima, not the rounding algorithm.
-* **Listing Minimum Evidence:** This script uses wallet information for market-specific minimums; it is not evidence that all USD market listings have a $0.03 minimum.
-* **Confidence Classification:** **EMPIRICAL OFFICIAL-CLIENT EVIDENCE**; reproducible capture/version/hash should accompany future verification.
+* **Retrieved At (UTC):** 2026-11-22T18:48:45.016585Z
+* **HTTP Status:** 200; **ETag:** `"UkadxVEWSCxz"`; **Last-Modified:** absent; **Content-Length header:** absent; **retrieved body length:** 122,968 bytes.
+* **SHA-256:** `b3410a74703160f547b56ab63ca46adac820bb3e7ecb59df55b0ee4cdc148acb`
+* **Capture record:** `docs/research/evidence/economy-js-capture-2026-11-22.json` (one unauthenticated GET, no retry).
+* **Relevant fee function names:** None found. The captured response contains no `fee` token and no matching fee/buyer/seller conversion function names. Thus this retrieval does not verify the exact fee floor/rounding algorithm.
+* **Listing Minimum Evidence:** None. This capture does not establish USD, EUR, JPY, or Tunisia Community Market listing minimums or price steps.
+* **Confidence Classification:** Successful official script retrieval; exact fee algorithm and listing rules remain **UNKNOWN** from this capture.
 
 ---
 
@@ -89,6 +91,7 @@ This register tracks official primary sources, API endpoints, protocol structure
   - Certain regional currencies have specific minimum transaction amounts and allowed price increments.
   - Steamworks lists Tunisia in the `USD_MENA` regional group. This supports USD regional pricing context; it does not establish Community Market listing minimum or price-step rules.
   - EUR is listed in eurocents, supporting two-decimal orderbook metadata. This does not establish EUR Community Market listing minimum or price-step rules.
+  - Steamworks describes JPY values in sen with 100-sen transaction increments. Whether Steam Community Market orderbook raw values use those same units is a separate **UNKNOWN research question**; do not infer it from the store-pricing table.
 * **Confidence Classification:** Currency metadata and store pricing regional group: **CONFIRMED BY PRIMARY SOURCE**. Market-specific listing minimum and price steps: **UNKNOWN** unless supported by a Community Market capture.
 * **Project Relevance:** Supports currency/precision metadata and the Tunisia USD_MENA context. It does not prove a universal market listing minimum.
 * **Recommended Action:** Keep metadata verification separate from market listing-rule verification; represent unknown listing rules explicitly.

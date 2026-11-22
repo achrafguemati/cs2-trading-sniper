@@ -1,7 +1,8 @@
-"""Steam Community Market exact fee calculation engine for Counter-Strike 2.
+"""Integer-arithmetic fee model for Steam Community Market Counter-Strike 2 transactions.
 
-Implements Valve's dual-floor fee schedule using integer minor currency units (cents).
-All operations avoid floating-point math to guarantee deterministic results.
+Models the documented fee rates/minimum components with an independent-floor formula
+using integer minor currency units. Valve's exact rounding implementation has not
+been verified from the captured public client script. All operations avoid floats.
 Enforces fail-closed safety: rejects financial calculations on unverified currencies.
 """
 
@@ -16,7 +17,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class FeeBreakdown:
-    """Exact breakdown of fees and pricing for a market transaction."""
+    """Exact arithmetic breakdown under this application's fee model."""
     seller_receives: int
     steam_fee: int
     publisher_fee: int
@@ -30,9 +31,10 @@ def calculate_buyer_pays(
     publisher_fee_pct: int = 10,
     currency: CurrencyConfig | None = None,
 ) -> FeeBreakdown:
-    """Calculate exact gross buyer cost from seller proceeds.
+    """Calculate modeled gross buyer cost from seller proceeds.
     
-    Formula based on official Valve client logic (economy.js):
+    Formula modeled from documented rates/minimum components; exact Valve rounding
+    implementation remains unverified:
     - Steam fee: 5% (floor), minimum min_fee_steam_minor (default 1)
     - Publisher fee: publisher_fee_pct% (10% for CS2, floor), minimum min_fee_publisher_minor (default 1)
     - Total buyer pays: seller_receives + steam_fee + publisher_fee
@@ -47,7 +49,7 @@ def calculate_buyer_pays(
         currency: Optional CurrencyConfig specifying verified fee floors.
         
     Returns:
-        FeeBreakdown with exact components.
+        FeeBreakdown with exact integer components under the modeled formula.
     """
     if seller_receives_minor < 1:
         raise ValueError("Seller proceeds must be at least 1 minor unit")
@@ -114,9 +116,9 @@ def calculate_seller_receives(
     currency: CurrencyConfig | None = None,
     validate_market_listing: bool = True,
 ) -> FeeBreakdown:
-    """Invert gross buyer price into seller net proceeds using exact integer boundary search.
+    """Invert gross buyer price under the fee model using integer boundary search.
     
-    Because Valve independently floors each fee, fee step jumps occur. For instance:
+    The modeled independent-floor formula creates step jumps. For instance:
     - At seller_receives = 99: Steam fee is 4 (floor(99 * 0.05) = 4), CS2 fee is 9 (floor(99 * 0.10) = 9).
       Total buyer pays is 99 + 4 + 9 = 112 minor units.
     - At seller_receives = 100: Steam fee is 5, CS2 fee is 10. Total buyer pays is 100 + 5 + 10 = 115.
@@ -126,7 +128,8 @@ def calculate_seller_receives(
     - Rejects financial calculations if currency fee rules are unverified/UNKNOWN.
     - When validate_market_listing is True (default), rejects calculations if listing minimum
       or price step are unverified/UNKNOWN.
-    - When validate_market_listing is False, performs pure mathematical fee inversion.
+    - When validate_market_listing is False, performs pure mathematical inversion under
+      this application's fee model, not market-listing validation.
     
     Args:
         requested_buyer_pays_minor: Integer minor units the buyer pays.

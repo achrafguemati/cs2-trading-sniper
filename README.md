@@ -8,8 +8,8 @@
 A local-first market research, opportunity detection, inventory tracking, and alerting application for Counter-Strike 2 on the Steam Community Market (SCM).
 
 The application features two independent, quantitative market engines sharing a common data layer:
-1. **BUY SNIPER (Mode A):** Detects genuinely underpriced individual sell listings on SCM, evaluates wear, float, stickers, and liquidity, accounts for the 7-day market re-list restriction and exact Valve fees, and alerts the user for manual purchase.
-2. **SELL SNIPER (Mode B):** Monitors marketable inventory items, detects unusually high live Steam buy orders, verifies top-level depth vs. cumulative orders, guards against "ghost" / unfunded buy orders, computes net seller proceeds, and alerts the user for manual listing.
+1. **BUY SNIPER (Mode A):** Detects potentially underpriced individual sell listings on SCM, evaluates wear, float, stickers, and liquidity, accounts for the 7-day market re-list restriction and modeled fees, and alerts the user for manual inspection.
+2. **SELL SNIPER (Mode B):** Monitors marketable inventory items, detects unusually high live Steam buy orders, verifies top-level depth vs. cumulative orders, guards against "ghost" / unfunded buy orders, computes modeled net seller proceeds, and alerts the user for manual inspection.
 
 ---
 
@@ -18,14 +18,14 @@ The application features two independent, quantitative market engines sharing a 
 1. **Strictly Read-Only:** Zero automated buying, selling, listing, or trade execution. All market actions are manually executed by the human user.
 2. **Zero Credential Storage:** The application **never** asks for, stores, or transmits Steam passwords, Steam Guard codes, `maFile` secrets, or browser session cookies.
 3. **No Rate-Limit Evasion or Proxy Rotation:** Operates within conservative sequential request pacing (target ~10 requests/min with strict sequential serialization and randomized jitter) with automated exponential backoff on HTTP 429 and immediate circuit breaker halt on HTTP 403.
-4. **Integer Cents Financial Precision:** All pricing and fee calculations operate strictly in integer minor currency units (cents), implementing Valve's exact dual-floor fee schedule without floating-point math.
+4. **Integer Minor-Unit Financial Precision:** Price and fee calculations avoid floating-point arithmetic. The dual-floor fee formula is an exact integer model; Valve's exact rounding implementation remains unverified by available client-script evidence.
 5. **Steam Wallet $\ne$ Cash:** Virtual Steam Wallet balances are strictly segregated from external cashout estimates.
 
 See the complete rules in [AGENTS.md](AGENTS.md).
 
 ---
 
-## Current Status: Milestone 1.2.3 Implementation Complete (Async Verification Pending)
+## Current Status: M1.2.3.1 Changes Complete (Async Verification Blocked by Runtime Environment)
 
 - **Milestone 1 / 1.1 / 1.2 / 1.2.1 / 1.2.2 / 1.2.3 (Implementation Complete):**
   - Read-only asynchronous HTTP client (`ReadOnlyHttpClient`) with strict request-level serialization (`asyncio.Lock`), preventing concurrent execution overlap.
@@ -38,7 +38,7 @@ See the complete rules in [AGENTS.md](AGENTS.md).
   - Fail-closed currency semantics: currency metadata, fee rules, and market listing rules are verified independently. USD, EUR, JPY, and Tunisia listing minimums/price steps remain UNKNOWN absent direct Community Market evidence; pure mathematical inversion requires `validate_market_listing=False`.
   - `calculate_seller_receives` requires explicit currency context for market listing validation; pure mathematical inversion requires the caller to explicitly disable listing validation.
   - Orderbook normalization requires verified currency metadata and minor-unit precision, independently of market listing rules; fee calculations with currency require both verified metadata and fee rules.
-  - Exact dual-floor integer-cents fee engine (`calculate_buyer_pays`, `calculate_seller_receives`, `calculate_exact_breakeven_buyer_pays`) with step-jump gap handling ($R=99 \rightarrow 112, R=100 \rightarrow 115$).
+  - Integer fee model (`calculate_buyer_pays`, `calculate_seller_receives`, `calculate_exact_breakeven_buyer_pays`) with step-jump gap handling ($R=99 \rightarrow 112, R=100 \rightarrow 115$); exact Valve rounding is unverified.
   - Strict minor-unit currency model (`CurrencyConfig`) with hardened grammar and trailing zero exactness (accepts `Decimal("22.500") -> 2250`, continues rejecting `22.501`, `22.505`, `22.50001`).
   - Strict orderbook graph validation: strictly positive orderbook prices, non-negative integer quantities without silent fractional truncation.
   - Research skills (`.agents/skills/`) and intelligence registers (`docs/research/`).
@@ -53,7 +53,7 @@ See the complete rules in [AGENTS.md](AGENTS.md).
 # 1. Install package in editable mode with dependencies
 pip install -e .
 
-# 2. Run comprehensive unit test suite (73 deterministic tests; async verification pending in the current Python 3.14 environment)
+# 2. Run comprehensive unit test suite (76 tests; async tests currently block during Windows asyncio event-loop/socketpair initialization in Python 3.14.6 and 3.13.17)
 python -m unittest discover -s tests -p "test_*.py" -v
 
 # 3. Run single-request read-only connectivity smoke test

@@ -2,14 +2,14 @@
 
 **Document Version:** 1.1  
 **Verification Date:** 22 November 2026  
-**Primary Authorities:** Valve Corporation Steam Community Market FAQ (<https://help.steampowered.com/en/faqs/view/61F0-72B7-9A18-C70B>), Steam Economy Client Scripts (`economy.js`), Steamworks Documentation  
+**Primary Authorities:** Valve Corporation Steam Community Market FAQ (<https://help.steampowered.com/en/faqs/view/61F0-72B7-9A18-C70B>) and Steamworks Documentation. The captured `economy.js` was checked but did not contain relevant fee logic.
 
 ---
 
 ## 1. Executive Summary
 
-This document defines the verified economic rules and matching mechanics governing the Steam Community Market (SCM) for Counter-Strike 2 items. It provides:
-1. Exact integer-arithmetic fee formulas (avoiding floating-point math).
+This document separates documented market rules from the application's fee model. It provides:
+1. An integer-arithmetic fee model (avoiding floating-point math); Valve's exact rounding implementation remains unverified.
 2. The integer boundary search function for backward fee inversion, reporting exact reachability.
 3. Official buy-order matching behavior, pricing rules, and FIFO priority semantics based directly on Valve's official FAQ.
 4. Exact break-even calculation rules (avoiding approximate multipliers).
@@ -18,17 +18,17 @@ This document defines the verified economic rules and matching mechanics governi
 
 ---
 
-## 2. Official Fee Schedule & Integer Arithmetic Math
+## 2. Documented Fee Rates & Integer Fee Model
 
 ### 2.1 The Two-Component Fee Structure
 Every Counter-Strike 2 transaction on the Steam Community Market incurs two distinct fees:
 1. **Steam Transaction Fee:** 5% of seller proceeds, minimum **1 minor unit** ($0.01 USD).
 2. **Counter-Strike 2 Publisher Fee:** 10% of seller proceeds, minimum **1 minor unit** ($0.01 USD).
 
-Nominal combined fee rate is 15%. However, because Valve applies mathematical flooring independently to each component using integer math and enforces a 1-cent floor on each, the effective percentage varies substantially across price tiers.
+Nominal combined fee rate is 15%. The model below uses independent mathematical floors and a one-minor-unit floor for each component. Its effective modeled percentage varies across price tiers; the captured source did not verify Valve's exact rounding implementation.
 
 ### 2.2 Forward Formula (Seller Receives $\rightarrow$ Buyer Pays)
-Valve calculates market prices from the seller's desired net proceeds upwards.
+The application models buyer prices from seller net proceeds using the formula below. The FAQ supports fee rates and minimum components but does not specify this rounding formula.
 
 Given $R$ (integer cents received by the seller):
 $$\text{steam\_fee} = \max\left(1, \, \lfloor (R \times 5) / 100 \rfloor\right)$$
@@ -60,7 +60,7 @@ Due to independent flooring, not every integer buyer total is exactly reachable 
 #### Separation of Transaction Fee Floors vs. Market Listing Minimums
 - **Transaction Fee Floors:** Mathematically, each fee component enforces a 1-minor-unit floor ($\max(1, \dots)$), giving an absolute mathematical lower bound of $1 + 1 + 1 = 3\text{ minor units}$ ($R=1$).
 - **Market Listing Minimums:** Valve's Community Market FAQ says that some currencies may have a minimum sale price but does not explicitly state that USD's minimum is $0.03. USD, EUR, JPY, and Tunisia regional listing minimums and price steps are **UNKNOWN** until a direct reproducible Community Market/client capture or explicit official documentation establishes them. The 3-cent amount above is only a mathematical fee-floor example, not listing-minimum evidence. Synthetic orderbook fixtures are not empirical evidence of live listing rules.
-- **Empirical Basis:** Fee rules are verified from Valve's public client implementation (`economy.js`). Listing minimums without primary empirical or official documentation evidence remain strictly marked as UNKNOWN.
+- **Evidence Status:** Fee percentages and minimum fee components are attributed to the Community Market FAQ. The independent-floor calculation is a tested mathematical model but remains **UNKNOWN as Valve's live implementation**: the 2026-11-22 `economy.js` capture returned HTTP 200 but contained no fee token or relevant conversion function (see `docs/research/evidence/economy-js-capture-2026-11-22.json`). Listing minimums without primary empirical or official documentation evidence remain **UNKNOWN**.
 
 The inverse fee function must never return a seller amount and claim it produces the requested buyer total if the forward formula produces a different total. It must explicitly return:
 1. `seller_receives_cents`: The largest integer seller proceeds whose resulting buyer cost does not exceed the target.
@@ -78,9 +78,9 @@ def calculate_seller_receives(
 ) -> FeeBreakdown:
     """Invert gross buyer price into seller net proceeds using exact integer boundary search.
     
-    Validates against currency-specific listing minimums and fee floors when validate_market_listing=True.
-    Fails closed if currency fee rules or listing minimums/price steps are unverified/UNKNOWN.
-    Performs pure mathematical fee inversion when validate_market_listing=False.
+    Requires CurrencyConfig and known listing rules when validate_market_listing=True.
+    Performs mathematical inversion under the project's modeled fee formula when
+    validate_market_listing=False; this does not validate a market listing.
     """
     if currency is not None:
         if not currency.is_fee_verified:

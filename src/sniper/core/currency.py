@@ -18,7 +18,8 @@ class CurrencyConfig:
     
     Separates independent verification flags:
     - is_metadata_verified: Currency ID, code, symbol, and minor unit precision verified.
-    - is_fee_verified: Steam 5% and publisher fee percentage rules verified.
+    - is_fee_verified: Fee rates and minimum components verified; this does not certify
+      the exact rounding implementation, which remains a separate algorithm question.
     - is_listing_min_verified: Steam Community Market listing minimum price verified.
     - is_price_step_verified: Steam Community Market allowed price increment verified.
     """
@@ -81,10 +82,10 @@ class CurrencyConfig:
             min_fee_steam_minor=1,
             min_fee_publisher_minor=1,
             is_metadata_verified=True,     # ID 3, EUR, €, 2 decimals verified in Steamworks
-            is_fee_verified=True,          # Fee rules verified from economy.js
+            is_fee_verified=True,          # Fee rates/minimum components, not rounding, are verified
             is_listing_min_verified=False, # UNKNOWN: Listing minimum unverified pending primary evidence
             is_price_step_verified=False,  # UNKNOWN: Price step unverified pending primary evidence
-            notes="Fee rules verified from economy.js; listing minimum and price step are UNKNOWN pending primary empirical capture.",
+            notes="Fee rates/minimum components are recorded separately from rounding evidence. Community Market listing minimum and price step are UNKNOWN.",
         )
 
     @classmethod
@@ -103,7 +104,7 @@ class CurrencyConfig:
             is_fee_verified=False,         # UNKNOWN: Fee rounding edge cases unverified
             is_listing_min_verified=False, # UNKNOWN: Listing minimum unverified
             is_price_step_verified=False,  # UNKNOWN: Price step unverified
-            notes="Zero-decimal currency. Fee rounding, listing minimum, and price steps are UNKNOWN pending official Steam verification.",
+            notes="Steamworks metadata reports JPY in sen and specifies 100-sen increments; Community Market raw orderbook units, fee rounding, listing minimum, and price steps remain separate UNKNOWN questions.",
         )
 
     @classmethod

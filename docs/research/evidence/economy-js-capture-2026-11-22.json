@@ -1,0 +1,18 @@
+{
+  "source_url": "https://steamcommunity.com/public/javascript/economy.js",
+  "retrieved_at_utc": "2026-11-22T18:48:45.016585Z",
+  "method": "single unauthenticated GET using urllib; no retry",
+  "final_url": "https://steamcommunity.com/public/javascript/economy.js",
+  "http_status": 200,
+  "etag": "\"UkadxVEWSCxz\"",
+  "last_modified": null,
+  "content_length_header": null,
+  "retrieved_body_length_bytes": 122968,
+  "sha256": "b3410a74703160f547b56ab63ca46adac820bb3e7ecb59df55b0ee4cdc148acb",
+  "fee_algorithm_search": {
+    "case_insensitive_fee_token_matches": 0,
+    "fee_buyer_seller_conversion_function_names": [],
+    "result": "The retrieved economy.js body does not provide evidence for the fee rounding/floor algorithm."
+  },
+  "conclusion": "Official fee percentages/minimum components remain sourced separately to the Community Market FAQ. Exact fee rounding implementation is UNKNOWN pending relevant primary evidence. This capture does not establish market listing minimums or price steps."
+}
