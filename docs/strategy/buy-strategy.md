@@ -55,10 +55,18 @@ The engine accepts two input formats from the user:
 ## 4. Valuation, Baselines & Premium Evaluation
 
 ### 4.1 Establishing a Robust Price Baseline
-To avoid fake discounts caused by sudden market crashes or manipulated spikes:
-1. Compute the **Volume-Weighted Median (VWM)** from the last 50 historical sales over 7 to 14 days.
-2. Establish the **Current Competitive Ask Floor ($A_{\text{floor}}$):** the median of the 3 lowest active listings excluding obvious outliers.
-3. Reference Price: $P_{\text{ref}} = \min(\text{VWM}, A_{\text{floor}})$.
+To avoid fake discounts caused by sudden market crashes, illiquidity, or manipulated spikes:
+1. **Defined Data Sources for Historical Baselines:**
+   - **Primary Source:** Steam's embedded listing page price history array (historical daily median sale price and volume tuples: `[timestamp, median_price, volume]`).
+   - **Secondary / Local Source:** Locally accumulated observations from previous polling cycles stored in the local SQLite `market_observations` table.
+   - **Important Constraint:** Steam does **not** expose individual completed transactions or trade logs through an unauthenticated endpoint. Baselines are computed from aggregated daily median price points and volume.
+2. **Minimum Data Requirements & Missing-Data Suppression:**
+   - A valid baseline requires at least **7 daily median observations** within the last 14 days and cumulative volume $\ge 10$ units.
+   - **Suppression Rule:** If historical data is missing, stale, or below the minimum volume threshold, **profit alerts are strictly suppressed**. The UI labels the item as `[BASELINE DATA INSUFFICIENT]` rather than inventing a baseline.
+3. **Reference Price Calculation:**
+   - Baseline $P_{\text{baseline}}$: Volume-Weighted Median (VWM) of verified daily median points.
+   - Current Floor $A_{\text{floor}}$: Median of the 3 lowest active eligible listings.
+   - Reference Price: $P_{\text{ref}} = \min(P_{\text{baseline}}, A_{\text{floor}})$.
 
 ### 4.2 Handling Sticker and Float Premiums
 * **Conservative Rule:** Never treat sticker or float premiums as guaranteed cash exit value.

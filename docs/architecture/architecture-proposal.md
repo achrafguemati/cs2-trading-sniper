@@ -80,30 +80,37 @@ All monetary columns are strictly **INTEGER** (minor currency units / cents).
 1. **`items`**:
    - `id` (INTEGER PRIMARY KEY), `market_hash_name` (TEXT UNIQUE), `base_name` (TEXT), `exterior` (TEXT), `is_stattrak` (BOOLEAN), `is_souvenir` (BOOLEAN), `item_nameid` (INTEGER), `group_id` (TEXT).
 2. **`watchlist_entries`**:
-   - `id` (INTEGER PRIMARY KEY), `item_id` (FK), `strategy` (TEXT: 'BUY' or 'SELL'), `max_buy_price_cents` (INTEGER), `min_sell_multiplier` (REAL), `is_active` (BOOLEAN).
+   - `id` (INTEGER PRIMARY KEY), `item_id` (FK), `strategy` (TEXT: 'BUY' or 'SELL'), `currency_id` (INTEGER), `currency_code` (TEXT), `max_buy_price_minor` (INTEGER), `min_sell_multiplier` (REAL), `is_active` (BOOLEAN).
 3. **`inventory_assets`**:
-   - `id` (INTEGER PRIMARY KEY), `asset_id` (TEXT UNIQUE), `item_id` (FK), `marketable` (BOOLEAN), `tradable` (BOOLEAN), `marketable_at` (TIMESTAMP), `cost_basis_cents` (INTEGER).
+   - `id` (INTEGER PRIMARY KEY), `asset_id` (TEXT UNIQUE), `item_id` (FK), `marketable` (BOOLEAN), `tradable` (BOOLEAN), `marketable_at` (TIMESTAMP), `cost_basis_minor` (INTEGER), `currency_code` (TEXT).
 4. **`market_observations`**:
-   - `id` (INTEGER PRIMARY KEY), `item_id` (FK), `observed_at` (TIMESTAMP), `lowest_ask_cents` (INTEGER), `highest_bid_cents` (INTEGER), `top_level_buy_qty` (INTEGER), `cumulative_buy_qty` (INTEGER), `is_crossed` (BOOLEAN).
+   - `id` (INTEGER PRIMARY KEY), `item_id` (FK), `observed_at` (TIMESTAMP), `country` (TEXT), `currency_id` (INTEGER), `currency_code` (TEXT), `minor_unit_precision` (INTEGER), `lowest_ask_minor` (INTEGER), `highest_bid_minor` (INTEGER), `top_level_buy_qty` (INTEGER), `cumulative_buy_qty` (INTEGER), `is_crossed` (BOOLEAN).
 5. **`individual_listings`**:
-   - `id` (INTEGER PRIMARY KEY), `listing_id` (TEXT UNIQUE), `item_id` (FK), `price_cents` (INTEGER), `fee_cents` (INTEGER), `inspect_link` (TEXT), `stickers_json` (TEXT), `seen_at` (TIMESTAMP), `status` (TEXT).
+   - `id` (INTEGER PRIMARY KEY), `listing_id` (TEXT UNIQUE), `item_id` (FK), `currency_id` (INTEGER), `price_minor` (INTEGER), `fee_minor` (INTEGER), `inspect_link` (TEXT), `stickers_json` (TEXT), `seen_at` (TIMESTAMP), `status` (TEXT).
 6. **`holdings`**:
-   - `id` (INTEGER PRIMARY KEY), `item_id` (FK), `acquired_at` (TIMESTAMP), `cost_cents` (INTEGER), `marketable_at` (TIMESTAMP), `resale_proceeds_cents` (INTEGER), `status` (TEXT: 'HOLDING', 'LISTED', 'SOLD').
+   - `id` (INTEGER PRIMARY KEY), `item_id` (FK), `acquired_at` (TIMESTAMP), `cost_minor` (INTEGER), `marketable_at` (TIMESTAMP), `resale_proceeds_minor` (INTEGER), `currency_code` (TEXT), `status` (TEXT: 'HOLDING', 'LISTED', 'SOLD').
 7. **`alerts`**:
-   - `id` (INTEGER PRIMARY KEY), `item_id` (FK), `strategy` (TEXT), `score` (INTEGER), `confidence` (INTEGER), `gross_price_cents` (INTEGER), `net_proceeds_cents` (INTEGER), `sent_at` (TIMESTAMP), `user_outcome` (TEXT).
+   - `id` (INTEGER PRIMARY KEY), `item_id` (FK), `strategy` (TEXT), `score` (INTEGER), `confidence` (INTEGER), `gross_price_minor` (INTEGER), `net_proceeds_minor` (INTEGER), `currency_code` (TEXT), `sent_at` (TIMESTAMP), `user_outcome` (TEXT).
 8. **`source_health`**:
-   - `id` (INTEGER PRIMARY KEY), `timestamp` (TIMESTAMP), `endpoint` (TEXT), `status_code` (INTEGER), `response_time_ms` (INTEGER), `rate_limited` (BOOLEAN).
+   - `id` (INTEGER PRIMARY KEY), `timestamp` (TIMESTAMP), `endpoint` (TEXT), `status_code` (INTEGER), `response_time_ms` (INTEGER), `rate_limited` (BOOLEAN), `retry_after_seconds` (INTEGER).
 
 ---
 
 ## 4. Rate Limiting, Pacing & Circuit Breaker Architecture
+
+*Important Note:* Observed rate limits (HTTP 429 after 2–3 unpaced requests) are local empirical observations and do not represent a universal Valve SLA. No claim of "100% reliability" or "immunity to bans" is made. The architecture enforces conservative, respectful pacing to minimize network impact.
 
 ```
                [Request Initiated by Engine]
                              |
                              v
                +---------------------------+
-               | Token Bucket Rate Limiter | <--- Max 12 requests / minute
+               | Sequential Execution Lock | <--- Strictly 1 request at a time (no concurrency)
+               +---------------------------+
+                             |
+                             v
+               +---------------------------+
+               | Token Bucket Rate Limiter | <--- Conservative budget (10 - 15 RPM target)
                +---------------------------+
                              |
                              v
@@ -116,8 +123,21 @@ All monetary columns are strictly **INTEGER** (minor currency units / cents).
                              |
                 +------------+------------+
                 |                         |
-            (HTTP 200)                (HTTP 429 / 403)
+            (HTTP 200)               (HTTP 429 / 403)
                 |                         |
+                v                         v
+        [Process JSON]          [TRIGGER CIRCUIT BREAKER]
+                                          |
+                               +----------+----------+
+                               |                     |
+                           (HTTP 429)            (HTTP 403)
+                               |                     |
+                               v                     v
+                      1. Read Retry-After     1. HALT ALL POLLING
+                      2. Wait max(RA, 300s)   2. Do NOT retry
+                      3. Exponential backoff  3. Require human review
+                      4. Log to health table  4. Flag security state
+```
                 v                         v
         [Process JSON]          [TRIGGER CIRCUIT BREAKER]
                                           |

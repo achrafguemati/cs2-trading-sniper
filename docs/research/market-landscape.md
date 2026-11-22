@@ -42,23 +42,25 @@ This document evaluates the primary execution venue (**Steam Community Market**)
 ## 3. Deep-Dive on Tunisia Regional Feasibility
 
 ### 3.1 The Banking & Currency Dilemma in Tunisia
-Traders in Tunisia face three distinct structural barriers when dealing with international skin trading sites:
-1. **Exchange Control & Currency Restrictions:** The Tunisian Dinar (TND) is non-convertible. Standard international bank cards (Visa/Mastercard) issued by Tunisian banks cannot deposit or receive foreign currency without an authorized "Carte Technologique Internationale" (CTI) or a registered export business account.
-2. **Payment Processor Redlining:**
-   - **Stripe Connect:** Does not support Tunisia for merchant accounts. While Stripe has added Tunisia as a cross-border *recipient* for certain enterprise platforms, individual automated onboarding for P2P trading payouts fails standard address/IBAN checks.
-   - **Adyen (Skinport's provider):** Explicitly excludes Tunisian domestic bank accounts from automated seller payouts.
-   - **PayPal:** Outgoing and incoming commercial transactions are heavily restricted or non-functional for Tunisian residents.
-3. **BUFF163 / Chinese Platforms Blockade:**
-   - BUFF163 instituted strict Chinese national identity KYC in 2024. Non-Chinese accounts cannot put a store online or withdraw RMB.
-   - Foreign accounts cannot deposit without Chinese Alipay/WeChat Pay.
+Traders operating from Tunisia face specific structural constraints:
+1. **Exchange Control & Currency Restrictions:** The Tunisian Dinar (TND) is non-convertible. Standard local bank cards cannot receive or transfer international currency without an authorized CTI or approved corporate export account.
+2. **Third-Party Payment Processor Coverage:**
+   - **Adyen (Skinport):** Official documentation (<https://skinport.com/faq>) restricts payouts to specific bank accounts in supported regions (primarily EEA, UK, US, Canada, Australia). Tunisia is not supported for bank payouts. Skinport terms strictly ban VPN or false location data.
+   - **Stripe Connect (CSFloat):** CSFloat historical country documentation listed Tunisia, but modern Stripe Connect merchant accounts are restricted in Tunisia. The exact payout eligibility for Tunisian residents via CSFloat wire or crypto is **UNKNOWN / UNVERIFIED** without official live confirmation.
+   - **BUFF163 & Youpin:** Official terms require a mainland Chinese citizen identity card and domestic payment systems (Alipay/WeChat). International non-Chinese accounts cannot sell or withdraw.
+   - **Crypto Cashout Marketplaces (DMarket, Waxpeer):** Marketplaces supporting cryptocurrency withdrawals (USDT, LTC, BTC) allow international users to withdraw without local Western bank rails. Sumsub KYC verification accepts Tunisian passports. However, withdrawal processing fees (3%–5%) apply.
+3. **Strict Policy on Compliance:**
+   - **Never recommend VPNs, proxy residential data, or false foreign identity documents.**
+   - If a marketplace's payout route for Tunisia cannot be established via official documentation, it is marked as `UNKNOWN` or `RESTRICTED`.
 
-### 3.2 Practical Routes for Tunisian Users
-1. **Steam Community Market (SCM):**
-   - Fully accessible from Tunisia (`steamCountry=TN`).
-   - Wallet funds are closed-loop (USD or local currency). Cannot be directly converted to cash, but can be used to buy Steam games, Steam hardware (where shipping permits), or liquid CS2 items that are later transferred.
-2. **Crypto-Enabled Marketplaces:**
-   - Marketplaces offering **USDT (TRC-20 / ERC-20), Litecoin (LTC), or Bitcoin (BTC)** payouts (such as **DMarket, Waxpeer, market.csgo, White.Market, LIS-SKINS**) represent the only verified mechanism to cash out from Tunisia without a European/US bank account.
-   - KYC: Almost all crypto-enabled marketplaces require passport/national ID verification via Sumsub or Veriff. Tunisian national identity cards and passports are accepted by Sumsub on DMarket and Waxpeer.
+### 3.2 Practical Execution Strategy for the App
+1. **Primary Strategy: Steam Community Market Internal Operations:**
+   - Both BUY and SELL engines execute on SCM.
+   - SCM is verified 100% accessible in Tunisia (`steamCountry=TN`).
+   - Wallet funds are closed-loop virtual stored value.
+2. **External Marketplaces as Valuation Benchmarks:**
+   - Use CSFloat, Skinport, and Buff public catalog prices strictly as **unbiased valuation anchors** to check whether an SCM price anomaly is real.
+   - No external marketplace selling or automated withdrawal is required or attempted.
 
 ---
 

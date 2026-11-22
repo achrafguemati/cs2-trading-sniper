@@ -36,10 +36,11 @@ To strictly respect Rule #2 (Zero Credential Storage):
 ### 3.1 Resolving the Deep Order Book
 For each marketable item:
 1. Lookup numeric `item_nameid` from the local database (`somespecialone/steam-item-name-ids`).
-2. Query `/market/itemordershistogram?country=US&language=english&currency=1&item_nameid={item_nameid}&two_factor=0`.
+2. Query `/market/itemordershistogram?country={config.country}&language={config.language}&currency={config.currency_id}&item_nameid={item_nameid}&two_factor=0`.
+   *(Note: `country`, `language`, and `currency_id` are explicit user configuration options stored with every observation; never hard-coded to US/USD).*
 3. Parse the following metrics:
-   - `highest_buy_order`: Top buyer bid (integer cents).
-   - `lowest_sell_order`: Cheapest active listing (integer cents).
+   - `highest_buy_order`: Top buyer bid (integer minor units).
+   - `lowest_sell_order`: Cheapest active listing (integer minor units).
    - `buy_order_graph`: Array of depth points `[price, cumulative_qty, description]`.
    - `buy_order_table`: HTML table of discrete price levels.
 
@@ -50,75 +51,74 @@ For each marketable item:
 * **Engine Parsing Rule:**
   - `cumulative_quantity` = 211,731 (total buy orders across all price points down to $0.03).
   - `top_level_quantity` = 1 (exact number of items requested at the peak bid).
-* **Alert Warning:** If `top_level_quantity == 1`, the alert must carry a `Single-Item Fill Only` warning: if another seller beats you by 1 second, your item will not fill.
+* **Alert Warning:** If `top_level_quantity == 1`, the alert must carry a `Single-Item Top Bid` warning: only a single item can execute at this exact price level.
 
 ---
 
-## 4. Anomaly Detection & Ghost Order Defense
+## 4. Anomaly Detection & Order-Book Validation
 
 ### 4.1 What Constitutes an "Unusually High" Buy Order?
 A high buy order is triggered when:
-1. `highest_buy_order >= min_alert_threshold` (e.g. $\ge \$1.00 USD).
+1. `highest_buy_order >= min_alert_threshold` (e.g. $\ge 100$ minor units).
 2. **Multiple Over Baseline:**
    $$\text{Bid Multiple} = \frac{\text{highest\_buy\_order}}{P_{\text{baseline}}} \ge \text{configurable\_multiplier (e.g. } 1.30\times \text{ to } 3.00\times)$$
-   Where $P_{\text{baseline}}$ is the 7-day median sale price.
+   Where $P_{\text{baseline}}$ is a verified historical baseline (e.g., median from local historical snapshots or verified Steam history). If no baseline is available, the alert is suppressed.
 
-### 4.2 Defending Against Ghost / Unfunded Buy Orders
-As established in our research, unfunded buy orders linger on the market until a sale is attempted:
-1. **Pre-Alert Re-Check:**
-   - Before firing an alert, the engine pauses 3 seconds and re-queries `itemordershistogram`.
-   - If the bid vanished or shifted downward, the alert is cancelled.
-2. **Crossed Book Check (`highest_buy_order >= lowest_sell_order`):**
-   - If the highest bid is greater than or equal to the lowest ask, the book is **crossed**.
-   - On SCM, a crossed book almost always signals:
-     a) The high buy order is unfunded (ghost) and failed to match the cheap listing, OR
-     b) Steam CDN cache desynchronization.
-   - **Engine Action:** Mark alert status as `SUSPICIOUS: CROSSED BOOK`. Require explicit user skepticism.
-3. **Spread Analysis:**
-   - If `highest_buy_order` is 200% above the lowest sell listing, flag as `Probable Ghost / Unfunded Bid`.
+### 4.2 Buy Order Semantics & Execution Realities (Valve Rules)
+* **Maximum Bid Commitment:** A buy order is the maximum amount the buyer is willing to spend.
+* **Execution Price Rule:** If an item is listed for less than the buy order, the buyer pays the lower price. Listing below the highest buy order does NOT automatically yield the highest buy order price to the seller.
+* **Order Priority:** When multiple buy orders exist that can fulfill a listing, Valve's matching engine selects the **oldest matching buy order** (FIFO by timestamp among eligible bids).
+* **Wallet Balance & Order Cancellation:** Valve's official FAQ states that buy orders are automatically cancelled when an account's wallet balance can no longer fulfill them. We do not assume visible orders are definitively unfunded.
+* **Persistence Check:** The engine pauses 3 seconds and re-queries `itemordershistogram`. This step confirms that the displayed market data persisted and was not an ephemeral snapshot, but does **not** prove that funds are reserved or that fill is guaranteed.
+* **Inconsistent / Crossed Book Snapshots (`highest_buy_order >= lowest_sell_order`):**
+  - If the highest bid is $\ge$ lowest ask, the book is in an **inconsistent snapshot state** (frequently caused by Steam CDN caching lag or variant tag mismatches).
+  - **Engine Action:** Mark alert status as `INCONSISTENT SNAPSHOT / CROSSED BOOK`. Re-query after cooldown; never treat crossed book as an instant fill signal.
+* **Status Classification:** Label anomalous bids as `Unverified High Bid` (never definitively "Ghost Order" without execution evidence).
 
 ---
 
 ## 5. Seller Proceeds Calculation & Economics
 
-Given the top buyer bid $B_{\text{cents}}$:
-1. Use the exact integer cents inversion function:
-   $$R_{\text{cents}}, \, \text{steam\_fee}_{\text{cents}}, \, \text{pub\_fee}_{\text{cents}} = \text{calculate\_seller\_receives}(B_{\text{cents}})$$
-2. Compare against normal sale proceeds:
-   - $R_{\text{normal}} = \text{calculate\_seller\_receives}(P_{\text{baseline}})$
-   - $\text{Incremental Net Gain} = R_{\text{cents}} - R_{\text{normal}}$
-3. The alert displays both:
-   - **Buyer Pays (Listing Price):** $B_{\text{cents}} / 100$
-   - **Seller Receives (Net Wallet):** $R_{\text{cents}} / 100$
+Given the top buyer bid $B$ (integer minor units):
+1. Use the exact integer inversion function:
+   $$\text{calc} = \text{calculate\_seller\_receives}(B)$$
+   $$R = \text{calc}['\text{seller\_receives}'], \, B_{\text{actual}} = \text{calc}['\text{actual\_buyer\_pays}']$$
+2. If `calc['is_exact_match']` is False, warn the user that $B$ is in a fee step-jump and listing at $B$ may adjust to $B_{\text{actual}}$.
+3. Compare against normal sale proceeds:
+   - $R_{\text{normal}} = \text{calculate\_seller\_receives}(P_{\text{baseline}})['\text{seller\_receives}']$
+   - $\text{Incremental Net Gain} = R - R_{\text{normal}}$
+4. The alert displays:
+   - **Buyer Pays (Listing Target):** $B / 100$ (or currency minor unit divisor)
+   - **Seller Receives (Net Wallet):** $R / 100$
    - **Incremental Profit:** $+ \$X.XX$ vs normal sale.
 
 ---
 
 ## 6. Execution Verification & Feedback Loop
 
-Because buy orders can disappear or fail funding checks:
-1. **Manual Execution Instructions:**
+Because market conditions fluctuate and high bids may be fulfilled by other users before the user lists:
+1. **Manual Listing Instructions:**
    - The user opens their Steam Inventory page.
-   - Selects the exact item.
+   - Selects the exact matching item and wear.
    - Sets the "Buyer Pays" amount to the exact `highest_buy_order` price.
 2. **Precision Tracking in Database:**
    - After an alert is issued, the app records an `alert_event` in SQLite.
-   - User clicks one of three feedback buttons on the dashboard:
+   - User logs the outcome via the UI:
      - `Filled Successfully` (records realized gain, increments model precision).
-     - `Ghost / Failed Execution` (records ghost event, penalizes item anomaly score).
-     - `Expired / Too Slow` (bid was taken by someone else).
-   - This allows the system to self-measure its real-world alert precision over time.
+     - `Unfilled / Cancelled` (bid vanished or failed to match).
+     - `Expired / Beaten by Another Seller`.
+   - Allows tracking real-world alert precision over time.
 
 ---
 
 ## 7. Actionable Alert Output
 
-* `[SELL CANDIDATE]` status label.
+* `[SELL CANDIDATE: UNVERIFIED HIGH BID]` status label.
 * Exact Item Name, Wear & Inventory Asset ID.
 * Live Highest Buy Order (Buyer Pays).
 * Top-Level Quantity (e.g. `1 available`) vs Cumulative Orders.
 * Lowest Active Sell Listing (Ask) & Spread.
 * Calculated Seller Proceeds (Net into Steam Wallet).
 * Incremental Gain vs. Normal Market Value.
-* Warning Tags: `Ghost Risk: High`, `Crossed Book: No`, `Single Unit`.
+* Warning Tags: `Snapshot Status: Consistent`, `Single Unit at Top Bid`.
 * Direct Steam inventory listing link.
