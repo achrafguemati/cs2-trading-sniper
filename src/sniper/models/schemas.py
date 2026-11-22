@@ -155,15 +155,57 @@ class OrderbookHistogramResponse(BaseModel):
         """Normalize a single graph entry [raw_price, quantity, description].
         
         Converts exact Decimal price to integer minor units strictly without binary float arithmetic.
-        Rejects values that cannot be represented exactly in minor units (e.g. 22.501).
+        Rejects non-positive prices and values that cannot be represented exactly in minor units (e.g. 22.501).
+        Accepts trailing zeroes representing the exact same minor unit amount (e.g. 22.500 -> 2250).
+        Validates quantity as non-negative integer without silently truncating fractional quantities.
         If currency context is missing or unverified, marks price_minor as None (UNKNOWN).
         """
         if len(entry) < 3:
             raise ValueError(f"Malformed graph entry: {entry}")
 
         raw_price = entry[0]
-        qty = int(entry[1])
+        raw_qty = entry[1]
         desc = str(entry[2])
+
+        # Validate quantity: must be non-negative integer without silent fractional truncation
+        if isinstance(raw_qty, bool):
+            raise ValueError(f"Invalid graph quantity: {raw_qty}. Booleans cannot be quantities.")
+        elif isinstance(raw_qty, int):
+            if raw_qty < 0:
+                raise ValueError(f"Invalid graph quantity: {raw_qty}. Quantity must be non-negative.")
+            qty = raw_qty
+        elif isinstance(raw_qty, (Decimal, float, str)):
+            try:
+                d_qty = Decimal(str(raw_qty).strip())
+            except Exception as e:
+                raise ValueError(f"Invalid graph quantity '{raw_qty}': could not parse as number.") from e
+            if d_qty < 0:
+                raise ValueError(f"Invalid graph quantity: {d_qty}. Quantity must be non-negative.")
+            if d_qty != d_qty.to_integral_value():
+                raise ValueError(
+                    f"Invalid graph quantity: {raw_qty}. Fractional quantities cannot be silently truncated."
+                )
+            qty = int(d_qty)
+        else:
+            raise TypeError(f"Unsupported graph quantity type: {type(raw_qty).__name__}")
+
+        # Validate price: convert to Decimal and ensure strictly positive
+        if isinstance(raw_price, bool):
+            raise ValueError(f"Invalid orderbook price: {raw_price}. Booleans cannot be prices.")
+        elif isinstance(raw_price, float):
+            d = Decimal(str(raw_price))
+        elif isinstance(raw_price, (Decimal, int)):
+            d = Decimal(raw_price)
+        elif isinstance(raw_price, str):
+            try:
+                d = Decimal(raw_price.strip())
+            except Exception as e:
+                raise ValueError(f"Invalid orderbook price: '{raw_price}'. Non-numeric string.") from e
+        else:
+            raise TypeError(f"Unsupported price token type: {type(raw_price).__name__}")
+
+        if d <= 0:
+            raise ValueError(f"Invalid orderbook price: {d}. Orderbook prices must be strictly positive.")
 
         if currency is None or not currency.is_verified:
             return NormalizedDepthEntry(
@@ -174,15 +216,6 @@ class OrderbookHistogramResponse(BaseModel):
                 currency_code=currency.code if currency else None,
                 is_currency_verified=False,
             )
-
-        if isinstance(raw_price, float):
-            d = Decimal(str(raw_price))
-        elif isinstance(raw_price, (Decimal, int)):
-            d = Decimal(raw_price)
-        elif isinstance(raw_price, str):
-            d = Decimal(raw_price.strip())
-        else:
-            raise TypeError(f"Unsupported price token type: {type(raw_price).__name__}")
 
         price_minor = currency.parse_to_minor_units(d)
 

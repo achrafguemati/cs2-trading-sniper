@@ -1,4 +1,6 @@
-"""Unit tests for read-only HTTP client safety, status handling, headers, URL security, and circuit breaking."""
+"""Unit tests for read-only HTTP client safety, status handling, headers, URL security, redirect pacing, and circuit breaking."""
+
+from __future__ import annotations
 
 import asyncio
 import unittest
@@ -18,6 +20,15 @@ from sniper.core.rate_limiter import (
     SecurityBlockError,
     SequentialRateLimiter,
 )
+
+# Test-specific configuration injecting mock test routes (not present in production defaults)
+TEST_ALLOWED_EXACT_PATHS = frozenset({
+    "/test",
+    "/subsequent",
+    "/missing",
+    "/error",
+    "/market/itemordershistogram",
+})
 
 
 class DummySchema(BaseModel):
@@ -47,43 +58,115 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
 
         # Disallowed scheme: HTTP
         with self.assertRaises(SecurityError):
-            await client.get("http://steamcommunity.com/market/itemordershistogram")
+            client.validate_url("http://steamcommunity.com/market/itemordershistogram")
 
         # Disallowed external host
         with self.assertRaises(SecurityError):
-            await client.get("https://evil-market.com/market/itemordershistogram")
+            client.validate_url("https://evil-market.com/market/itemordershistogram")
 
         # Disallowed unapproved path
         with self.assertRaises(SecurityError):
-            await client.get("https://steamcommunity.com/login")
+            client.validate_url("https://steamcommunity.com/login")
+
+    def test_default_production_url_allowlist_rejects_mock_test_routes(self):
+        """Default production client must reject /test, /subsequent, /missing, and /error."""
+        client = ReadOnlyHttpClient()
+        for path in ["/test", "/subsequent", "/missing", "/error"]:
+            with self.assertRaises(SecurityError):
+                client.validate_url(f"https://steamcommunity.com{path}")
+
+    def test_reject_url_userinfo(self):
+        """Reject URLs containing embedded username or password."""
+        client = ReadOnlyHttpClient()
+        with self.assertRaises(SecurityError):
+            client.validate_url("https://user:pass@steamcommunity.com/market/itemordershistogram")
+        with self.assertRaises(SecurityError):
+            client.validate_url("https://user@steamcommunity.com/market/itemordershistogram")
+
+    def test_reject_non_default_ports(self):
+        """Reject non-default ports; accept default port 443."""
+        client = ReadOnlyHttpClient()
+        with self.assertRaises(SecurityError):
+            client.validate_url("https://steamcommunity.com:8080/market/itemordershistogram")
+        with self.assertRaises(SecurityError):
+            client.validate_url("https://steamcommunity.com:80/market/itemordershistogram")
+        with self.assertRaises(SecurityError):
+            client.validate_url("https://steamcommunity.com:8443/market/itemordershistogram")
+
+        # Port 443 is valid default for HTTPS
+        client.validate_url("https://steamcommunity.com:443/market/itemordershistogram")
+
+    def test_exact_path_matching_for_itemordershistogram(self):
+        """Exact path matching for itemordershistogram: reject extended or nested paths."""
+        client = ReadOnlyHttpClient()
+        client.validate_url("https://steamcommunity.com/market/itemordershistogram")
+
+        with self.assertRaises(SecurityError):
+            client.validate_url("https://steamcommunity.com/market/itemordershistogram_fake")
+        with self.assertRaises(SecurityError):
+            client.validate_url("https://steamcommunity.com/market/itemordershistogram/nested")
+
+    def test_path_boundaries_listings_and_inventory(self):
+        """Validate path boundaries for listing and inventory endpoints."""
+        client = ReadOnlyHttpClient()
+
+        # Valid listing endpoints
+        client.validate_url("https://steamcommunity.com/market/listings/730/AK-47%20%7C%20Redline%20(Field-Tested)")
+        client.validate_url("https://steamcommunity.com/market/listings/730")
+        client.validate_url("https://steamcommunity.com/market/listings/730/")
+
+        # Invalid listing endpoints (boundary violations)
+        with self.assertRaises(SecurityError):
+            client.validate_url("https://steamcommunity.com/market/listings/730_evil")
+        with self.assertRaises(SecurityError):
+            client.validate_url("https://steamcommunity.com/market/listings/731/item")
+        with self.assertRaises(SecurityError):
+            client.validate_url("https://steamcommunity.com/market/listings")
+
+        # Valid inventory endpoints
+        client.validate_url("https://steamcommunity.com/inventory/76561198000000000/730/2")
+        client.validate_url("https://steamcommunity.com/inventory")
+        client.validate_url("https://steamcommunity.com/inventory/")
+
+        # Invalid inventory endpoints (boundary violations)
+        with self.assertRaises(SecurityError):
+            client.validate_url("https://steamcommunity.com/inventory_evil/123")
+        with self.assertRaises(SecurityError):
+            client.validate_url("https://steamcommunity.com/inventoryfake")
 
     async def test_redirect_cross_host_rejection(self):
-        """Cross-host redirect must be rejected immediately before following."""
+        """Cross-host redirect must be rejected immediately before following and make no second request."""
+        request_count = 0
+
         def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.path == "/test_redirect":
+            nonlocal request_count
+            request_count += 1
+            if request.url.path == "/market/listings/730/source":
                 return httpx.Response(302, headers={"Location": "https://attacker.com/steal"})
             return httpx.Response(200, json={"success": 1})
 
-        client = ReadOnlyHttpClient(
-            allowed_path_prefixes=("/test_redirect", "/market/"),
-            transport=httpx.MockTransport(handler)
-        )
+        client = ReadOnlyHttpClient(transport=httpx.MockTransport(handler))
         with self.assertRaises(SecurityError):
-            await client.get("https://steamcommunity.com/test_redirect")
+            await client.get("https://steamcommunity.com/market/listings/730/source")
+
+        self.assertEqual(request_count, 1)
 
     async def test_redirect_scheme_downgrade_rejection(self):
-        """HTTPS to HTTP downgrade redirect must be rejected."""
+        """HTTPS to HTTP downgrade redirect must be rejected immediately before following."""
+        request_count = 0
+
         def handler(request: httpx.Request) -> httpx.Response:
-            if request.url.path == "/test_downgrade":
-                return httpx.Response(301, headers={"Location": "http://steamcommunity.com/market/listings/730/test"})
+            nonlocal request_count
+            request_count += 1
+            if request.url.path == "/market/listings/730/source":
+                return httpx.Response(301, headers={"Location": "http://steamcommunity.com/market/listings/730/dest"})
             return httpx.Response(200, json={"success": 1})
 
-        client = ReadOnlyHttpClient(
-            allowed_path_prefixes=("/test_downgrade", "/market/"),
-            transport=httpx.MockTransport(handler)
-        )
+        client = ReadOnlyHttpClient(transport=httpx.MockTransport(handler))
         with self.assertRaises(SecurityError):
-            await client.get("https://steamcommunity.com/test_downgrade")
+            await client.get("https://steamcommunity.com/market/listings/730/source")
+
+        self.assertEqual(request_count, 1)
 
     async def test_valid_safe_redirect_followed(self):
         """Safe redirect within allowed host and path must be followed and succeed."""
@@ -99,6 +182,42 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["success"], 1)
         self.assertTrue(data["final"])
 
+    async def test_redirect_pacing_and_multirequest_rate_limiter_acquisition(self):
+        """Every redirect hop must acquire the rate limiter separately, maintaining pacing."""
+        hop_requests = []
+        acquire_count = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            hop_requests.append(str(request.url))
+            if request.url.path == "/market/listings/730/hop1":
+                return httpx.Response(302, headers={"Location": "/market/listings/730/hop2"})
+            elif request.url.path == "/market/listings/730/hop2":
+                return httpx.Response(302, headers={"Location": "/market/listings/730/hop3"})
+            elif request.url.path == "/market/listings/730/hop3":
+                return httpx.Response(200, json={"success": 1, "final": True})
+            return httpx.Response(404)
+
+        config = RateLimiterConfig(min_delay_seconds=0.01, max_delay_seconds=0.02, jitter_max_seconds=0.0)
+        limiter = SequentialRateLimiter(config=config)
+
+        orig_acquire = limiter.acquire
+
+        async def spy_acquire():
+            nonlocal acquire_count
+            acquire_count += 1
+            await orig_acquire()
+
+        limiter.acquire = spy_acquire
+
+        client = ReadOnlyHttpClient(rate_limiter=limiter, transport=httpx.MockTransport(handler))
+        data = await client.get_json("https://steamcommunity.com/market/listings/730/hop1")
+
+        self.assertEqual(data["success"], 1)
+        self.assertTrue(data["final"])
+        self.assertEqual(len(hop_requests), 3)
+        # Exactly 3 acquires for 3 requests (1 initial + 2 redirect hops)
+        self.assertEqual(acquire_count, 3)
+
     async def test_exact_outgoing_headers(self):
         """Verify client sends transparent, non-spoofed application headers and zero Sec-Fetch-* headers."""
         captured_request: httpx.Request | None = None
@@ -108,7 +227,10 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
             captured_request = request
             return httpx.Response(200, json={"success": 1})
 
-        client = ReadOnlyHttpClient(transport=httpx.MockTransport(handler))
+        client = ReadOnlyHttpClient(
+            allowed_exact_paths=TEST_ALLOWED_EXACT_PATHS,
+            transport=httpx.MockTransport(handler),
+        )
         await client.get("https://steamcommunity.com/test")
 
         self.assertIsNotNone(captured_request)
@@ -128,7 +250,10 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"success": 1, "data": "ok"})
 
-        client = ReadOnlyHttpClient(transport=httpx.MockTransport(handler))
+        client = ReadOnlyHttpClient(
+            allowed_exact_paths=TEST_ALLOWED_EXACT_PATHS,
+            transport=httpx.MockTransport(handler),
+        )
         data = await client.get_json("https://steamcommunity.com/test")
         self.assertEqual(data["success"], 1)
 
@@ -136,7 +261,10 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(404, text="Not Found")
 
-        client = ReadOnlyHttpClient(transport=httpx.MockTransport(handler))
+        client = ReadOnlyHttpClient(
+            allowed_exact_paths=TEST_ALLOWED_EXACT_PATHS,
+            transport=httpx.MockTransport(handler),
+        )
         with self.assertRaises(httpx.HTTPStatusError):
             await client.get("https://steamcommunity.com/missing")
 
@@ -144,7 +272,10 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(500, text="Internal Server Error")
 
-        client = ReadOnlyHttpClient(transport=httpx.MockTransport(handler))
+        client = ReadOnlyHttpClient(
+            allowed_exact_paths=TEST_ALLOWED_EXACT_PATHS,
+            transport=httpx.MockTransport(handler),
+        )
         with self.assertRaises(httpx.HTTPStatusError):
             await client.get("https://steamcommunity.com/error")
 
@@ -153,7 +284,11 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(429, headers={"Retry-After": "45"}, text="Too Many Requests")
 
         limiter = SequentialRateLimiter(config=RateLimiterConfig(initial_backoff_seconds=10.0))
-        client = ReadOnlyHttpClient(rate_limiter=limiter, transport=httpx.MockTransport(handler))
+        client = ReadOnlyHttpClient(
+            rate_limiter=limiter,
+            allowed_exact_paths=TEST_ALLOWED_EXACT_PATHS,
+            transport=httpx.MockTransport(handler),
+        )
         
         with self.assertRaises(RateLimitExceededError):
             await client.get("https://steamcommunity.com/test")
@@ -165,7 +300,11 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(403, text="Forbidden")
 
         limiter = SequentialRateLimiter()
-        client = ReadOnlyHttpClient(rate_limiter=limiter, transport=httpx.MockTransport(handler))
+        client = ReadOnlyHttpClient(
+            rate_limiter=limiter,
+            allowed_exact_paths=TEST_ALLOWED_EXACT_PATHS,
+            transport=httpx.MockTransport(handler),
+        )
         
         with self.assertRaises(SecurityBlockError):
             await client.get("https://steamcommunity.com/test")
@@ -185,7 +324,11 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
             )
 
         limiter = SequentialRateLimiter(config=RateLimiterConfig(min_delay_seconds=0.01, max_delay_seconds=0.02, jitter_max_seconds=0.0))
-        client = ReadOnlyHttpClient(rate_limiter=limiter, transport=httpx.MockTransport(handler))
+        client = ReadOnlyHttpClient(
+            rate_limiter=limiter,
+            allowed_exact_paths=TEST_ALLOWED_EXACT_PATHS,
+            transport=httpx.MockTransport(handler),
+        )
 
         with self.assertRaises(UnexpectedResponseError):
             await client.get_json("https://steamcommunity.com/test")
@@ -207,7 +350,11 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(200, content=b"{malformed json without close")
 
         limiter = SequentialRateLimiter(config=RateLimiterConfig(min_delay_seconds=0.01, max_delay_seconds=0.02, jitter_max_seconds=0.0))
-        client = ReadOnlyHttpClient(rate_limiter=limiter, transport=httpx.MockTransport(handler))
+        client = ReadOnlyHttpClient(
+            rate_limiter=limiter,
+            allowed_exact_paths=TEST_ALLOWED_EXACT_PATHS,
+            transport=httpx.MockTransport(handler),
+        )
 
         with self.assertRaises(UnexpectedResponseError):
             await client.get_json("https://steamcommunity.com/test")
@@ -229,7 +376,11 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(200, json={"required_key": 12345})
 
         limiter = SequentialRateLimiter(config=RateLimiterConfig(min_delay_seconds=0.01, max_delay_seconds=0.02, jitter_max_seconds=0.0))
-        client = ReadOnlyHttpClient(rate_limiter=limiter, transport=httpx.MockTransport(handler))
+        client = ReadOnlyHttpClient(
+            rate_limiter=limiter,
+            allowed_exact_paths=TEST_ALLOWED_EXACT_PATHS,
+            transport=httpx.MockTransport(handler),
+        )
 
         with self.assertRaises(UnexpectedResponseError):
             await client.get_json("https://steamcommunity.com/test", schema=DummySchema)
@@ -263,7 +414,11 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
         transport = httpx.MockTransport(slow_handler)
         config = RateLimiterConfig(min_delay_seconds=0.01, max_delay_seconds=0.02, jitter_max_seconds=0.0)
         limiter = SequentialRateLimiter(config=config)
-        client = ReadOnlyHttpClient(rate_limiter=limiter, transport=transport)
+        client = ReadOnlyHttpClient(
+            rate_limiter=limiter,
+            allowed_exact_paths=TEST_ALLOWED_EXACT_PATHS,
+            transport=transport,
+        )
 
         await asyncio.gather(
             client.get("https://steamcommunity.com/test"),

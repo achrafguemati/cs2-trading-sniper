@@ -24,7 +24,7 @@ from sniper.models.schemas import OrderbookHistogramResponse
 
 async def main() -> None:
     print("=" * 65)
-    print("CS2 Trading Sniper - Milestone 1.2.1 Read-Only Smoke Test")
+    print("CS2 Trading Sniper - Milestone 1.2.2 Read-Only Smoke Test")
     print("Mode: Single-Request Connectivity & Schema Validation (Serialized)")
     print("=" * 65)
 

@@ -1,11 +1,15 @@
 """Unit tests for Steam fee calculations, currency-specific minimums, and fail-closed safety."""
 
+from __future__ import annotations
+
 import unittest
+
 from sniper.core.currency import CurrencyConfig
 from sniper.core.fees import (
     calculate_buyer_pays,
-    calculate_seller_receives,
     calculate_exact_breakeven_buyer_pays,
+    calculate_seller_receives,
+    validate_market_listing_price,
 )
 
 
@@ -60,14 +64,11 @@ class TestFees(unittest.TestCase):
         res = calculate_seller_receives(breakeven_buyer)
         self.assertGreaterEqual(res.seller_receives, cost)
 
-    def test_currency_specific_minimum_usd_and_eur(self):
-        """USD and EUR have verified minimum buyer pays of 3 minor units ($0.03 / €0.03)."""
+    def test_currency_specific_minimum_usd(self):
+        """USD has verified minimum buyer pays of 3 minor units ($0.03) from Valve FAQ."""
         usd = CurrencyConfig.get_default_usd()
-        eur = CurrencyConfig.get_eur()
         self.assertTrue(usd.is_verified)
-        self.assertTrue(eur.is_verified)
         self.assertEqual(usd.min_listing_price_minor, 3)
-        self.assertEqual(eur.min_listing_price_minor, 3)
 
         # 3 minor units succeeds
         res_usd = calculate_seller_receives(3, currency=usd)
@@ -77,8 +78,80 @@ class TestFees(unittest.TestCase):
         # 2 minor units raises ValueError due to currency min listing price
         with self.assertRaises(ValueError):
             calculate_seller_receives(2, currency=usd)
+
+    def test_eur_unverified_listing_rules_fails_closed_on_market_validation(self):
+        """EUR fee rules are verified, but listing minimum is UNKNOWN without primary evidence.
+        
+        Market listing validation fails closed; pure fee calculation succeeds.
+        """
+        eur = CurrencyConfig.get_eur()
+        self.assertTrue(eur.is_fee_verified)
+        self.assertFalse(eur.is_listing_min_verified)
+        self.assertIsNone(eur.min_listing_price_minor)
+        self.assertFalse(eur.is_verified)
+
+        # Default market listing validation fails closed
         with self.assertRaises(ValueError):
-            calculate_seller_receives(2, currency=eur)
+            calculate_seller_receives(100, currency=eur)
+
+        with self.assertRaises(ValueError):
+            validate_market_listing_price(100, eur)
+
+        # Pure fee calculation succeeds
+        pure_res = calculate_seller_receives(100, currency=eur, validate_market_listing=False)
+        self.assertEqual(pure_res.seller_receives, 88)
+        self.assertEqual(pure_res.actual_buyer_pays, 100)
+
+    def test_fee_verified_true_but_listing_min_unknown(self):
+        """Currency with verified fees but UNKNOWN listing minimum must fail market validation."""
+        cfg = CurrencyConfig(
+            currency_id=98,
+            code="TEST",
+            symbol="T",
+            minor_unit_precision=2,
+            min_listing_price_minor=None,  # UNKNOWN
+            price_step_minor=1,
+            is_metadata_verified=True,
+            is_fee_verified=True,
+            is_listing_min_verified=False, # UNKNOWN
+            is_price_step_verified=True,
+        )
+        # Market listing validation fails closed
+        with self.assertRaises(ValueError):
+            calculate_seller_receives(100, currency=cfg, validate_market_listing=True)
+
+        with self.assertRaises(ValueError):
+            validate_market_listing_price(100, cfg)
+
+        # Pure fee calculation succeeds
+        res = calculate_seller_receives(100, currency=cfg, validate_market_listing=False)
+        self.assertEqual(res.seller_receives, 88)
+        self.assertEqual(res.actual_buyer_pays, 100)
+
+    def test_price_step_verified_false_with_price_step_one(self):
+        """Currency with unverified price step must not silently pass default price_step_minor=1."""
+        cfg = CurrencyConfig(
+            currency_id=97,
+            code="TEST2",
+            symbol="T2",
+            minor_unit_precision=2,
+            min_listing_price_minor=3,
+            price_step_minor=1,             # default value 1
+            is_metadata_verified=True,
+            is_fee_verified=True,
+            is_listing_min_verified=True,
+            is_price_step_verified=False,   # UNKNOWN price step
+        )
+        # Market listing validation fails closed
+        with self.assertRaises(ValueError):
+            calculate_seller_receives(100, currency=cfg, validate_market_listing=True)
+
+        with self.assertRaises(ValueError):
+            validate_market_listing_price(100, cfg)
+
+        # Pure fee calculation succeeds
+        res = calculate_seller_receives(100, currency=cfg, validate_market_listing=False)
+        self.assertEqual(res.seller_receives, 88)
 
     def test_unverified_currency_fails_closed(self):
         """Unverified currencies (like JPY) must strictly fail closed on financial fee calculations."""
@@ -91,9 +164,11 @@ class TestFees(unittest.TestCase):
         with self.assertRaises(ValueError):
             calculate_buyer_pays(100, currency=jpy)
 
-        # calculate_seller_receives on unverified currency must raise ValueError
+        # calculate_seller_receives on unverified currency must raise ValueError (both modes)
         with self.assertRaises(ValueError):
-            calculate_seller_receives(100, currency=jpy)
+            calculate_seller_receives(100, currency=jpy, validate_market_listing=True)
+        with self.assertRaises(ValueError):
+            calculate_seller_receives(100, currency=jpy, validate_market_listing=False)
 
     def test_custom_currency_with_price_step_and_higher_minimum(self):
         """Test custom currency configuration with verified non-standard price step and minimum."""
@@ -122,13 +197,22 @@ class TestFees(unittest.TestCase):
             calculate_seller_receives(12, currency=custom)
 
     def test_tunisia_context_billing(self):
-        """Tunisia context must map to USD billing without inventing an unsupported TND currency."""
+        """Tunisia context maps to USD billing; regional listing rules are UNKNOWN."""
         tn = CurrencyConfig.get_tunisia_context()
         self.assertEqual(tn.code, "USD")
         self.assertEqual(tn.country, "TN")
-        self.assertEqual(tn.min_listing_price_minor, 3)
-        self.assertTrue(tn.is_verified)
-        self.assertIn("TND is not a supported Steam wallet currency", tn.notes)
+        self.assertIsNone(tn.min_listing_price_minor)
+        self.assertFalse(tn.is_listing_min_verified)
+        self.assertFalse(tn.is_price_step_verified)
+        self.assertTrue(tn.is_fee_verified)
+
+        # Market listing validation fails closed
+        with self.assertRaises(ValueError):
+            calculate_seller_receives(100, currency=tn, validate_market_listing=True)
+
+        # Pure fee calculation succeeds
+        res = calculate_seller_receives(100, currency=tn, validate_market_listing=False)
+        self.assertEqual(res.seller_receives, 88)
 
     def test_invalid_arguments(self):
         with self.assertRaises(ValueError):

@@ -76,10 +76,43 @@ def calculate_buyer_pays(
     )
 
 
+def validate_market_listing_price(
+    buyer_pays_minor: int,
+    currency: CurrencyConfig,
+) -> None:
+    """Validate buyer price against market listing minimum and price step increment.
+    
+    Fails closed if listing minimum or price step are UNKNOWN/unverified.
+    """
+    if not currency.is_listing_min_verified or currency.min_listing_price_minor is None:
+        raise ValueError(
+            f"Market listing validation rejected: listing minimum for currency '{currency.code}' "
+            f"is unverified/UNKNOWN."
+        )
+    if buyer_pays_minor < currency.min_listing_price_minor:
+        raise ValueError(
+            f"Requested price {buyer_pays_minor} is below minimum market listing price "
+            f"of {currency.min_listing_price_minor} for {currency.code}"
+        )
+
+    if not currency.is_price_step_verified:
+        raise ValueError(
+            f"Market listing validation rejected: price step for currency '{currency.code}' "
+            f"is unverified/UNKNOWN."
+        )
+    if currency.price_step_minor > 1:
+        if buyer_pays_minor % currency.price_step_minor != 0:
+            raise ValueError(
+                f"Requested price {buyer_pays_minor} does not conform to allowed price step "
+                f"of {currency.price_step_minor} for {currency.code}"
+            )
+
+
 def calculate_seller_receives(
     requested_buyer_pays_minor: int,
     publisher_fee_pct: int = 10,
     currency: CurrencyConfig | None = None,
+    validate_market_listing: bool = True,
 ) -> FeeBreakdown:
     """Invert gross buyer price into seller net proceeds using exact integer boundary search.
     
@@ -90,58 +123,39 @@ def calculate_seller_receives(
     - Therefore, 113 and 114 minor units are not reachable by any integer seller amount.
     
     Fail-closed policy:
-    Rejects financial calculations if currency fee rules, listing minimum, or price steps are unverified.
+    - Rejects financial calculations if currency fee rules are unverified/UNKNOWN.
+    - When validate_market_listing is True (default), rejects calculations if listing minimum
+      or price step are unverified/UNKNOWN.
+    - When validate_market_listing is False, performs pure mathematical fee inversion.
     
     Args:
         requested_buyer_pays_minor: Integer minor units the buyer pays.
         publisher_fee_pct: Publisher fee percentage (10 for CS2).
         currency: Optional CurrencyConfig with currency-specific listing rules.
+        validate_market_listing: If True (default), validates price against verified market
+                                 listing minimums and price step increments.
         
     Returns:
         FeeBreakdown detailing seller proceeds, fees, resulting buyer price, and exact match flag.
     """
+    min_steam = currency.min_fee_steam_minor if currency else 1
+    min_pub = currency.min_fee_publisher_minor if currency else 1
+    fee_floor = 1 + min_steam + min_pub
+
     if currency is not None:
         if not currency.is_fee_verified:
             raise ValueError(
                 f"Financial calculation rejected: fee rules for currency '{currency.code}' "
                 f"are unverified/UNKNOWN. Fail-closed safety prohibits unverified fee calculations."
             )
-        if currency.min_listing_price_minor is not None and not currency.is_listing_min_verified:
-            raise ValueError(
-                f"Financial calculation rejected: listing minimum for currency '{currency.code}' "
-                f"is unverified/UNKNOWN."
-            )
-        if currency.price_step_minor > 1 and not currency.is_price_step_verified:
-            raise ValueError(
-                f"Financial calculation rejected: price step for currency '{currency.code}' "
-                f"is unverified/UNKNOWN."
-            )
+        if validate_market_listing:
+            validate_market_listing_price(requested_buyer_pays_minor, currency)
 
-    min_steam = currency.min_fee_steam_minor if currency else 1
-    min_pub = currency.min_fee_publisher_minor if currency else 1
-    fee_floor = 1 + min_steam + min_pub
-
-    # Check market listing minimum if verified for currency
-    if currency and currency.min_listing_price_minor is not None:
-        if requested_buyer_pays_minor < currency.min_listing_price_minor:
-            raise ValueError(
-                f"Requested price {requested_buyer_pays_minor} is below minimum market listing price "
-                f"of {currency.min_listing_price_minor} for {currency.code}"
-            )
-    else:
-        # Check universal mathematical fee floor
-        if requested_buyer_pays_minor < fee_floor:
-            raise ValueError(
-                f"Requested price {requested_buyer_pays_minor} cannot be less than fee floor of {fee_floor}"
-            )
-
-    # Validate allowed price increment if configured
-    if currency and currency.price_step_minor > 1:
-        if requested_buyer_pays_minor % currency.price_step_minor != 0:
-            raise ValueError(
-                f"Requested price {requested_buyer_pays_minor} does not conform to allowed price step "
-                f"of {currency.price_step_minor} for {currency.code}"
-            )
+    # Check universal mathematical fee floor
+    if requested_buyer_pays_minor < fee_floor:
+        raise ValueError(
+            f"Requested price {requested_buyer_pays_minor} cannot be less than fee floor of {fee_floor}"
+        )
 
     # Baseline integer estimate
     estimated_r = (requested_buyer_pays_minor * 100) // (100 + 5 + publisher_fee_pct)

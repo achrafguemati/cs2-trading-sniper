@@ -25,19 +25,20 @@ See the complete rules in [AGENTS.md](AGENTS.md).
 
 ---
 
-## Current Status: Milestone 1.2.1 Complete (Final Correctness & Safety Gate)
+## Current Status: Milestone 1.2.2 Complete (Final Edge-Case Hardening)
 
-- **Milestone 1 / 1.1 / 1.2 / 1.2.1 (Complete):**
+- **Milestone 1 / 1.1 / 1.2 / 1.2.1 / 1.2.2 (Complete):**
   - Read-only asynchronous HTTP client (`ReadOnlyHttpClient`) with strict request-level serialization (`asyncio.Lock`), preventing concurrent execution overlap.
   - Transparent, non-spoofed application identification (`CS2TradingSniper/0.1.0`) with minimal standard headers (zero fabricated `Sec-Fetch-*` headers).
-  - Strict URL allowlist (HTTPS only, `steamcommunity.com` only, approved endpoint paths only) and safe redirect validation (rejects cross-host redirects and HTTPS-to-HTTP downgrade before following).
+  - Strict production URL allowlist: HTTPS only, `steamcommunity.com` only, exact path matching for `/market/itemordershistogram`, boundary validation for `/market/listings/730/` and `/inventory/`, userinfo and non-default port rejection. Mock routes injected only through test configuration.
+  - Redirect pacing: every redirect hop acquires the shared rate limiter separately, maintaining sequential pacing across redirect lifecycles while rejecting cross-host and HTTPS-to-HTTP downgrades before following.
   - Unified, fail-closed JSON processing path (`get_json(schema=...)`) with exact Decimal token parsing (`parse_float=Decimal`) and schema validation inside the serialized request lock.
   - Fail-closed circuit breaker: unexpected HTML challenges, malformed JSON, and schema failures immediately halt subsequent polling.
   - Sequential rate limiter (`SequentialRateLimiter`) with monotonic timers (`time.monotonic()`), exponential backoff, and full RFC 7231 `Retry-After` support (delta-seconds and HTTP-date).
-  - Fail-closed financial engine: fee calculations on unverified currencies (like JPY) are strictly rejected with `ValueError`.
+  - Fail-closed currency semantics: unverified listing minimums and unverified price steps strictly fail closed on market listing validation (`validate_market_listing=True`), while separating pure mathematical fee inversion (`validate_market_listing=False`). JPY, EUR listing minimums, and regional Tunisia listing rules remain strictly marked UNKNOWN.
   - Exact dual-floor integer-cents fee engine (`calculate_buyer_pays`, `calculate_seller_receives`, `calculate_exact_breakeven_buyer_pays`) with step-jump gap handling ($R=99 \rightarrow 112, R=100 \rightarrow 115$).
-  - Strict minor-unit currency model (`CurrencyConfig`) with hardened grammar (rejects misplaced signs, invalid comma groupings, and multiple symbols).
-  - Exact Decimal orderbook depth normalization rejecting values with excess precision (e.g. `22.501`, `22.505`) and prohibiting comparisons for unverified currencies.
+  - Strict minor-unit currency model (`CurrencyConfig`) with hardened grammar and trailing zero exactness (accepts `Decimal("22.500") -> 2250`, continues rejecting `22.501`, `22.505`, `22.50001`).
+  - Strict orderbook graph validation: strictly positive orderbook prices, non-negative integer quantities without silent fractional truncation.
   - Research skills (`.agents/skills/`) and intelligence registers (`docs/research/`).
 - **Milestones 2–9 (Planned):**
   - Item identity resolver, SQLite storage, detection algorithms, and dashboard remain deferred pending subsequent milestone approvals.
@@ -50,7 +51,7 @@ See the complete rules in [AGENTS.md](AGENTS.md).
 # 1. Install package in editable mode with dependencies
 pip install -e .
 
-# 2. Run comprehensive unit test suite (55 deterministic tests)
+# 2. Run comprehensive unit test suite (68 deterministic tests)
 python -m unittest discover -s tests -p "test_*.py" -v
 
 # 3. Run single-request read-only connectivity smoke test

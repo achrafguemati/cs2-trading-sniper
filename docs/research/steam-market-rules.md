@@ -58,9 +58,9 @@ Due to independent flooring, not every integer buyer total is exactly reachable 
 * Consequently, 113 and 114 minor units are impossible buyer totals under integer seller proceeds.
 
 #### Separation of Transaction Fee Floors vs. Market Listing Minimums
-- **Transaction Fee Floors:** Mathematically, each fee component enforces a 1-minor-unit floor ($\max(1, \dots)$), giving an absolute lower bound of $1 + 1 + 1 = 3\text{ minor units}$ ($R=1$).
-- **Market Listing Minimums:** Valve enforces distinct minimum listing prices and price steps per currency. For USD and EUR, the verified market minimum is 3 minor units ($0.03 / €0.03). For other currencies (e.g. JPY), market listing minimums and allowed price steps are marked as **UNKNOWN** until verified via direct empirical captures.
-- **Empirical Basis:** Rounding behavior is modeled from Valve's public client implementation (`economy.js`) and recorded confirmation-screen fixtures. Edge cases in unverified regional currencies remain strictly marked as UNKNOWN.
+- **Transaction Fee Floors:** Mathematically, each fee component enforces a 1-minor-unit floor ($\max(1, \dots)$), giving an absolute mathematical lower bound of $1 + 1 + 1 = 3\text{ minor units}$ ($R=1$).
+- **Market Listing Minimums:** Valve enforces distinct minimum listing prices and price steps per currency. For USD, the official Valve Community Market FAQ states: *"Currently the minimum listing price is $0.03."* For EUR, JPY, and all other currencies, listing minimums and allowed price steps are marked as **UNKNOWN** until verified via direct primary captures or official documentation. Synthetic orderbook fixtures are not empirical evidence of live listing minimums.
+- **Empirical Basis:** Fee rules are verified from Valve's public client implementation (`economy.js`). Listing minimums without primary empirical or official documentation evidence remain strictly marked as UNKNOWN.
 
 The inverse fee function must never return a seller amount and claim it produces the requested buyer total if the forward formula produces a different total. It must explicitly return:
 1. `seller_receives_cents`: The largest integer seller proceeds whose resulting buyer cost does not exceed the target.
@@ -74,23 +74,25 @@ def calculate_seller_receives(
     requested_buyer_pays_minor: int,
     publisher_fee_pct: int = 10,
     currency: CurrencyConfig | None = None,
+    validate_market_listing: bool = True,
 ) -> FeeBreakdown:
     """Invert gross buyer price into seller net proceeds using exact integer boundary search.
     
-    Validates against currency-specific listing minimums and fee floors.
-    Fails closed if currency fee rules are unverified/UNKNOWN.
+    Validates against currency-specific listing minimums and fee floors when validate_market_listing=True.
+    Fails closed if currency fee rules or listing minimums/price steps are unverified/UNKNOWN.
+    Performs pure mathematical fee inversion when validate_market_listing=False.
     """
-    if currency is not None and not currency.is_fee_verified:
-        raise ValueError(f"Financial calculation rejected: fee rules for {currency.code} are unverified/UNKNOWN")
+    if currency is not None:
+        if not currency.is_fee_verified:
+            raise ValueError(f"Fee rules for {currency.code} are unverified/UNKNOWN")
+        if validate_market_listing:
+            validate_market_listing_price(requested_buyer_pays_minor, currency)
 
     min_steam = currency.min_fee_steam_minor if currency else 1
     min_pub = currency.min_fee_publisher_minor if currency else 1
     fee_floor = 1 + min_steam + min_pub
 
-    if currency and currency.min_listing_price_minor is not None:
-        if requested_buyer_pays_minor < currency.min_listing_price_minor:
-            raise ValueError(f"Below currency {currency.code} listing minimum of {currency.min_listing_price_minor}")
-    elif requested_buyer_pays_minor < fee_floor:
+    if requested_buyer_pays_minor < fee_floor:
         raise ValueError(f"Below fee floor of {fee_floor}")
 ```
 

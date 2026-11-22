@@ -1,5 +1,6 @@
 """Unit tests for explicit currency configuration, negative values, and non-float precision."""
 
+from decimal import Decimal
 import unittest
 from sniper.core.currency import CurrencyConfig, assert_same_currency
 
@@ -85,6 +86,21 @@ class TestCurrency(unittest.TestCase):
             usd.parse_to_minor_units("$24.885")
         with self.assertRaises(ValueError):
             usd.parse_to_minor_units("0.001")
+        with self.assertRaises(ValueError):
+            usd.parse_to_minor_units(Decimal("22.501"))
+        with self.assertRaises(ValueError):
+            usd.parse_to_minor_units(Decimal("22.505"))
+        with self.assertRaises(ValueError):
+            usd.parse_to_minor_units(Decimal("22.50001"))
+
+    def test_usd_trailing_zeroes_exact_parsing(self):
+        """Accept trailing zeroes when they represent the exact same minor-unit amount."""
+        usd = CurrencyConfig.get_default_usd()
+        self.assertEqual(usd.parse_to_minor_units(Decimal("22.500")), 2250)
+        self.assertEqual(usd.parse_to_minor_units(Decimal("22.5000")), 2250)
+        self.assertEqual(usd.parse_to_minor_units("22.500"), 2250)
+        self.assertEqual(usd.parse_to_minor_units("100.000"), 10000)
+        self.assertEqual(usd.parse_to_minor_units(Decimal("100.0000")), 10000)
 
     def test_jpy_zero_decimals(self):
         jpy = CurrencyConfig.get_jpy()

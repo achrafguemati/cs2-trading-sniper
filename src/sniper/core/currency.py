@@ -65,7 +65,7 @@ class CurrencyConfig:
             is_fee_verified=True,
             is_listing_min_verified=True,
             is_price_step_verified=True,
-            notes="Empirically verified against Steam FAQ and live orderbook fixtures. Minimum buyer pays is $0.03.",
+            notes="Fee rules verified from economy.js; listing minimum ($0.03) verified from Valve Community Market FAQ.",
         )
 
     @classmethod
@@ -76,15 +76,15 @@ class CurrencyConfig:
             symbol="€",
             minor_unit_precision=2,
             country="DE",
-            min_listing_price_minor=3,
+            min_listing_price_minor=None,  # UNKNOWN
             price_step_minor=1,
             min_fee_steam_minor=1,
             min_fee_publisher_minor=1,
-            is_metadata_verified=True,
-            is_fee_verified=True,
-            is_listing_min_verified=True,
-            is_price_step_verified=True,
-            notes="Empirically verified against Steam FAQ and live orderbook fixtures. Minimum buyer pays is €0.03.",
+            is_metadata_verified=True,     # ID 3, EUR, €, 2 decimals verified in Steamworks
+            is_fee_verified=True,          # Fee rules verified from economy.js
+            is_listing_min_verified=False, # UNKNOWN: Listing minimum unverified pending primary evidence
+            is_price_step_verified=False,  # UNKNOWN: Price step unverified pending primary evidence
+            notes="Fee rules verified from economy.js; listing minimum and price step are UNKNOWN pending primary empirical capture.",
         )
 
     @classmethod
@@ -103,15 +103,15 @@ class CurrencyConfig:
             is_fee_verified=False,         # UNKNOWN: Fee rounding edge cases unverified
             is_listing_min_verified=False, # UNKNOWN: Listing minimum unverified
             is_price_step_verified=False,  # UNKNOWN: Price step unverified
-            notes="Zero-decimal currency. Fee rounding and listing minimum are UNKNOWN pending official Steam verification.",
+            notes="Zero-decimal currency. Fee rounding, listing minimum, and price steps are UNKNOWN pending official Steam verification.",
         )
 
     @classmethod
     def get_tunisia_context(cls) -> CurrencyConfig:
-        """Tunisia does not have a native Steam Wallet currency (no TND).
+        """Tunisia regional billing context.
         
-        Steam bills Tunisian accounts in USD (Standard or North Africa/MENA regional USD).
-        We return USD with explicit country context and documentation.
+        Steam bills Tunisian accounts in USD, but regional listing minimums and
+        price step increments are UNKNOWN without primary evidence.
         """
         return cls(
             currency_id=1,
@@ -119,15 +119,15 @@ class CurrencyConfig:
             symbol="$",
             minor_unit_precision=2,
             country="TN",
-            min_listing_price_minor=3,
+            min_listing_price_minor=None,  # UNKNOWN
             price_step_minor=1,
             min_fee_steam_minor=1,
             min_fee_publisher_minor=1,
             is_metadata_verified=True,
-            is_fee_verified=True,
-            is_listing_min_verified=True,
-            is_price_step_verified=True,
-            notes="Tunisian accounts operate in USD on Steam. TND is not a supported Steam wallet currency.",
+            is_fee_verified=True,          # USD fee rules verified
+            is_listing_min_verified=False, # UNKNOWN: regional minimum unverified without primary evidence
+            is_price_step_verified=False,  # UNKNOWN: regional price step unverified without primary evidence
+            notes="Regional Steam billing context for Tunisia: operates in USD, but regional listing minimums and price step increments are UNKNOWN without primary evidence.",
         )
 
     def format_amount(self, minor_units: int) -> str:
@@ -235,13 +235,17 @@ class CurrencyConfig:
             val = int_num
         else:
             if dec_part is not None:
-                # Reject excess decimal precision (e.g. 22.501 or 22.505 for precision=2)
                 if len(dec_part) > self.minor_unit_precision:
-                    raise ValueError(
-                        f"Exact decimal error: amount '{amount_str}' provides {len(dec_part)} decimal places, "
-                        f"exceeding exact minor unit precision of {self.minor_unit_precision} for {self.code}"
-                    )
-                dec_num = int(dec_part.ljust(self.minor_unit_precision, "0"))
+                    excess = dec_part[self.minor_unit_precision:]
+                    if any(c != "0" for c in excess):
+                        raise ValueError(
+                            f"Exact decimal error: amount '{amount_str}' provides {len(dec_part)} decimal places with "
+                            f"non-zero fractional digits exceeding exact minor unit precision of {self.minor_unit_precision} for {self.code}"
+                        )
+                    significant_dec = dec_part[:self.minor_unit_precision]
+                    dec_num = int(significant_dec)
+                else:
+                    dec_num = int(dec_part.ljust(self.minor_unit_precision, "0"))
             else:
                 dec_num = 0
             val = int_num * (10 ** self.minor_unit_precision) + dec_num

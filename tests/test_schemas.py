@@ -1,5 +1,7 @@
 """Unit tests for Pydantic response schemas, exact Decimal graph price normalization, and boundary conditions."""
 
+from __future__ import annotations
+
 from decimal import Decimal
 import json
 from pathlib import Path
@@ -92,6 +94,27 @@ class TestSchemas(unittest.TestCase):
         self.assertEqual(len(normalized_sells), 3)
         self.assertEqual(normalized_sells[0].price_minor, 2488)
 
+    def test_exact_decimal_with_trailing_zeroes(self):
+        """Accept exact values with trailing zeroes when they represent the same exact minor-unit amount."""
+        usd = CurrencyConfig.get_default_usd()
+        histogram = OrderbookHistogramResponse(success=1)
+
+        # Decimal("22.500") -> 2250 cents
+        entry1 = histogram.normalize_graph_entry([Decimal("22.500"), 1, "desc"], usd)
+        self.assertEqual(entry1.price_minor, 2250)
+
+        # Decimal("22.50000") -> 2250 cents
+        entry2 = histogram.normalize_graph_entry([Decimal("22.50000"), 2, "desc"], usd)
+        self.assertEqual(entry2.price_minor, 2250)
+
+        # "22.500" string -> 2250 cents
+        entry3 = histogram.normalize_graph_entry(["22.500", 3, "desc"], usd)
+        self.assertEqual(entry3.price_minor, 2250)
+
+        # Decimal("100.000") -> 10000 cents
+        entry4 = histogram.normalize_graph_entry([Decimal("100.000"), 5, "desc"], usd)
+        self.assertEqual(entry4.price_minor, 10000)
+
     def test_exact_decimal_orderbook_price_rejection(self):
         """Reject prices with excess decimal precision that cannot be represented exactly in minor units."""
         usd = CurrencyConfig.get_default_usd()
@@ -109,6 +132,59 @@ class TestSchemas(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             histogram.normalize_graph_entry(["22.501", 1, "desc"], usd)
+
+    def test_reject_negative_or_invalid_orderbook_prices(self):
+        """Reject negative, zero, or non-numeric orderbook prices."""
+        usd = CurrencyConfig.get_default_usd()
+        histogram = OrderbookHistogramResponse(success=1)
+
+        with self.assertRaises(ValueError):
+            histogram.normalize_graph_entry([Decimal("-22.50"), 1, "desc"], usd)
+
+        with self.assertRaises(ValueError):
+            histogram.normalize_graph_entry([Decimal("0"), 1, "desc"], usd)
+
+        with self.assertRaises(ValueError):
+            histogram.normalize_graph_entry(["-5.00", 1, "desc"], usd)
+
+        with self.assertRaises(ValueError):
+            histogram.normalize_graph_entry([True, 1, "desc"], usd)
+
+    def test_validate_graph_quantities_without_silent_truncation(self):
+        """Validate quantities as non-negative integers without silently truncating fractional values."""
+        usd = CurrencyConfig.get_default_usd()
+        histogram = OrderbookHistogramResponse(success=1)
+
+        # Valid non-negative integers
+        e1 = histogram.normalize_graph_entry([Decimal("22.50"), 0, "desc"], usd)
+        self.assertEqual(e1.cumulative_quantity, 0)
+
+        e2 = histogram.normalize_graph_entry([Decimal("22.50"), 25, "desc"], usd)
+        self.assertEqual(e2.cumulative_quantity, 25)
+
+        e3 = histogram.normalize_graph_entry([Decimal("22.50"), "25", "desc"], usd)
+        self.assertEqual(e3.cumulative_quantity, 25)
+
+        e4 = histogram.normalize_graph_entry([Decimal("22.50"), Decimal("25"), "desc"], usd)
+        self.assertEqual(e4.cumulative_quantity, 25)
+
+        # Fractional quantities must NOT be silently truncated: must raise ValueError
+        with self.assertRaises(ValueError):
+            histogram.normalize_graph_entry([Decimal("22.50"), 1.5, "desc"], usd)
+
+        with self.assertRaises(ValueError):
+            histogram.normalize_graph_entry([Decimal("22.50"), "1.5", "desc"], usd)
+
+        with self.assertRaises(ValueError):
+            histogram.normalize_graph_entry([Decimal("22.50"), Decimal("1.5"), "desc"], usd)
+
+        # Negative quantity must raise ValueError
+        with self.assertRaises(ValueError):
+            histogram.normalize_graph_entry([Decimal("22.50"), -1, "desc"], usd)
+
+        # Boolean quantity must raise ValueError
+        with self.assertRaises(ValueError):
+            histogram.normalize_graph_entry([Decimal("22.50"), True, "desc"], usd)
 
     def test_decimal_price_parsing_boundaries(self):
         """Test boundary values for decimal conversion without floating-point inaccuracies."""

@@ -38,14 +38,12 @@ DEFAULT_HEADERS = {
 # Approved Steam hosts and endpoint paths
 DEFAULT_ALLOWED_SCHEMES = frozenset({"https"})
 DEFAULT_ALLOWED_HOSTS = frozenset({"steamcommunity.com"})
-DEFAULT_ALLOWED_PATH_PREFIXES = (
+DEFAULT_ALLOWED_EXACT_PATHS = frozenset({
     "/market/itemordershistogram",
+})
+DEFAULT_ALLOWED_PATH_PREFIXES = (
     "/market/listings/730/",
     "/inventory/",
-    "/test",       # Allowed for mock test transports
-    "/subsequent", # Allowed for mock test transports
-    "/missing",    # Allowed for mock test transports
-    "/error",      # Allowed for mock test transports
 )
 
 T = TypeVar("T", bound=BaseModel)
@@ -84,6 +82,7 @@ class ReadOnlyHttpClient:
         transport: httpx.AsyncBaseTransport | None = None,
         allowed_schemes: frozenset[str] | None = None,
         allowed_hosts: frozenset[str] | None = None,
+        allowed_exact_paths: frozenset[str] | None = None,
         allowed_path_prefixes: tuple[str, ...] | None = None,
         max_redirects: int = 3,
     ) -> None:
@@ -93,7 +92,12 @@ class ReadOnlyHttpClient:
         self._transport = transport
         self.allowed_schemes = allowed_schemes or DEFAULT_ALLOWED_SCHEMES
         self.allowed_hosts = allowed_hosts or DEFAULT_ALLOWED_HOSTS
-        self.allowed_path_prefixes = allowed_path_prefixes or DEFAULT_ALLOWED_PATH_PREFIXES
+        self.allowed_exact_paths = allowed_exact_paths or DEFAULT_ALLOWED_EXACT_PATHS
+        self.allowed_path_prefixes = (
+            allowed_path_prefixes
+            if allowed_path_prefixes is not None
+            else DEFAULT_ALLOWED_PATH_PREFIXES
+        )
         self.max_redirects = max_redirects
         self._request_lock = getattr(self.rate_limiter, "_request_lock", asyncio.Lock())
         self._client: httpx.AsyncClient | None = None
@@ -113,28 +117,72 @@ class ReadOnlyHttpClient:
             self._client = None
 
     def validate_url(self, url: str) -> None:
-        """Validate URL against allowed schemes, hosts, and endpoint paths.
+        """Validate URL against security constraints: HTTPS, Steam host, exact/prefix paths.
         
-        Raises SecurityError if the URL violates security boundaries.
+        Security constraints:
+        1. Scheme: HTTPS only (rejects HTTP and other schemes).
+        2. Userinfo: Rejects credentials embedded in URL (user:pass@host).
+        3. Port: Default port only (None or 443 for HTTPS; rejects non-default ports).
+        4. Host: Must match approved Steam hosts (steamcommunity.com).
+        5. Path:
+           - Must match allowed exact paths (e.g. /market/itemordershistogram).
+           - Or match allowed path prefixes with boundary enforcement
+             (e.g. /market/listings/730/..., /inventory/...).
+        
+        Raises:
+            SecurityError: If any security constraint is violated.
         """
-        parsed = urlparse(url)
+        try:
+            parsed = urlparse(url)
+        except Exception as e:
+            raise SecurityError(f"Security Rule Violation: Malformed URL '{url}': {e}") from e
+
+        # 1. Scheme check
         if not parsed.scheme or parsed.scheme.lower() not in self.allowed_schemes:
             raise SecurityError(
                 f"Security Rule Violation: Disallowed scheme '{parsed.scheme}'. "
                 f"Only HTTPS is permitted. (URL: {url})"
             )
 
+        # 2. Userinfo check (username/password in URL)
+        if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:
+            raise SecurityError(
+                f"Security Rule Violation: URL userinfo (embedded credentials) is strictly prohibited. (URL: {url})"
+            )
+
+        # 3. Port check (must be default: None or 443 for HTTPS)
+        if parsed.port is not None and parsed.port != 443:
+            raise SecurityError(
+                f"Security Rule Violation: Non-default port '{parsed.port}' is strictly prohibited. (URL: {url})"
+            )
+
+        # 4. Host check
         host = (parsed.hostname or "").lower()
         if not host or host not in self.allowed_hosts:
             raise SecurityError(
                 f"Security Rule Violation: Host '{host}' is not in the approved Steam host allowlist. (URL: {url})"
             )
 
+        # 5. Path check
         path = parsed.path or "/"
-        if not any(path.startswith(prefix) for prefix in self.allowed_path_prefixes):
-            raise SecurityError(
-                f"Security Rule Violation: Endpoint path '{path}' is not in approved endpoint paths. (URL: {url})"
-            )
+
+        # Check exact paths
+        if path in self.allowed_exact_paths:
+            return
+
+        # Check path prefixes with boundary enforcement
+        for prefix in self.allowed_path_prefixes:
+            if prefix.endswith("/"):
+                base = prefix.rstrip("/")
+                if path == base or path.startswith(prefix):
+                    return
+            else:
+                if path == prefix or path.startswith(prefix + "/"):
+                    return
+
+        raise SecurityError(
+            f"Security Rule Violation: Endpoint path '{path}' is not in approved endpoint paths. (URL: {url})"
+        )
 
     async def _execute_get_locked(
         self,
@@ -143,9 +191,6 @@ class ReadOnlyHttpClient:
         expect_json: bool = False,
     ) -> httpx.Response:
         """Execute network GET request within active _request_lock with safe redirect inspection."""
-        self.validate_url(url)
-        await self.rate_limiter.acquire()
-
         if self._client is None:
             self._client = httpx.AsyncClient(
                 headers=self.headers,
@@ -159,6 +204,11 @@ class ReadOnlyHttpClient:
         redirect_count = 0
 
         while True:
+            # Validate URL before every network request
+            self.validate_url(current_url)
+            # Acquire rate limiter for this specific network request (including any redirect hop)
+            await self.rate_limiter.acquire()
+
             logger.debug(f"Executing read-only GET: {current_url}")
             try:
                 response = await self._client.get(current_url, params=current_params)
@@ -179,7 +229,7 @@ class ReadOnlyHttpClient:
                     raise SecurityError(f"HTTP {response.status_code} redirect without Location header from {current_url}")
 
                 target_url = str(response.url.join(location))
-                # Validate redirect destination before following (prevents cross-host or HTTPS->HTTP downgrade)
+                # Validate redirect destination before proceeding (prevents cross-host or HTTPS->HTTP downgrade)
                 self.validate_url(target_url)
 
                 logger.info(f"Following validated redirect ({redirect_count}/{self.max_redirects}): {current_url} -> {target_url}")
