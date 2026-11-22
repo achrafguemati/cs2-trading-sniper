@@ -1,0 +1,64 @@
+# CS2 Trading Sniper (Market Research & Opportunity Detection)
+
+[![Platform: Windows 11](https://img.shields.io/badge/Platform-Windows%2011-blue.svg)](https://microsoft.com/windows)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Python: 3.12+](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://python.org)
+[![Operation: Read--Only](https://img.shields.io/badge/Operation-Read--Only-red.svg)](#non-negotiable-safety-principles)
+
+A local-first market research, opportunity detection, inventory tracking, and alerting application for Counter-Strike 2 on the Steam Community Market (SCM).
+
+The application features two independent, quantitative market engines sharing a common data layer:
+1. **BUY SNIPER (Mode A):** Detects genuinely underpriced individual sell listings on SCM, evaluates wear, float, stickers, and liquidity, accounts for the 7-day market re-list restriction and exact Valve fees, and alerts the user for manual purchase.
+2. **SELL SNIPER (Mode B):** Monitors marketable inventory items, detects unusually high live Steam buy orders, verifies top-level depth vs. cumulative orders, guards against "ghost" / unfunded buy orders, computes net seller proceeds, and alerts the user for manual listing.
+
+---
+
+## Non-Negotiable Safety Principles
+
+1. **Strictly Read-Only:** Zero automated buying, selling, listing, or trade execution. All market actions are manually executed by the human user.
+2. **Zero Credential Storage:** The application **never** asks for, stores, or transmits Steam passwords, Steam Guard codes, `maFile` secrets, or browser session cookies.
+3. **No Proxy Rotation or Anti-Bot Bypass:** Operates within a respectful, single-IP rate budget (10–15 requests/min) with automated exponential backoff on HTTP 429.
+4. **Integer Cents Financial Precision:** All pricing and fee calculations operate strictly in integer minor currency units (cents), implementing Valve's exact dual-floor fee schedule.
+5. **Steam Wallet $\ne$ Cash:** Virtual Steam Wallet balances are strictly segregated from external cashout estimates.
+
+See the complete rules in [AGENTS.md](AGENTS.md).
+
+---
+
+## Project Documentation & Research Deliverables
+
+All technical specifications, empirical research, and architectural blueprints are documented under [`docs/`](docs/):
+
+### 1. Empirical Research
+* [Market Landscape & Secondary Marketplaces](docs/research/market-landscape.md) — 14 marketplaces audited, fee schedules, liquidity tiers, and regional analysis for Tunisia.
+* [Steam API Verification & Redesign Architecture](docs/research/steam-api-verification.md) — May 12, 2026 SSR React architecture, `valve-ssr-data` hydration, `G...` grouped URLs, and live rate-limit tests.
+* [Steam Market Rules & Exact Fee Math](docs/research/steam-market-rules.md) — Dual-floor fee formulas, integer cents arithmetic, and 7-day restriction vs. Trade Protection.
+* [Reddit & Trader Community Findings](docs/research/reddit-community-findings.md) — Ghost buy order mechanics, bot latency realities, and sticker/float alpha.
+* [Open-Source Repository Audit](docs/research/repository-audit.md) — Deep audit of 16 GitHub projects with commit SHAs, licenses, and code reuse assessments.
+
+### 2. Strategy Specifications
+* [Mode A: BUY Strategy Specification](docs/strategy/buy-strategy.md) — URL resolution, listing-level data, volume-weighted median, and conservative 7-day exit scenarios.
+* [Mode B: SELL Strategy Specification](docs/strategy/sell-strategy.md) — Inventory ingestion, top-level vs. cumulative depth, crossed-book defense, and ghost order filters.
+* [Opportunity Scoring Framework](docs/strategy/opportunity-scoring.md) — Explainable 0–100 opportunity and confidence scoring algorithms.
+
+### 3. Architecture & Planning
+* [System Architecture Proposal](docs/architecture/architecture-proposal.md) — FastAPI + SQLite + React/Vite local-first architecture and rate-limiter circuit breaker.
+* [Architecture Decision Records (ADRs)](docs/decisions/decision-log.md) — Log of core technical and economic decisions.
+* [Implementation Roadmap](docs/plan/implementation-roadmap.md) — 9 phased milestones with strict acceptance gates.
+* [Test & Acceptance Plan](docs/plan/test-and-acceptance-plan.md) — Unit test matrix, recorded fixtures, and criteria validation.
+
+---
+
+## Planned Architecture
+
+* **Backend:** Python 3.12+ / FastAPI / `asyncio` / `httpx` / `pydantic`
+* **Storage:** Local SQLite database with integer cents financial schemas
+* **Frontend:** React 18 / TypeScript / Vite / modern responsive dashboard
+* **Alerting:** Telegram Bot API notifications with deduplication and cooldowns
+* **Deployment:** Windows 11 native launch script (`launch.bat`)
+
+---
+
+## License
+
+This project is open-source under the [MIT License](LICENSE).
