@@ -121,3 +121,39 @@ When a listing passes all gates, the alert contains:
 * Applied Stickers / Float details if parsed.
 * Direct Steam Market purchase link (`https://steamcommunity.com/market/listings/730/...`).
 * Clear prompt: "Open on Steam, manually verify sticker/float, and confirm purchase."
+
+---
+
+## 8. Seven-Day Holding Portfolio & Price Tracking Engine
+
+### 8.1 Ingesting Authoritative Steam Restriction Metadata
+When the user confirms a purchase and adds it to their portfolio:
+1. The app queries the public inventory endpoint (`/inventory/{steamid64}/730/2`).
+2. Extracts the exact asset matching the purchased skin.
+3. Reads the authoritative Steam item attributes:
+   - `marketable`: `0` (restricted) or `1` (tradable/marketable).
+   - `market_marketable_restriction`: Integer days (e.g., `7`).
+   - `descriptions`: Scrapes the red restriction text for the exact unlock timestamp (e.g., `After Nov 29, 2026 (7:00:00) GMT`).
+4. **Never hardcodes `acquired_at + 7 days` blindly**: Uses the authoritative Steam unlock date stored in UTC.
+
+### 8.2 Daily Holding Valuation & Volatility Monitoring
+While the asset is locked in the 7-day holding period:
+* **Cost Basis:** $C_{\text{acq}}$ (integer cents paid).
+* **Break-Even Sale Price:** The gross buyer-pays price required to recover cost basis:
+  $$B_{\text{breakeven}} = C_{\text{acq}} + \max(1, \lfloor C_{\text{acq}} \times 0.05 \rfloor) + \max(1, \lfloor C_{\text{acq}} \times 0.10 \rfloor)$$
+* **Current Estimated Net Exit:** Real-time net proceeds if sold at current market floor $A_{\text{floor}}$:
+  $$E_{\text{net, current}} = \text{calculate\_seller\_receives}(A_{\text{floor}})$$
+* **Unrealized P&L:**
+  $$\Delta P = E_{\text{net, current}} - C_{\text{acq}}$$
+* **Price Drop Alert:** If $A_{\text{floor}} < B_{\text{breakeven}}$, the dashboard triggers a warning banner: `Under Water: Floor dropped below break-even by $X.XX`.
+
+### 8.3 Resale Readiness Alert
+When the unlock timestamp arrives and `marketable == 1`:
+* The engine runs a fresh scan of the current order book and sell listings.
+* If $E_{\text{net, current}} > C_{\text{acq}}$, it fires a **`[RESALE READY]`** Telegram alert:
+  - Item name, wear, and days held.
+  - Recommended listing price (buyer pays).
+  - Target net seller proceeds.
+  - Expected realized profit ($) and ROI (%).
+  - Direct link to inventory listing modal.
+

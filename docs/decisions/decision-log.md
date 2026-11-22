@@ -65,3 +65,32 @@
 * **Context:** Items purchased on SCM cannot be re-sold or traded for 7 days. During this period, the skin's market price can drop.
 * **Decision:** The BUY engine's primary gate uses a **Conservative Exit Scenario** that applies a mandatory 5% price depreciation buffer on top of the 15% Valve fee schedule. An alert is only issued if the trade remains profitable under this conservative scenario.
 * **Consequences:** Eliminates trades where thin profit margins are wiped out by ordinary weekly market noise.
+
+---
+
+## ADR 9: Strict Tunisia Payout Compliance (No VPN / False Residency)
+* **Context:** Marketplaces such as Skinport and CSFloat enforce banking and country restrictions. Online guides often suggest using a VPN or renting foreign identities.
+* **Decision:** Strictly adhere to official terms. Never suggest, implement, or rely on VPN workarounds, fake addresses, or proxy banking. If a marketplace cannot be verified via official documentation as supporting payouts to Tunisia, mark it as `RESTRICTED` or `UNSUPPORTED`.
+* **Consequences:** Protects the user from account freezes, KYC confiscations, and platform bans.
+
+---
+
+## ADR 10: Open-Source Licensing Hygiene & Clean-Room Implementation
+* **Context:** Reference repositories have varying licenses: MIT (`cs2-sniper`, `CSFloatPriceChecker`, `cs2-items-schema`), AGPL-3.0 (`skinticker`), and unlicensed (`uupinfetch`, `cs-skins-prices-parser`).
+* **Decision:**
+  - Freely reuse architecture patterns and heuristics from MIT-licensed repos.
+  - Do NOT import, link, or copy code from AGPL-3.0 or unlicensed repositories.
+  - Implement all Steam Community Market network adapters, fee math, and SSR parsing from scratch.
+* **Consequences:** Ensures clean intellectual property and zero copyleft contamination.
+
+---
+
+## 2. Senior Engineering Team: Challenges to Weak Assumptions
+
+| Traditional / Weak Assumption | Hard Reality & Empirical Evidence | Recommended Architectural Solution |
+| :--- | :--- | :--- |
+| **"We can snipe 50% discounted liquid cases/knives on Steam."** | Dedicated server-side bots in Frankfurt data centers buy mispriced liquid items in <200ms. A human alerted via Telegram cannot beat a 150ms bot. | **Focus on Sticker Crafts & Floats:** Bulk bots ignore applied stickers, low float Field-Tested skins, and niche patterns. These listings sit for 5–60 minutes, giving human traders an achievable window. |
+| **"A high buy order is guaranteed money waiting for us."** | Steam allows unfunded over-allocated buy orders ("ghost orders"). Listing an item against a ghost order cancels the buyer's bid and leaves your item unsold. | **Mandatory 2-Step Verification:** Re-query order book 3 seconds before alert. Check for crossed books (`highest_bid >= lowest_ask`). Display `Probable Ghost` warnings. |
+| **"Proxy rotation lets us poll Steam every second."** | Steam/Akamai fingerprint TLS handshakes and residential IP pools, triggering CAPTCHAs and regional currency mismatches. | **Paced Single-IP Token Bucket:** 10–15 requests/minute with jitter is 100% reliable, free of cost, and immune to IP bans when paired with a 300s backoff. |
+| **"Stickers on a skin guarantee extra resale value."** | Sticker overpay is subjective and illiquid. Most buyers do not pay extra for low-tier stickers. | **Conservative Base Exit:** All financial formulas assume base market exit value. Sticker crafts add a quality flag, never an unverified profit projection. |
+
