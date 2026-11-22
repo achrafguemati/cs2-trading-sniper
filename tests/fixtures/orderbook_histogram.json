@@ -1,0 +1,22 @@
+{
+  "success": 1,
+  "sell_order_count": "1,240",
+  "sell_order_price": "$24.88",
+  "sell_order_table": "<table><tr><td>$24.88</td><td>1</td></tr><tr><td>$25.00</td><td>18</td></tr></table>",
+  "buy_order_count": "211,731",
+  "buy_order_price": "$22.50",
+  "buy_order_table": "<table><tr><td>$22.50</td><td>1</td></tr><tr><td>$22.45</td><td>14</td></tr></table>",
+  "highest_buy_order": "2250",
+  "lowest_sell_order": "2488",
+  "buy_order_graph": [
+    [22.50, 1, "1 buy order at $22.50 or higher"],
+    [22.45, 15, "15 buy orders at $22.45 or higher"],
+    [22.00, 120, "120 buy orders at $22.00 or higher"],
+    [20.00, 4520, "4,520 buy orders at $20.00 or higher"]
+  ],
+  "sell_order_graph": [
+    [24.88, 1, "1 listing at $24.88 or lower"],
+    [25.00, 19, "19 listings at $25.00 or lower"],
+    [26.00, 85, "85 listings at $26.00 or lower"]
+  ]
+}

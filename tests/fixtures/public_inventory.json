@@ -1,0 +1,60 @@
+{
+  "success": 1,
+  "total_inventory_count": 2,
+  "assets": [
+    {
+      "appid": 730,
+      "contextid": "2",
+      "assetid": "39102948102",
+      "classid": "7993038091",
+      "instanceid": "188530138",
+      "amount": "1"
+    },
+    {
+      "appid": 730,
+      "contextid": "2",
+      "assetid": "39102948103",
+      "classid": "7993038090",
+      "instanceid": "188530138",
+      "amount": "1"
+    }
+  ],
+  "descriptions": [
+    {
+      "appid": 730,
+      "classid": "7993038091",
+      "instanceid": "188530138",
+      "name": "AK-47 | Redline (Field-Tested)",
+      "market_hash_name": "AK-47 | Redline (Field-Tested)",
+      "marketable": 1,
+      "tradable": 1,
+      "market_marketable_restriction": 0,
+      "descriptions": [
+        {
+          "type": "html",
+          "value": "Exterior: Field-Tested"
+        }
+      ]
+    },
+    {
+      "appid": 730,
+      "classid": "7993038090",
+      "instanceid": "188530138",
+      "name": "AK-47 | Redline (Minimal Wear)",
+      "market_hash_name": "AK-47 | Redline (Minimal Wear)",
+      "marketable": 0,
+      "tradable": 0,
+      "market_marketable_restriction": 7,
+      "descriptions": [
+        {
+          "type": "html",
+          "value": "Exterior: Minimal Wear"
+        },
+        {
+          "type": "html",
+          "value": "Cannot be traded or listed on Community Market until Nov 29, 2026 (7:00:00) GMT"
+        }
+      ]
+    }
+  ]
+}

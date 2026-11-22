@@ -1,0 +1,75 @@
+{
+  "success": true,
+  "appid": 730,
+  "initialFallbackBucketID": "AK-47 | Redline (Minimal Wear)",
+  "initialSelectedBucketID": "AK-47 | Redline (Field-Tested)",
+  "bCommodity": false,
+  "buckets": [
+    {
+      "bucket_id": "AK-47 | Redline (Factory New)",
+      "localized_name": "AK-47 | Redline (Factory New)",
+      "min_price": "145000",
+      "classid": "7993038089",
+      "localized_name_inside_group": "Factory New",
+      "strPrice": "$1,450.00",
+      "filters": [
+        ["Quality", "normal"],
+        ["Exterior", "WearCategory0"]
+      ]
+    },
+    {
+      "bucket_id": "AK-47 | Redline (Minimal Wear)",
+      "localized_name": "AK-47 | Redline (Minimal Wear)",
+      "min_price": "8500",
+      "classid": "7993038090",
+      "localized_name_inside_group": "Minimal Wear",
+      "strPrice": "$85.00",
+      "filters": [
+        ["Quality", "normal"],
+        ["Exterior", "WearCategory1"]
+      ]
+    },
+    {
+      "bucket_id": "AK-47 | Redline (Field-Tested)",
+      "localized_name": "AK-47 | Redline (Field-Tested)",
+      "min_price": "2488",
+      "classid": "7993038091",
+      "localized_name_inside_group": "Field-Tested",
+      "strPrice": "$24.88",
+      "filters": [
+        ["Quality", "normal"],
+        ["Exterior", "WearCategory2"]
+      ]
+    },
+    {
+      "bucket_id": "AK-47 | Redline (Well-Worn)",
+      "localized_name": "AK-47 | Redline (Well-Worn)",
+      "min_price": "2150",
+      "classid": "7993038092",
+      "localized_name_inside_group": "Well-Worn",
+      "strPrice": "$21.50",
+      "filters": [
+        ["Quality", "normal"],
+        ["Exterior", "WearCategory3"]
+      ]
+    },
+    {
+      "bucket_id": "AK-47 | Redline (Battle-Scarred)",
+      "localized_name": "AK-47 | Redline (Battle-Scarred)",
+      "min_price": "1890",
+      "classid": "7993038093",
+      "localized_name_inside_group": "Battle-Scarred",
+      "strPrice": "$18.90",
+      "filters": [
+        ["Quality", "normal"],
+        ["Exterior", "WearCategory4"]
+      ]
+    }
+  ],
+  "relevantAssetProperties": {
+    "1": "Exterior",
+    "2": "Quality",
+    "5": "PaintIndex",
+    "6": "PaintSeed"
+  }
+}
