@@ -920,5 +920,233 @@ class TestRepositoryIntegrityAndProvenance(unittest.TestCase):
         db.close()
 
 
+class TestNewRecordProvenanceValidation(unittest.TestCase):
+    """Offline unit tests verifying strict provenance validation on new-record INSERT."""
+
+    def setUp(self) -> None:
+        self.db = Database(":memory:")
+        self.db.initialize()
+        self.repo = ItemRepository(self.db)
+
+    def tearDown(self) -> None:
+        self.db.close()
+
+    def test_new_item_with_synthetic_item_nameid_normalized_to_null(self) -> None:
+        """New item with synthetic item_nameid provenance is normalized to NULL."""
+        saved = self.repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=99999999,
+            item_nameid_source="SYNTHETIC_TEST_DATA",
+            item_nameid_revision=None,
+        ))
+        self.assertIsNone(saved.item_nameid)
+        self.assertIsNone(saved.item_nameid_source)
+        self.assertIsNone(saved.item_nameid_revision)
+
+        stored = self.repo.get_by_market_hash_name("AK-47 | Redline (Field-Tested)")
+        self.assertIsNotNone(stored)
+        self.assertIsNone(stored.item_nameid)
+
+    def test_new_item_with_legacy_item_nameid_normalized_to_null(self) -> None:
+        """New item with legacy item_nameid provenance is normalized to NULL."""
+        saved = self.repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=11111111,
+            item_nameid_source="legacy_unverified",
+            item_nameid_revision=None,
+        ))
+        self.assertIsNone(saved.item_nameid)
+        self.assertIsNone(saved.item_nameid_source)
+        self.assertIsNone(saved.item_nameid_revision)
+
+    def test_new_item_with_unknown_item_nameid_source_normalized_to_null(self) -> None:
+        """New item with unknown item_nameid source is normalized to NULL."""
+        saved = self.repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=12345,
+            item_nameid_source="https://unknown-domain.com/repo",
+            item_nameid_revision=VERIFIED_MAPPING_REVISION,
+        ))
+        self.assertIsNone(saved.item_nameid)
+        self.assertIsNone(saved.item_nameid_source)
+        self.assertIsNone(saved.item_nameid_revision)
+
+    def test_new_item_with_correct_repo_wrong_revision_normalized_to_null(self) -> None:
+        """New item with correct repository but wrong revision is normalized to NULL."""
+        saved = self.repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=7178002,
+            item_nameid_source=VERIFIED_MAPPING_REPOSITORY,
+            item_nameid_revision="wrong_revision_hash_value",
+        ))
+        self.assertIsNone(saved.item_nameid)
+        self.assertIsNone(saved.item_nameid_source)
+        self.assertIsNone(saved.item_nameid_revision)
+
+    def test_new_item_with_correct_repo_missing_revision_normalized_to_null(self) -> None:
+        """New item with correct repository but missing revision is normalized to NULL."""
+        saved = self.repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=7178002,
+            item_nameid_source=VERIFIED_MAPPING_REPOSITORY,
+            item_nameid_revision=None,
+        ))
+        self.assertIsNone(saved.item_nameid)
+        self.assertIsNone(saved.item_nameid_source)
+        self.assertIsNone(saved.item_nameid_revision)
+
+    def test_new_item_with_item_nameid_missing_source_normalized_to_null(self) -> None:
+        """New item with item_nameid but missing source is normalized to NULL."""
+        saved = self.repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=7178002,
+            item_nameid_source=None,
+            item_nameid_revision=VERIFIED_MAPPING_REVISION,
+        ))
+        self.assertIsNone(saved.item_nameid)
+        self.assertIsNone(saved.item_nameid_source)
+        self.assertIsNone(saved.item_nameid_revision)
+
+    def test_new_item_with_unknown_classid_source_normalized_to_null(self) -> None:
+        """New item with unknown classid source is normalized to NULL."""
+        saved = self.repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            classid="7993038091",
+            classid_source="unknown_custom_source",
+            classid_revision=None,
+        ))
+        self.assertIsNone(saved.classid)
+        self.assertIsNone(saved.classid_source)
+        self.assertIsNone(saved.classid_revision)
+
+    def test_new_item_with_synthetic_classid_source_normalized_to_null(self) -> None:
+        """New item with synthetic classid source is normalized to NULL."""
+        saved = self.repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            classid="7993038091",
+            classid_source="SYNTHETIC_TEST_DATA",
+            classid_revision=None,
+        ))
+        self.assertIsNone(saved.classid)
+        self.assertIsNone(saved.classid_source)
+        self.assertIsNone(saved.classid_revision)
+
+    def test_new_item_with_classid_missing_source_normalized_to_null(self) -> None:
+        """New item with classid but missing source is normalized to NULL."""
+        saved = self.repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            classid="7993038091",
+            classid_source=None,
+            classid_revision=None,
+        ))
+        self.assertIsNone(saved.classid)
+        self.assertIsNone(saved.classid_source)
+        self.assertIsNone(saved.classid_revision)
+
+    def test_valid_pinned_item_nameid_provenance_accepted(self) -> None:
+        """New item with valid pinned item_nameid provenance is accepted and persisted."""
+        saved = self.repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=7178002,
+            item_nameid_source=VERIFIED_MAPPING_REPOSITORY,
+            item_nameid_revision=VERIFIED_MAPPING_REVISION,
+        ))
+        self.assertEqual(saved.item_nameid, 7178002)
+        self.assertEqual(saved.item_nameid_source, VERIFIED_MAPPING_REPOSITORY)
+        self.assertEqual(saved.item_nameid_revision, VERIFIED_MAPPING_REVISION)
+
+        stored = self.repo.get_by_id(saved.item_id)
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored.item_nameid, 7178002)
+        self.assertEqual(stored.item_nameid_source, VERIFIED_MAPPING_REPOSITORY)
+        self.assertEqual(stored.item_nameid_revision, VERIFIED_MAPPING_REVISION)
+
+    def test_valid_ssr_classid_provenance_accepted(self) -> None:
+        """New item with valid SSR classid provenance is accepted and persisted."""
+        saved = self.repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            classid="7993038091",
+            classid_source="steam_ssr_bucket",
+            classid_revision=None,
+        ))
+        self.assertEqual(saved.classid, "7993038091")
+        self.assertEqual(saved.classid_source, "steam_ssr_bucket")
+        self.assertIsNone(saved.classid_revision)
+
+        stored = self.repo.get_by_id(saved.item_id)
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored.classid, "7993038091")
+        self.assertEqual(stored.classid_source, "steam_ssr_bucket")
+        self.assertIsNone(stored.classid_revision)
+
+    def test_canonical_item_with_no_nameid_and_no_classid_remains_valid(self) -> None:
+        """A canonical item with no item_nameid and no classid remains completely valid."""
+        saved = self.repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            exterior="Field-Tested",
+        ))
+        self.assertIsNotNone(saved.item_id)
+        self.assertEqual(saved.market_hash_name, "AK-47 | Redline (Field-Tested)")
+        self.assertIsNone(saved.item_nameid)
+        self.assertIsNone(saved.classid)
+
+    def test_rejected_or_normalized_input_cannot_later_be_returned_as_trusted(self) -> None:
+        """Normalized inputs are never stored and cannot be returned as trusted in queries."""
+        self.repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=88888888,
+            item_nameid_source="SYNTHETIC_TEST_DATA",
+            classid="77777777",
+            classid_source="unknown",
+        ))
+        by_name = self.repo.get_by_market_hash_name("AK-47 | Redline (Field-Tested)")
+        self.assertIsNotNone(by_name)
+        self.assertIsNone(by_name.item_nameid)
+        self.assertIsNone(by_name.classid)
+        self.assertIsNone(by_name.item_nameid_source)
+        self.assertIsNone(by_name.classid_source)
+
+    def test_service_ingestion_path_with_valid_and_unverified_provenance(self) -> None:
+        """Test ItemIdentityService ingestion with verified vs unverified/synthetic DB."""
+        # 1. With verified database: item_nameid is persisted
+        with ItemNameIdDatabase(":memory:") as verified_db:
+            verified_db.import_verified_dataset(VERIFIED_SEED_PATH, load_verified_seed_metadata())
+            service1 = ItemIdentityService(self.db, nameid_db=verified_db)
+            res1 = service1.resolve_and_persist(
+                "https://steamcommunity.com/market/listings/730/AK-47%20%7C%20Redline%20%28Field-Tested%29"
+            )
+            self.assertEqual(res1.record.item_nameid, 7178002)
+            self.assertEqual(res1.record.item_nameid_source, VERIFIED_MAPPING_REPOSITORY)
+
+        # 2. With unverified database: canonical item is persisted with item_nameid=None
+        db2 = Database(":memory:")
+        db2.initialize()
+        with ItemNameIdDatabase(":memory:") as unverified_db:
+            unverified_db.import_synthetic_records([
+                {"market_hash_name": "AK-47 | Redline (Field-Tested)", "item_nameid": 99999999}
+            ])
+            service2 = ItemIdentityService(db2, nameid_db=unverified_db)
+            res2 = service2.resolve_and_persist(
+                "https://steamcommunity.com/market/listings/730/AK-47%20%7C%20Redline%20%28Field-Tested%29"
+            )
+            self.assertIsNone(res2.record.item_nameid)
+            self.assertIsNone(res2.record.item_nameid_source)
+            self.assertEqual(res2.record.market_hash_name, "AK-47 | Redline (Field-Tested)")
+        db2.close()
+
+
 if __name__ == "__main__":
     unittest.main()

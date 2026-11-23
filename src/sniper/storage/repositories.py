@@ -27,6 +27,62 @@ from sniper.storage.models import (
 logger = logging.getLogger(__name__)
 
 
+def normalize_item_nameid_provenance(
+    item_nameid: int | None,
+    source: str | None,
+    revision: str | None,
+) -> tuple[int | None, str | None, str | None]:
+    """Validate and normalize incoming item_nameid provenance group.
+
+    Fails closed: returns (None, None, None) unless:
+    - item_nameid is a positive integer (> 0).
+    - source exactly equals VERIFIED_MAPPING_REPOSITORY.
+    - revision exactly equals VERIFIED_MAPPING_REVISION.
+
+    Never persists a partially trusted group.
+    """
+    if item_nameid is None or source is None or revision is None:
+        return None, None, None
+
+    if not isinstance(item_nameid, int) or item_nameid <= 0:
+        return None, None, None
+
+    if source != VERIFIED_MAPPING_REPOSITORY or revision != VERIFIED_MAPPING_REVISION:
+        return None, None, None
+
+    return item_nameid, VERIFIED_MAPPING_REPOSITORY, VERIFIED_MAPPING_REVISION
+
+
+def normalize_classid_provenance(
+    classid: str | None,
+    source: str | None,
+    revision: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    """Validate and normalize incoming classid provenance group.
+
+    Fails closed: returns (None, None, None) unless:
+    - classid is a non-empty string.
+    - source exactly equals 'steam_ssr_bucket'.
+    - revision is None.
+
+    Never persists a partially trusted group.
+    """
+    if classid is None or source is None:
+        return None, None, None
+
+    clean_cid = str(classid).strip()
+    if not clean_cid:
+        return None, None, None
+
+    if source != "steam_ssr_bucket":
+        return None, None, None
+
+    if revision is not None:
+        return None, None, None
+
+    return clean_cid, "steam_ssr_bucket", None
+
+
 class ItemRepository:
     """Repository for CS2 item catalog records and identity provenance."""
 
@@ -37,6 +93,8 @@ class ItemRepository:
         """Insert or update an exact item identity record.
 
         Preserves original item_id and first_seen_at if record already exists.
+        Validates incoming provenance on both direct INSERT and UPSERT paths,
+        normalizing unverified or incomplete provenance groups to NULL.
         Protects trusted provenance against downgrade or conflicting lower-trust updates.
         """
         if not item.market_hash_name or not item.market_hash_name.strip():
@@ -47,6 +105,35 @@ class ItemRepository:
         now = current_utc_iso()
         first_seen = item.first_seen_at or now
         updated = item.updated_at or now
+
+        # Validate incoming provenance groups before INSERT/UPSERT; normalize to NULL if unverified
+        clean_nameid, clean_nameid_src, clean_nameid_rev = normalize_item_nameid_provenance(
+            item.item_nameid,
+            item.item_nameid_source,
+            item.item_nameid_revision,
+        )
+        if item.item_nameid is not None and clean_nameid is None:
+            logger.info(
+                "Normalized unverified item_nameid %s (source=%s, rev=%s) for '%s' to NULL before persistence.",
+                item.item_nameid,
+                item.item_nameid_source,
+                item.item_nameid_revision,
+                item.market_hash_name,
+            )
+
+        clean_cid, clean_cid_src, clean_cid_rev = normalize_classid_provenance(
+            item.classid,
+            item.classid_source,
+            item.classid_revision,
+        )
+        if item.classid is not None and clean_cid is None:
+            logger.info(
+                "Normalized unverified classid %s (source=%s, rev=%s) for '%s' to NULL before persistence.",
+                item.classid,
+                item.classid_source,
+                item.classid_revision,
+                item.market_hash_name,
+            )
 
         with self._db.transaction() as cur:
             # Check existing item to detect and log downgrade or conflicting attempts
@@ -62,7 +149,8 @@ class ItemRepository:
                     existing_row["item_nameid_source"] == VERIFIED_MAPPING_REPOSITORY
                     and existing_row["item_nameid_revision"] == VERIFIED_MAPPING_REVISION
                 ):
-                    if item.item_nameid is not None and item.item_nameid != existing_row["item_nameid"]:
+                    candidate_id = clean_nameid if clean_nameid is not None else item.item_nameid
+                    if candidate_id is not None and candidate_id != existing_row["item_nameid"]:
                         logger.warning(
                             "Rejected attempt to overwrite trusted item_nameid %s for '%s' "
                             "(source=%s, rev=%s) with conflicting item_nameid %s (source=%s, rev=%s). "
@@ -79,7 +167,8 @@ class ItemRepository:
                     existing_row["classid_source"] == "steam_ssr_bucket"
                     and existing_row["classid_revision"] is None
                 ):
-                    if item.classid is not None and item.classid != existing_row["classid"]:
+                    candidate_cid = clean_cid if clean_cid is not None else item.classid
+                    if candidate_cid is not None and candidate_cid != existing_row["classid"]:
                         logger.warning(
                             "Rejected attempt to overwrite trusted SSR classid %s for '%s' "
                             "with classid %s (source=%s). Preserved existing trusted SSR classid.",
@@ -156,12 +245,12 @@ class ItemRepository:
                 1 if item.is_stattrak else 0,
                 1 if item.is_souvenir else 0,
                 item.group_id,
-                item.item_nameid,
-                item.item_nameid_source,
-                item.item_nameid_revision,
-                item.classid,
-                item.classid_source,
-                item.classid_revision,
+                clean_nameid,
+                clean_nameid_src,
+                clean_nameid_rev,
+                clean_cid,
+                clean_cid_src,
+                clean_cid_rev,
                 first_seen,
                 updated,
             ))

@@ -12,6 +12,8 @@ import unittest
 
 from sniper.core.currency import CurrencyConfig
 from sniper.core.identity import (
+    VERIFIED_MAPPING_REPOSITORY,
+    VERIFIED_MAPPING_REVISION,
     ItemIdentityResult,
     ResolutionSource,
     ResolutionStatus,
@@ -995,61 +997,49 @@ class TestStorage(unittest.TestCase):
     # -------------------------------------------------------------------------
 
     def test_provenance_replacement_with_new_provenance(self) -> None:
-        """When a new item_nameid is supplied with new provenance, all three fields update atomically."""
+        """When a new item_nameid is supplied with verified provenance, all three fields update atomically."""
         initial = self.item_repo.save(ItemRecord(
             market_hash_name="AK-47 | Redline (Field-Tested)",
             base_name="AK-47 | Redline",
-            item_nameid=100,
-            item_nameid_source="source_A",
-            item_nameid_revision="rev_A",
         ))
-        self.assertEqual(initial.item_nameid, 100)
-        self.assertEqual(initial.item_nameid_source, "source_A")
-        self.assertEqual(initial.item_nameid_revision, "rev_A")
+        self.assertIsNone(initial.item_nameid)
+        self.assertIsNone(initial.item_nameid_source)
+        self.assertIsNone(initial.item_nameid_revision)
 
-        # Replace with new identifier and new provenance
+        # Update with new identifier and verified provenance
         updated = self.item_repo.save(ItemRecord(
             market_hash_name="AK-47 | Redline (Field-Tested)",
             base_name="AK-47 | Redline",
-            item_nameid=200,
-            item_nameid_source="source_B",
-            item_nameid_revision="rev_B",
+            item_nameid=7178002,
+            item_nameid_source=VERIFIED_MAPPING_REPOSITORY,
+            item_nameid_revision=VERIFIED_MAPPING_REVISION,
         ))
-        self.assertEqual(updated.item_nameid, 200)
-        self.assertEqual(updated.item_nameid_source, "source_B")
-        self.assertEqual(updated.item_nameid_revision, "rev_B")
+        self.assertEqual(updated.item_nameid, 7178002)
+        self.assertEqual(updated.item_nameid_source, VERIFIED_MAPPING_REPOSITORY)
+        self.assertEqual(updated.item_nameid_revision, VERIFIED_MAPPING_REVISION)
 
     def test_provenance_replacement_clears_stale_provenance_when_unknown(self) -> None:
-        """When a new item_nameid is supplied with missing provenance, old provenance is NOT retained."""
-        self.item_repo.save(ItemRecord(
-            market_hash_name="AK-47 | Redline (Field-Tested)",
-            base_name="AK-47 | Redline",
-            item_nameid=100,
-            item_nameid_source="source_A",
-            item_nameid_revision="rev_A",
-        ))
-
-        # Replace with new ID but unknown/missing source and revision
-        updated = self.item_repo.save(ItemRecord(
+        """When an incoming item_nameid has unknown/missing provenance, it is normalized to NULL."""
+        # Brand-new record with missing provenance fails closed to NULL
+        new_unknown = self.item_repo.save(ItemRecord(
             market_hash_name="AK-47 | Redline (Field-Tested)",
             base_name="AK-47 | Redline",
             item_nameid=300,
             item_nameid_source=None,
             item_nameid_revision=None,
         ))
-        self.assertEqual(updated.item_nameid, 300)
-        # Must NOT retain source_A or rev_A
-        self.assertIsNone(updated.item_nameid_source)
-        self.assertIsNone(updated.item_nameid_revision)
+        self.assertIsNone(new_unknown.item_nameid)
+        self.assertIsNone(new_unknown.item_nameid_source)
+        self.assertIsNone(new_unknown.item_nameid_revision)
 
     def test_absent_incoming_identifier_preserves_existing_provenance_tuple(self) -> None:
         """When incoming identifier is absent (None), the entire existing provenance tuple is preserved."""
         self.item_repo.save(ItemRecord(
             market_hash_name="AK-47 | Redline (Field-Tested)",
             base_name="AK-47 | Redline",
-            item_nameid=100,
-            item_nameid_source="source_A",
-            item_nameid_revision="rev_A",
+            item_nameid=7178002,
+            item_nameid_source=VERIFIED_MAPPING_REPOSITORY,
+            item_nameid_revision=VERIFIED_MAPPING_REVISION,
         ))
 
         # Update unrelated attribute without supplying item_nameid
@@ -1062,9 +1052,9 @@ class TestStorage(unittest.TestCase):
             item_nameid_revision=None,
         ))
         # Entire provenance tuple preserved
-        self.assertEqual(updated.item_nameid, 100)
-        self.assertEqual(updated.item_nameid_source, "source_A")
-        self.assertEqual(updated.item_nameid_revision, "rev_A")
+        self.assertEqual(updated.item_nameid, 7178002)
+        self.assertEqual(updated.item_nameid_source, VERIFIED_MAPPING_REPOSITORY)
+        self.assertEqual(updated.item_nameid_revision, VERIFIED_MAPPING_REVISION)
         self.assertEqual(updated.exterior, "Field-Tested")
 
     def test_classid_provenance_upsert_consistency(self) -> None:
@@ -1074,12 +1064,13 @@ class TestStorage(unittest.TestCase):
             base_name="AK-47 | Redline",
             classid="7993038091",
             classid_source="steam_ssr_bucket",
-            classid_revision="rev_1",
+            classid_revision=None,
         ))
         self.assertEqual(initial.classid, "7993038091")
         self.assertEqual(initial.classid_source, "steam_ssr_bucket")
+        self.assertIsNone(initial.classid_revision)
 
-        # Replace with new classid and None provenance
+        # Replace with unverified classid: trusted classid is preserved
         updated = self.item_repo.save(ItemRecord(
             market_hash_name="AK-47 | Redline (Field-Tested)",
             base_name="AK-47 | Redline",
@@ -1087,8 +1078,8 @@ class TestStorage(unittest.TestCase):
             classid_source=None,
             classid_revision=None,
         ))
-        self.assertEqual(updated.classid, "8000000000")
-        self.assertIsNone(updated.classid_source)
+        self.assertEqual(updated.classid, "7993038091")
+        self.assertEqual(updated.classid_source, "steam_ssr_bucket")
         self.assertIsNone(updated.classid_revision)
 
         # Incoming classid is None: preserves existing classid and provenance
@@ -1097,7 +1088,7 @@ class TestStorage(unittest.TestCase):
             base_name="AK-47 | Redline",
             classid=None,
         ))
-        self.assertEqual(preserved.classid, "8000000000")
+        self.assertEqual(preserved.classid, "7993038091")
 
     # -------------------------------------------------------------------------
     # 5. Observation Immutability Enforcement (Hotfix 3)
@@ -1355,7 +1346,8 @@ class TestStorage(unittest.TestCase):
             classid="7993038091",
             classid_source="steam_ssr_bucket",
             item_nameid=176000000,
-            item_nameid_source="somespecialone/steam-market-ids",
+            item_nameid_source=VERIFIED_MAPPING_REPOSITORY,
+            item_nameid_revision=VERIFIED_MAPPING_REVISION,
             resolution_status=ResolutionStatus.ITEM_NAMEID_RESOLVED,
             resolution_source=ResolutionSource.COMBINED,
         )
@@ -1618,7 +1610,8 @@ class TestStorage(unittest.TestCase):
                     base_name="AK-47 | Redline",
                     exterior="Field-Tested",
                     item_nameid=176000000,
-                    item_nameid_source="somespecialone/steam-market-ids",
+                    item_nameid_source=VERIFIED_MAPPING_REPOSITORY,
+                    item_nameid_revision=VERIFIED_MAPPING_REVISION,
                 ))
                 saved_id = saved_item.item_id
 
