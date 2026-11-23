@@ -100,11 +100,18 @@
   - Idempotent repeated persistence preserves `first_seen_at` and original primary keys across close/reopen.
   - 100% offline deterministic test coverage across all identity-to-storage paths.
 
-### Milestone 3: Order-Book & Listing Adapters + Safe Rate Limiter
+### Milestone 3: Order-Book & Listing Adapters + Safe Rate Limiter (COMPLETED)
+* **Status:** Complete & CI Verified.
 * **Deliverables:**
-  - Token-bucket rate limiter enforcing max 12 requests/minute with random jitter.
-  - Circuit breaker that automatically freezes polling for 300s on HTTP 429 or 403.
-* **Acceptance Criteria:** Unit tests verify request rate cannot exceed budget; canary probe recovers cleanly after simulated 429.
+  - `src/sniper/adapters/steam_market.py`: Production-ready typed `SteamMarketAdapter` supporting:
+    - Order-book histogram adapter (`GET /market/itemordershistogram`) with strict provenance verification, top-level vs cumulative quantity preservation, and explicit currency validation.
+    - Listing-render adapter (`GET /market/listings/730/{market_hash_name}/render/`) with pagination bounds, integer validation, safe URL percent-encoding, and listing/asset identifier preservation.
+    - SSR hydration adapter extracting `<script id="valve-ssr-data" type="application/json">` via standard-library `HTMLParser`, validating outer and nested `loaderData[3]` schemas, and pairing wear buckets to source URLs.
+  - `src/sniper/core/rate_limiter.py`: Genuine token-bucket rate limiter enforcing conservative maximum budget of 12 requests/minute (internal project policy, not a Valve guarantee), capacity of 1 token (burst prevention), monotonic refill, and randomized jitter that can only slow requests down.
+  - Global circuit breaker with 4 states (`CLOSED`, `OPEN`, `HALF_OPEN`, `HALTED`), exponential backoff schedule (300s initial safety minimum up to 3600s), single-canary recovery in HALF_OPEN blocking waiting requests, and permanent fail-closed halt on HTTP 403 or protocol/schema violations.
+  - `src/sniper/core/http_client.py`: Enhanced with `get_parsed()` callback executing inside the serialized request lock, guaranteeing invalid HTML/SSR payloads trip the circuit breaker and cannot pass as canaries.
+  - 100% deterministic offline test suite (`tests/test_steam_market_adapter.py`, `tests/test_rate_limiter.py`) using fake clocks and mock transports.
+* **Acceptance Criteria:** Verified: request rate cannot exceed 12 RPM; single canary probe recovers cleanly on success and reopens backoff on 429; all adapter endpoints share a single global rate limiter and circuit breaker state.
 
 ### Milestone 4: Exact Fee Calculator & Math Engine
 * **Deliverables:**

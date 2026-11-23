@@ -25,7 +25,7 @@ See the complete rules in [AGENTS.md](AGENTS.md).
 
 ---
 
-## Current Status: M2.3 Identity Trust & SQLite Integration
+## Current Status: M3 Steam Market Adapters & Token-Bucket Circuit Breaker
 
 - **Milestone 1 / 1.1 / 1.2 / 1.2.1 / 1.2.2 / 1.2.3 (Previously completed):**
   - Read-only asynchronous HTTP client (`ReadOnlyHttpClient`) with strict request-level serialization (`asyncio.Lock`), preventing concurrent execution overlap.
@@ -42,16 +42,22 @@ See the complete rules in [AGENTS.md](AGENTS.md).
   - Strict minor-unit currency model (`CurrencyConfig`) with hardened grammar and trailing zero exactness (accepts `Decimal("22.500") -> 2250`, continues rejecting `22.501`, `22.505`, `22.50001`).
   - Strict orderbook graph validation: strictly positive orderbook prices, non-negative integer quantities without silent fractional truncation.
   - Research skills (`.agents/skills/`) and intelligence registers (`docs/research/`).
-- **Milestone 2.1 & 2.2 (Previously completed):**
+- **Milestone 2.1 & 2.2 & 2.3 (Previously completed):**
   - M2.1: Canonical and grouped Steam listing URL parsing, SSR hydration bucket resolution, and pinned offline mapping database (`somespecialone/steam-market-ids` at `caac34bd8a28578e800501da5cc9f16c7cb3fa67`).
   - M2.2: Persistent SQLite storage layer (schema version 3) with integer minor-unit financial arithmetic, typed repositories (`ItemRepository`, `CurrencyRepository`, `ListingRepository`, `OrderbookRepository`, `PortfolioRepository`, `InventoryRepository`), triggers protecting immutable listing/orderbook history and parent-item integrity, atomic migrations, and concurrency serialization with full rollback guards.
-- **M2.3 (Identity Trust & SQLite Integration):**
-  - Application service layer (`ItemIdentityService`, `ingest_market_item` in `src/sniper/storage/service.py`) integrating URL parsing, grouped SSR hydration, and trusted offline mapping lookup directly into the SQLite catalog.
+  - M2.3: Application service layer (`ItemIdentityService`, `ingest_market_item` in `src/sniper/storage/service.py`) integrating URL parsing, grouped SSR hydration, and trusted offline mapping lookup directly into the SQLite catalog.
   - Strict mapping trust policy: `SYNTHETIC_TEST_DATA` and `legacy_unverified` are strictly rejected from production identity resolution; only verified dataset provenance matching pinned repository and revision is accepted.
   - Fail-closed synthetic classid protection: synthetic or unverified `classid` values never leak into identity results.
-  - Provenance protection in `ItemRepository.save()`: prevents lower-trust, unverified, or missing incoming data from overwriting verified mapping provenance.
-  - Persistence validation: grouped URLs remaining in `PARSED_URL_ONLY` status and items with blank `market_hash_name` are blocked from creating database records.
+  - Provenance protection in `ItemRepository.save()`: prevents lower-trust, unverified, or missing incoming data from overwriting verified mapping provenance on both insert and upsert paths.
+  - Strict integer validation on `ItemRecord.item_nameid` preventing boolean-to-integer coercion.
   - 100% offline deterministic test coverage across all identity-to-storage paths.
+- **Milestone 3 (Steam Market Adapters & Token-Bucket Circuit Breaker):**
+  - Typed Steam Market adapters (`SteamMarketAdapter` in `src/sniper/adapters/steam_market.py`) for deep order-book histogram (`/market/itemordershistogram`), active listing render (`/market/listings/730/{market_hash_name}/render/`), and SSR hydration data extraction (`valve-ssr-data` JSON script parsing).
+  - Strict provenance and input validation: requires verified `ItemIdentityResult`, strictly positive integer IDs, validated currency IDs, pagination bounds, and safe URL percent-encoding for market hash names.
+  - Genuine token-bucket rate limiter (`SequentialRateLimiter`): budget of 12 requests per minute (internal conservative safety policy, not an official Valve quota or guarantee), capacity of 1 token (burst prevention), monotonic refill, and randomized jitter that only slows requests down.
+  - Global circuit breaker with 4 states (`CLOSED`, `OPEN`, `HALF_OPEN`, `HALTED`), exponential backoff (300s initial safety minimum up to 3600s), single-canary recovery in `HALF_OPEN` blocking waiting requests, and permanent fail-closed halt on HTTP 403 or protocol/schema violations.
+  - `ReadOnlyHttpClient.get_parsed()` execution path ensuring response parsing and validation occurs within the serialized request lock, guaranteeing invalid HTML/SSR payloads trip the circuit breaker and cannot pass as canaries.
+  - 250 offline deterministic unit tests passing across all test suites without issuing live Steam network calls.
 
 ---
 

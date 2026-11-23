@@ -6,7 +6,7 @@ import asyncio
 from decimal import Decimal
 import json
 import logging
-from typing import Any, TypeVar
+from typing import Any, Callable, TypeVar
 from urllib.parse import urlparse
 
 import httpx
@@ -47,6 +47,7 @@ DEFAULT_ALLOWED_PATH_PREFIXES = (
 )
 
 T = TypeVar("T", bound=BaseModel)
+R = TypeVar("R")
 
 
 class SecurityError(Exception):
@@ -320,6 +321,33 @@ class ReadOnlyHttpClient:
 
             self.rate_limiter.record_success()
             return data
+
+    async def get_parsed(
+        self,
+        url: str,
+        parser_callback: Callable[[httpx.Response], R],
+        params: dict[str, Any] | None = None,
+        expect_json: bool = False,
+    ) -> R:
+        """Execute GET and parse/validate response within the single serialized request lifecycle.
+
+        Guarantees:
+        - Runs parser_callback inside the request lock before recording success.
+        - If parser_callback raises any exception, records a protocol violation on the
+          rate limiter (tripping the circuit breaker) and raises UnexpectedResponseError.
+        - Ensures invalid HTML/SSR payloads cannot silently pass as a successful canary.
+        """
+        async with self._request_lock:
+            response = await self._execute_get_locked(url, params=params, expect_json=expect_json)
+            try:
+                result = parser_callback(response)
+            except Exception as e:
+                reason = f"Response parsing/validation failed for {url}: {e}"
+                self.rate_limiter.record_protocol_violation(reason)
+                raise UnexpectedResponseError(reason) from e
+
+            self.rate_limiter.record_success()
+            return result
 
     async def post(self, *args: Any, **kwargs: Any) -> Any:
         raise PermissionError("Security Rule Violation: POST requests are strictly prohibited in read-only mode.")
