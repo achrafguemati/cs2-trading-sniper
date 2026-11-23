@@ -200,8 +200,8 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(200, json={"success": 1, "final": True})
             return httpx.Response(404)
 
-        # Accelerated test-only rate (2000 RPM = 0.03s interval) to test redirect pacing without real-world latency
-        config = RateLimiterConfig(requests_per_minute=2000.0, jitter_max_seconds=0.0)
+        # Accelerated test-only rate (1200 RPM = 0.05s interval) to test redirect pacing without real-world latency
+        config = RateLimiterConfig(requests_per_minute=1200.0, jitter_max_seconds=0.0)
         limiter = SequentialRateLimiter(config=config)
 
         orig_acquire = limiter.acquire

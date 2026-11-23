@@ -85,7 +85,7 @@ def calculate_buyer_pays(
 
     Args:
         seller_receives_minor: Integer minor units desired by seller (>= 1).
-        publisher_fee_pct: Integer percentage for publisher fee (>= 0, default 10 for CS2).
+        publisher_fee_pct: Integer percentage for publisher fee (0-100, default 10 for CS2).
         currency: Optional CurrencyConfig specifying verified fee floors.
 
     Returns:
@@ -102,8 +102,8 @@ def calculate_buyer_pays(
 
     if type(publisher_fee_pct) is not int:
         raise TypeError(f"publisher_fee_pct must be an integer, got {type(publisher_fee_pct).__name__}")
-    if publisher_fee_pct < 0:
-        raise ValueError(f"publisher_fee_pct must be non-negative, got {publisher_fee_pct}")
+    if not (0 <= publisher_fee_pct <= 100):
+        raise ValueError(f"publisher_fee_pct must be between 0 and 100 inclusive, got {publisher_fee_pct}")
 
     min_steam, min_pub = _validate_currency(currency)
 
@@ -225,8 +225,8 @@ def calculate_seller_receives(
         raise TypeError(f"requested_buyer_pays_minor must be an integer, got {type(requested_buyer_pays_minor).__name__}")
     if type(publisher_fee_pct) is not int:
         raise TypeError(f"publisher_fee_pct must be an integer, got {type(publisher_fee_pct).__name__}")
-    if publisher_fee_pct < 0:
-        raise ValueError(f"publisher_fee_pct must be non-negative, got {publisher_fee_pct}")
+    if not (0 <= publisher_fee_pct <= 100):
+        raise ValueError(f"publisher_fee_pct must be between 0 and 100 inclusive, got {publisher_fee_pct}")
     if type(validate_market_listing) is not bool:
         raise TypeError(f"validate_market_listing must be a boolean, got {type(validate_market_listing).__name__}")
 
@@ -294,7 +294,7 @@ def calculate_exact_breakeven_buyer_pays(
 
     Args:
         cost_basis_minor: Integer minor units paid to acquire the item (>= 1).
-        publisher_fee_pct: Integer percentage for publisher fee (>= 0, default 10 for CS2).
+        publisher_fee_pct: Integer percentage for publisher fee (0-100, default 10 for CS2).
         currency: Optional CurrencyConfig specifying verified fee floors.
 
     Returns:
@@ -310,8 +310,8 @@ def calculate_exact_breakeven_buyer_pays(
         raise ValueError(f"Cost basis must be at least 1 minor unit, got {cost_basis_minor}")
     if type(publisher_fee_pct) is not int:
         raise TypeError(f"publisher_fee_pct must be an integer, got {type(publisher_fee_pct).__name__}")
-    if publisher_fee_pct < 0:
-        raise ValueError(f"publisher_fee_pct must be non-negative, got {publisher_fee_pct}")
+    if not (0 <= publisher_fee_pct <= 100):
+        raise ValueError(f"publisher_fee_pct must be between 0 and 100 inclusive, got {publisher_fee_pct}")
 
     forward = calculate_buyer_pays(cost_basis_minor, publisher_fee_pct=publisher_fee_pct, currency=currency)
     return forward.actual_buyer_pays

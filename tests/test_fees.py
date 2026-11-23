@@ -316,6 +316,60 @@ class TestFees(unittest.TestCase):
         with self.assertRaises(ValueError):
             calculate_seller_receives(2, validate_market_listing=False)
 
+    def test_publisher_fee_percentage_bounds_rejection(self) -> None:
+        """Verify all three public fee functions reject publisher_fee_pct outside 0-100 range."""
+        invalid_percentages = [-1, 101, 200]
+
+        for pct in invalid_percentages:
+            with self.assertRaises(ValueError, msg=f"calculate_buyer_pays failed to reject pct={pct}"):
+                calculate_buyer_pays(100, publisher_fee_pct=pct)
+
+            with self.assertRaises(ValueError, msg=f"calculate_seller_receives failed to reject pct={pct}"):
+                calculate_seller_receives(100, publisher_fee_pct=pct, validate_market_listing=False)
+
+            with self.assertRaises(ValueError, msg=f"calculate_exact_breakeven_buyer_pays failed to reject pct={pct}"):
+                calculate_exact_breakeven_buyer_pays(100, publisher_fee_pct=pct)
+
+    def test_publisher_fee_percentage_boundary_validity(self) -> None:
+        """Verify 0% and 100% publisher fee percentages are valid boundaries."""
+        # 0% publisher fee (enforces minimum publisher fee component floor of 1 minor unit)
+        fwd_0 = calculate_buyer_pays(100, publisher_fee_pct=0)
+        self.assertEqual(fwd_0.seller_receives, 100)
+        self.assertEqual(fwd_0.steam_fee, 5)
+        self.assertEqual(fwd_0.publisher_fee, 1)  # max(1, (100 * 0) // 100) = 1
+        self.assertEqual(fwd_0.actual_buyer_pays, 106)
+
+        inv_0 = calculate_seller_receives(106, publisher_fee_pct=0, validate_market_listing=False)
+        self.assertEqual(inv_0.seller_receives, 100)
+        self.assertEqual(inv_0.actual_buyer_pays, 106)
+        self.assertTrue(inv_0.is_exact_match)
+
+        be_0 = calculate_exact_breakeven_buyer_pays(100, publisher_fee_pct=0)
+        self.assertEqual(be_0, 106)
+
+        # 100% publisher fee
+        fwd_100 = calculate_buyer_pays(100, publisher_fee_pct=100)
+        self.assertEqual(fwd_100.seller_receives, 100)
+        self.assertEqual(fwd_100.steam_fee, 5)
+        self.assertEqual(fwd_100.publisher_fee, 100)
+        self.assertEqual(fwd_100.actual_buyer_pays, 205)
+
+        inv_100 = calculate_seller_receives(205, publisher_fee_pct=100, validate_market_listing=False)
+        self.assertEqual(inv_100.seller_receives, 100)
+        self.assertEqual(inv_100.actual_buyer_pays, 205)
+        self.assertTrue(inv_100.is_exact_match)
+
+        be_100 = calculate_exact_breakeven_buyer_pays(100, publisher_fee_pct=100)
+        self.assertEqual(be_100, 205)
+
+    def test_regression_invalid_pct_200_at_fee_floor_rejected(self) -> None:
+        """Regression test demonstrating calculate_seller_receives(3, publisher_fee_pct=200, validate_market_listing=False)
+        is rejected rather than returning a buyer-paid amount exceeding 3.
+        """
+        with self.assertRaises(ValueError) as ctx:
+            calculate_seller_receives(3, publisher_fee_pct=200, validate_market_listing=False)
+        self.assertIn("publisher_fee_pct must be between 0 and 100 inclusive", str(ctx.exception))
+
     # -------------------------------------------------------------------------
     # 7. Currency Configuration Hardening & Fee Minimums
     # -------------------------------------------------------------------------

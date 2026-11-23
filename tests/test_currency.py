@@ -133,6 +133,41 @@ class TestCurrency(unittest.TestCase):
         with self.assertRaises(ValueError):
             assert_same_currency(usd, eur)
 
+    def test_strict_boolean_verification_flags(self) -> None:
+        """Verify each of the 4 verification flags rejects non-booleans ('false', 'true', 0, 1, None)."""
+        flags = [
+            "is_metadata_verified",
+            "is_fee_verified",
+            "is_listing_min_verified",
+            "is_price_step_verified",
+        ]
+        invalid_values = ["false", "true", 0, 1, None, 1.0, [], {}]
+
+        for flag in flags:
+            for bad_val in invalid_values:
+                kwargs = {
+                    "currency_id": 1,
+                    "code": "USD",
+                    "symbol": "$",
+                    "minor_unit_precision": 2,
+                    flag: bad_val,
+                }
+                with self.assertRaises(TypeError, msg=f"Flag {flag} failed to reject {bad_val!r}") as ctx:
+                    CurrencyConfig(**kwargs)
+                self.assertIn(f"{flag} must be a bool", str(ctx.exception))
+
+            # Verify actual boolean True and False are accepted
+            for good_val in (True, False):
+                kwargs = {
+                    "currency_id": 1,
+                    "code": "USD",
+                    "symbol": "$",
+                    "minor_unit_precision": 2,
+                    flag: good_val,
+                }
+                cfg = CurrencyConfig(**kwargs)
+                self.assertEqual(getattr(cfg, flag), good_val)
+
 
 if __name__ == "__main__":
     unittest.main()

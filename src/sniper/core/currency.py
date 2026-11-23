@@ -64,6 +64,15 @@ class CurrencyConfig:
                 raise TypeError(f"min_listing_price_minor must be None or an int, got {type(self.min_listing_price_minor).__name__}")
             if self.min_listing_price_minor < 1:
                 raise ValueError(f"min_listing_price_minor must be an int >= 1, got {self.min_listing_price_minor!r}")
+        for flag in (
+            "is_metadata_verified",
+            "is_fee_verified",
+            "is_listing_min_verified",
+            "is_price_step_verified",
+        ):
+            val = getattr(self, flag)
+            if type(val) is not bool:
+                raise TypeError(f"{flag} must be a bool, got {type(val).__name__}")
 
     @property
     def is_verified(self) -> bool:
