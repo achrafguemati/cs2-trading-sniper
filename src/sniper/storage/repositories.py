@@ -50,12 +50,30 @@ class ItemRepository:
                     is_stattrak = excluded.is_stattrak,
                     is_souvenir = excluded.is_souvenir,
                     group_id = coalesce(excluded.group_id, items.group_id),
-                    item_nameid = coalesce(excluded.item_nameid, items.item_nameid),
-                    item_nameid_source = coalesce(excluded.item_nameid_source, items.item_nameid_source),
-                    item_nameid_revision = coalesce(excluded.item_nameid_revision, items.item_nameid_revision),
-                    classid = coalesce(excluded.classid, items.classid),
-                    classid_source = coalesce(excluded.classid_source, items.classid_source),
-                    classid_revision = coalesce(excluded.classid_revision, items.classid_revision),
+                    item_nameid = CASE
+                        WHEN excluded.item_nameid IS NOT NULL THEN excluded.item_nameid
+                        ELSE items.item_nameid
+                    END,
+                    item_nameid_source = CASE
+                        WHEN excluded.item_nameid IS NOT NULL THEN excluded.item_nameid_source
+                        ELSE items.item_nameid_source
+                    END,
+                    item_nameid_revision = CASE
+                        WHEN excluded.item_nameid IS NOT NULL THEN excluded.item_nameid_revision
+                        ELSE items.item_nameid_revision
+                    END,
+                    classid = CASE
+                        WHEN excluded.classid IS NOT NULL THEN excluded.classid
+                        ELSE items.classid
+                    END,
+                    classid_source = CASE
+                        WHEN excluded.classid IS NOT NULL THEN excluded.classid_source
+                        ELSE items.classid_source
+                    END,
+                    classid_revision = CASE
+                        WHEN excluded.classid IS NOT NULL THEN excluded.classid_revision
+                        ELSE items.classid_revision
+                    END,
                     updated_at = excluded.updated_at
             """, (
                 item.appid,
@@ -75,20 +93,12 @@ class ItemRepository:
                 updated,
             ))
 
-            cur.execute("SELECT item_id, first_seen_at, updated_at FROM items WHERE market_hash_name = ?", (item.market_hash_name,))
+            cur.execute("SELECT * FROM items WHERE market_hash_name = ?", (item.market_hash_name,))
             row = cur.fetchone()
             if row is None:
                 raise RuntimeError(f"Failed to retrieve item for market_hash_name '{item.market_hash_name}' after upsert.")
 
-            item_id = int(row["item_id"])
-            item_first_seen = row["first_seen_at"]
-            item_updated = row["updated_at"]
-
-        return item.model_copy(update={
-            "item_id": item_id,
-            "first_seen_at": item_first_seen,
-            "updated_at": item_updated,
-        })
+            return self._row_to_record(row)
 
     def get_by_id(self, item_id: int) -> ItemRecord | None:
         """Fetch item by primary key."""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
 import threading
@@ -11,7 +12,20 @@ from typing import Any, Generator, Sequence
 from sniper.storage.migrations import (
     apply_migrations,
     get_current_version,
+    rollback_migration,
 )
+
+
+@dataclass(frozen=True)
+class ExecutionResult:
+    """Stable metadata result from executing a DML or DDL statement.
+
+    Attributes:
+        rowcount: Number of rows affected by the statement (-1 if not applicable).
+        lastrowid: Row ID of the last inserted row, or None if not an INSERT.
+    """
+    rowcount: int
+    lastrowid: int | None = None
 
 
 class Database:
@@ -87,6 +101,15 @@ class Database:
         with self._lock:
             return get_current_version(self.connection)
 
+    def rollback(self, target_version: int, allow_data_loss: bool = False) -> list[int]:
+        """Roll back migrations down to target_version with explicit data loss protection."""
+        with self._lock:
+            return rollback_migration(
+                self.connection,
+                target_version=target_version,
+                allow_data_loss=allow_data_loss,
+            )
+
     @contextmanager
     def transaction(self) -> Generator[sqlite3.Cursor, None, None]:
         """Context manager for an atomic database transaction.
@@ -112,17 +135,27 @@ class Database:
             finally:
                 cur.close()
 
-    def execute(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Cursor:
-        """Execute a single parameterized SQL statement within a transaction."""
+    def execute(self, sql: str, params: Sequence[Any] = ()) -> ExecutionResult:
+        """Execute a single parameterized SQL statement within a transaction.
+
+        Returns an ExecutionResult with rowcount and lastrowid metadata.
+        For query retrieval, use fetch_one() or fetch_all().
+        """
         with self.transaction() as cur:
             cur.execute(sql, params)
-            return cur
+            lastrowid = cur.lastrowid if cur.lastrowid != 0 else None
+            return ExecutionResult(rowcount=cur.rowcount, lastrowid=lastrowid)
 
-    def executemany(self, sql: str, seq_of_params: Sequence[Sequence[Any]]) -> sqlite3.Cursor:
-        """Execute a parameterized SQL statement against multiple parameter tuples within a transaction."""
+    def executemany(self, sql: str, seq_of_params: Sequence[Sequence[Any]]) -> ExecutionResult:
+        """Execute a parameterized SQL statement against multiple parameter tuples within a transaction.
+
+        Returns an ExecutionResult with rowcount metadata.
+        For query retrieval, use fetch_one() or fetch_all().
+        """
         with self.transaction() as cur:
             cur.executemany(sql, seq_of_params)
-            return cur
+            lastrowid = cur.lastrowid if cur.lastrowid != 0 else None
+            return ExecutionResult(rowcount=cur.rowcount, lastrowid=lastrowid)
 
     def fetch_one(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Row | None:
         """Execute a parameterized query and fetch a single row."""

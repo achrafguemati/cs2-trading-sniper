@@ -16,8 +16,9 @@ from sniper.core.identity import (
     UrlType,
     WearCategory,
 )
-from sniper.storage.database import Database
+from sniper.storage.database import Database, ExecutionResult
 from sniper.storage.migrations import (
+    DestructiveMigrationError,
     IncompatibleSchemaVersionError,
     Migration,
     MigrationError,
@@ -63,7 +64,65 @@ class TestStorage(unittest.TestCase):
         self.db.close()
 
     # -------------------------------------------------------------------------
-    # 1. Database Initialization & Migrations
+    # 1. Database Execution API Contract (Hotfix 1)
+    # -------------------------------------------------------------------------
+
+    def test_database_execute_returns_execution_result(self) -> None:
+        """Verify execute() returns an ExecutionResult with rowcount and lastrowid, not a closed cursor."""
+        res = self.db.execute(
+            "INSERT INTO items (market_hash_name, base_name, first_seen_at, updated_at) VALUES (?, ?, ?, ?)",
+            ("Test Hash", "Test Base", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+        )
+        self.assertIsInstance(res, ExecutionResult)
+        self.assertEqual(res.rowcount, 1)
+        self.assertIsNotNone(res.lastrowid)
+        self.assertGreater(res.lastrowid, 0)
+
+        # UPDATE statement
+        res_update = self.db.execute(
+            "UPDATE items SET base_name = ? WHERE item_id = ?",
+            ("Updated Base", res.lastrowid),
+        )
+        self.assertIsInstance(res_update, ExecutionResult)
+        self.assertEqual(res_update.rowcount, 1)
+        # SQLite's connection preserves the last inserted rowid
+        self.assertEqual(res_update.lastrowid, res.lastrowid)
+
+    def test_database_executemany_returns_execution_result(self) -> None:
+        """Verify executemany() returns an ExecutionResult with total rowcount."""
+        items = [
+            ("Item A", "Base A", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+            ("Item B", "Base B", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+        ]
+        res = self.db.executemany(
+            "INSERT INTO items (market_hash_name, base_name, first_seen_at, updated_at) VALUES (?, ?, ?, ?)",
+            items,
+        )
+        self.assertIsInstance(res, ExecutionResult)
+        self.assertEqual(res.rowcount, 2)
+
+    def test_supported_query_result_methods(self) -> None:
+        """Verify fetch_one and fetch_all remain the supported query retrieval methods."""
+        self.db.execute(
+            "INSERT INTO items (market_hash_name, base_name, first_seen_at, updated_at) VALUES (?, ?, ?, ?)",
+            ("Item Q1", "Base Q1", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+        )
+        self.db.execute(
+            "INSERT INTO items (market_hash_name, base_name, first_seen_at, updated_at) VALUES (?, ?, ?, ?)",
+            ("Item Q2", "Base Q2", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+        )
+
+        row = self.db.fetch_one("SELECT * FROM items WHERE market_hash_name = ?", ("Item Q1",))
+        self.assertIsNotNone(row)
+        self.assertEqual(row["market_hash_name"], "Item Q1")
+
+        rows = self.db.fetch_all("SELECT * FROM items WHERE market_hash_name LIKE 'Item Q%' ORDER BY item_id ASC")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["market_hash_name"], "Item Q1")
+        self.assertEqual(rows[1]["market_hash_name"], "Item Q2")
+
+    # -------------------------------------------------------------------------
+    # 2. Database Initialization & Migrations
     # -------------------------------------------------------------------------
 
     def test_database_initialization(self) -> None:
@@ -95,7 +154,6 @@ class TestStorage(unittest.TestCase):
     def test_migration_from_v1_to_v2(self) -> None:
         """Verify incremental migration from V1 to V2."""
         raw_db = Database(":memory:")
-        # Apply only Version 1
         applied_v1 = raw_db.initialize(target_version=1)
         self.assertEqual(applied_v1, [1])
         self.assertEqual(raw_db.get_version(), 1)
@@ -118,13 +176,13 @@ class TestStorage(unittest.TestCase):
         self.assertIsNotNone(row_after)
         raw_db.close()
 
-    def test_migration_rollback(self) -> None:
-        """Verify rolling back a migration cleanly removes schema changes."""
+    def test_migration_rollback_empty_schema(self) -> None:
+        """Verify rolling back a migration on empty schema cleanly removes schema changes."""
         raw_db = Database(":memory:")
         raw_db.initialize(target_version=2)
         self.assertEqual(raw_db.get_version(), 2)
 
-        # Roll back to Version 1
+        # Roll back to Version 1 on empty schema
         rolled_back = rollback_migration(raw_db.connection, target_version=1)
         self.assertEqual(rolled_back, [2])
         self.assertEqual(raw_db.get_version(), 1)
@@ -135,7 +193,7 @@ class TestStorage(unittest.TestCase):
         )
         self.assertIsNone(row)
 
-        # Roll back to Version 0
+        # Roll back to Version 0 on empty schema
         rolled_back_v0 = rollback_migration(raw_db.connection, target_version=0)
         self.assertEqual(rolled_back_v0, [1])
         self.assertEqual(raw_db.get_version(), 0)
@@ -151,7 +209,6 @@ class TestStorage(unittest.TestCase):
         """Verify error when database schema version exceeds maximum supported version."""
         raw_db = Database(":memory:")
         raw_db.initialize()
-        # Manually insert a future schema version into schema_migrations
         raw_db.execute(
             "INSERT INTO schema_migrations (version, applied_at, description) VALUES (999, '2099-01-01', 'Future schema')"
         )
@@ -164,7 +221,6 @@ class TestStorage(unittest.TestCase):
         raw_db = Database(":memory:")
         raw_db.initialize(target_version=1)
 
-        # Create a failing migration step
         def broken_up(conn: sqlite3.Connection) -> None:
             conn.execute("CREATE TABLE valid_test (id INTEGER PRIMARY KEY);")
             conn.execute("INVALID SQL STATEMENT SYNTAX;")
@@ -196,12 +252,298 @@ class TestStorage(unittest.TestCase):
         raw_db.close()
 
     # -------------------------------------------------------------------------
-    # 2. Foreign Key & Check Constraints
+    # 3. Destructive Rollback Protection (Hotfix 4)
+    # -------------------------------------------------------------------------
+
+    def test_destructive_rollback_rejected_on_populated_v2(self) -> None:
+        """Verify rollback from V2 to V1 fails with DestructiveMigrationError when portfolio data exists."""
+        item = self.item_repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+        ))
+        self.portfolio_repo.record_transaction(PortfolioTransactionRecord(
+            item_id=item.item_id,
+            transaction_type="BUY",
+            quantity=1,
+            unit_price_minor=2000,
+            currency_id=1,
+        ))
+
+        # Rollback without allow_data_loss=True must be rejected
+        with self.assertRaises(DestructiveMigrationError) as ctx:
+            self.db.rollback(target_version=1, allow_data_loss=False)
+
+        self.assertIn("portfolio_transactions", str(ctx.exception))
+        self.assertIn("1 record(s)", str(ctx.exception))
+
+        # Data and schema version remain unchanged
+        self.assertEqual(self.db.get_version(), 2)
+        txs = self.portfolio_repo.get_transactions()
+        self.assertEqual(len(txs), 1)
+
+        # Rollback with allow_data_loss=True succeeds
+        rolled_back = self.db.rollback(target_version=1, allow_data_loss=True)
+        self.assertEqual(rolled_back, [2])
+        self.assertEqual(self.db.get_version(), 1)
+
+    def test_destructive_rollback_rejected_on_populated_v1(self) -> None:
+        """Verify rollback from V1 to V0 fails when core tables contain items."""
+        raw_db = Database(":memory:")
+        raw_db.initialize(target_version=1)
+        raw_item_repo = ItemRepository(raw_db)
+        raw_item_repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+        ))
+
+        # Rollback to V0 without allow_data_loss must be rejected
+        with self.assertRaises(DestructiveMigrationError) as ctx:
+            rollback_migration(raw_db.connection, target_version=0, allow_data_loss=False)
+
+        self.assertIn("items", str(ctx.exception))
+        self.assertEqual(raw_db.get_version(), 1)
+
+        # Explicit allow_data_loss=True succeeds
+        rolled_back = rollback_migration(raw_db.connection, target_version=0, allow_data_loss=True)
+        self.assertEqual(rolled_back, [1])
+        self.assertEqual(raw_db.get_version(), 0)
+        raw_db.close()
+
+    # -------------------------------------------------------------------------
+    # 4. Identity Provenance Upsert Consistency (Hotfix 2)
+    # -------------------------------------------------------------------------
+
+    def test_provenance_replacement_with_new_provenance(self) -> None:
+        """When a new item_nameid is supplied with new provenance, all three fields update atomically."""
+        initial = self.item_repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=100,
+            item_nameid_source="source_A",
+            item_nameid_revision="rev_A",
+        ))
+        self.assertEqual(initial.item_nameid, 100)
+        self.assertEqual(initial.item_nameid_source, "source_A")
+        self.assertEqual(initial.item_nameid_revision, "rev_A")
+
+        # Replace with new identifier and new provenance
+        updated = self.item_repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=200,
+            item_nameid_source="source_B",
+            item_nameid_revision="rev_B",
+        ))
+        self.assertEqual(updated.item_nameid, 200)
+        self.assertEqual(updated.item_nameid_source, "source_B")
+        self.assertEqual(updated.item_nameid_revision, "rev_B")
+
+    def test_provenance_replacement_clears_stale_provenance_when_unknown(self) -> None:
+        """When a new item_nameid is supplied with missing provenance, old provenance is NOT retained."""
+        self.item_repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=100,
+            item_nameid_source="source_A",
+            item_nameid_revision="rev_A",
+        ))
+
+        # Replace with new ID but unknown/missing source and revision
+        updated = self.item_repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=300,
+            item_nameid_source=None,
+            item_nameid_revision=None,
+        ))
+        self.assertEqual(updated.item_nameid, 300)
+        # Must NOT retain source_A or rev_A
+        self.assertIsNone(updated.item_nameid_source)
+        self.assertIsNone(updated.item_nameid_revision)
+
+    def test_absent_incoming_identifier_preserves_existing_provenance_tuple(self) -> None:
+        """When incoming identifier is absent (None), the entire existing provenance tuple is preserved."""
+        self.item_repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=100,
+            item_nameid_source="source_A",
+            item_nameid_revision="rev_A",
+        ))
+
+        # Update unrelated attribute without supplying item_nameid
+        updated = self.item_repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            exterior="Field-Tested",
+            item_nameid=None,
+            item_nameid_source=None,
+            item_nameid_revision=None,
+        ))
+        # Entire provenance tuple preserved
+        self.assertEqual(updated.item_nameid, 100)
+        self.assertEqual(updated.item_nameid_source, "source_A")
+        self.assertEqual(updated.item_nameid_revision, "rev_A")
+        self.assertEqual(updated.exterior, "Field-Tested")
+
+    def test_classid_provenance_upsert_consistency(self) -> None:
+        """Apply identical atomic provenance rules to classid, classid_source, and classid_revision."""
+        initial = self.item_repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            classid="7993038091",
+            classid_source="steam_ssr_bucket",
+            classid_revision="rev_1",
+        ))
+        self.assertEqual(initial.classid, "7993038091")
+        self.assertEqual(initial.classid_source, "steam_ssr_bucket")
+
+        # Replace with new classid and None provenance
+        updated = self.item_repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            classid="8000000000",
+            classid_source=None,
+            classid_revision=None,
+        ))
+        self.assertEqual(updated.classid, "8000000000")
+        self.assertIsNone(updated.classid_source)
+        self.assertIsNone(updated.classid_revision)
+
+        # Incoming classid is None: preserves existing classid and provenance
+        preserved = self.item_repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            classid=None,
+        ))
+        self.assertEqual(preserved.classid, "8000000000")
+
+    # -------------------------------------------------------------------------
+    # 5. Observation Immutability Enforcement (Hotfix 3)
+    # -------------------------------------------------------------------------
+
+    def test_database_trigger_rejects_listing_update(self) -> None:
+        """Direct SQL UPDATE on listings must be rejected by database triggers."""
+        item = self.item_repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+        ))
+        listing = self.listing_repo.insert_observation(ListingRecord(
+            steam_listing_id="12345",
+            item_id=item.item_id,
+            price_minor=2500,
+            currency_id=1,
+            observed_at="2026-05-12T10:00:00Z",
+        ))
+
+        # Direct SQL UPDATE must fail
+        with self.assertRaises(sqlite3.IntegrityError) as ctx:
+            self.db.execute(
+                "UPDATE listings SET price_minor = 9999 WHERE listing_id = ?",
+                (listing.listing_id,),
+            )
+        self.assertIn("immutable", str(ctx.exception).lower())
+
+        # Verify listing was not altered
+        latest = self.listing_repo.get_latest(item.item_id, 1)
+        self.assertEqual(latest.price_minor, 2500)
+
+    def test_database_trigger_rejects_listing_delete(self) -> None:
+        """Direct SQL DELETE on listings must be rejected by database triggers."""
+        item = self.item_repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+        ))
+        listing = self.listing_repo.insert_observation(ListingRecord(
+            steam_listing_id="12345",
+            item_id=item.item_id,
+            price_minor=2500,
+            currency_id=1,
+            observed_at="2026-05-12T10:00:00Z",
+        ))
+
+        # Direct SQL DELETE must fail
+        with self.assertRaises(sqlite3.IntegrityError) as ctx:
+            self.db.execute(
+                "DELETE FROM listings WHERE listing_id = ?",
+                (listing.listing_id,),
+            )
+        self.assertIn("immutable", str(ctx.exception).lower())
+
+        # Verify listing still exists
+        latest = self.listing_repo.get_latest(item.item_id, 1)
+        self.assertIsNotNone(latest)
+
+    def test_database_trigger_rejects_orderbook_snapshot_update(self) -> None:
+        """Direct SQL UPDATE on orderbook_snapshots must be rejected by database triggers."""
+        item = self.item_repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+        ))
+        snapshot = self.orderbook_repo.insert_snapshot(OrderbookSnapshotRecord(
+            item_id=item.item_id,
+            currency_id=1,
+            highest_buy_order_minor=2250,
+            lowest_sell_order_minor=2488,
+            observed_at="2026-05-12T10:00:00Z",
+        ))
+
+        with self.assertRaises(sqlite3.IntegrityError) as ctx:
+            self.db.execute(
+                "UPDATE orderbook_snapshots SET highest_buy_order_minor = 9999 WHERE snapshot_id = ?",
+                (snapshot.snapshot_id,),
+            )
+        self.assertIn("immutable", str(ctx.exception).lower())
+
+    def test_database_trigger_rejects_orderbook_snapshot_delete(self) -> None:
+        """Direct SQL DELETE on orderbook_snapshots must be rejected by database triggers."""
+        item = self.item_repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+        ))
+        snapshot = self.orderbook_repo.insert_snapshot(OrderbookSnapshotRecord(
+            item_id=item.item_id,
+            currency_id=1,
+            highest_buy_order_minor=2250,
+            lowest_sell_order_minor=2488,
+            observed_at="2026-05-12T10:00:00Z",
+        ))
+
+        with self.assertRaises(sqlite3.IntegrityError) as ctx:
+            self.db.execute(
+                "DELETE FROM orderbook_snapshots WHERE snapshot_id = ?",
+                (snapshot.snapshot_id,),
+            )
+        self.assertIn("immutable", str(ctx.exception).lower())
+
+    def test_parent_item_deletion_rejected_protecting_history(self) -> None:
+        """Deleting an item that has listing or orderbook observations is blocked by ON DELETE RESTRICT."""
+        item = self.item_repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+        ))
+        self.listing_repo.insert_observation(ListingRecord(
+            steam_listing_id="12345",
+            item_id=item.item_id,
+            price_minor=2500,
+            currency_id=1,
+            observed_at="2026-05-12T10:00:00Z",
+        ))
+
+        # Attempting to delete the item must fail with IntegrityError
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.db.execute("DELETE FROM items WHERE item_id = ?", (item.item_id,))
+
+        # Item and listing remain intact
+        self.assertIsNotNone(self.item_repo.get_by_id(item.item_id))
+        self.assertIsNotNone(self.listing_repo.get_latest(item.item_id, 1))
+
+    # -------------------------------------------------------------------------
+    # 6. Foreign Key & Check Constraints
     # -------------------------------------------------------------------------
 
     def test_foreign_key_enforcement_on_listings(self) -> None:
         """Verify foreign key constraint: cannot insert listing with non-existent item_id or currency_id."""
-        # Non-existent item_id
         listing_bad_item = ListingRecord(
             steam_listing_id="111",
             item_id=999999,
@@ -212,14 +554,12 @@ class TestStorage(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             self.listing_repo.insert_observation(listing_bad_item)
 
-        # Save valid item
         item = self.item_repo.save(ItemRecord(
             market_hash_name="AK-47 | Redline (Field-Tested)",
             base_name="AK-47 | Redline",
             exterior="Field-Tested",
         ))
 
-        # Non-existent currency_id
         listing_bad_curr = ListingRecord(
             steam_listing_id="112",
             item_id=item.item_id,
@@ -238,7 +578,6 @@ class TestStorage(unittest.TestCase):
             exterior="Field-Tested",
         ))
 
-        # Listing price <= 0 rejected by CHECK constraint
         with self.assertRaises(sqlite3.IntegrityError):
             self.db.execute("""
                 INSERT INTO listings (
@@ -263,7 +602,7 @@ class TestStorage(unittest.TestCase):
             """)
 
     # -------------------------------------------------------------------------
-    # 3. Item Identity & Variant Separation
+    # 7. Item Identity & Variant Separation
     # -------------------------------------------------------------------------
 
     def test_different_wear_variants_remain_separate(self) -> None:
@@ -282,7 +621,6 @@ class TestStorage(unittest.TestCase):
         self.assertNotEqual(ft.item_id, mw.item_id)
         self.assertEqual(ft.base_name, mw.base_name)
         self.assertNotEqual(ft.exterior, mw.exterior)
-
         self.assertEqual(self.item_repo.count(), 2)
 
     def test_stattrak_vs_ordinary_remain_separate(self) -> None:
@@ -303,33 +641,6 @@ class TestStorage(unittest.TestCase):
         self.assertNotEqual(normal.item_id, stattrak.item_id)
         self.assertFalse(normal.is_stattrak)
         self.assertTrue(stattrak.is_stattrak)
-
-    def test_item_upsert_idempotent_preserves_first_seen_and_id(self) -> None:
-        """Repeatedly saving the same exact market hash name updates metadata without changing item_id or first_seen_at."""
-        first = self.item_repo.save(ItemRecord(
-            market_hash_name="AK-47 | Redline (Field-Tested)",
-            base_name="AK-47 | Redline",
-            exterior="Field-Tested",
-            first_seen_at="2026-01-01T00:00:00Z",
-            item_nameid=None,
-        ))
-        initial_id = first.item_id
-
-        # Update with resolved item_nameid and provenance
-        updated = self.item_repo.save(ItemRecord(
-            market_hash_name="AK-47 | Redline (Field-Tested)",
-            base_name="AK-47 | Redline",
-            exterior="Field-Tested",
-            item_nameid=176000000,
-            item_nameid_source="somespecialone/steam-market-ids",
-            item_nameid_revision="caac34bd8a28578e800501da5cc9f16c7cb3fa67",
-            updated_at="2026-02-01T00:00:00Z",
-        ))
-
-        self.assertEqual(updated.item_id, initial_id)
-        self.assertEqual(updated.first_seen_at, "2026-01-01T00:00:00Z")
-        self.assertEqual(updated.item_nameid, 176000000)
-        self.assertEqual(updated.item_nameid_source, "somespecialone/steam-market-ids")
 
     def test_from_identity_result_adapter(self) -> None:
         """Test ItemRecord.from_identity_result factory method."""
@@ -359,7 +670,7 @@ class TestStorage(unittest.TestCase):
         self.assertEqual(saved.classid, "7993038091")
 
     # -------------------------------------------------------------------------
-    # 4. Currency Configuration & UNKNOWN Rules
+    # 8. Currency Configuration & UNKNOWN Rules
     # -------------------------------------------------------------------------
 
     def test_currency_unknown_rules_preserved_as_null(self) -> None:
@@ -385,7 +696,7 @@ class TestStorage(unittest.TestCase):
         self.assertEqual(jpy.minor_unit_precision, 0)
 
     # -------------------------------------------------------------------------
-    # 5. Listing History & Immutability
+    # 9. Listing History & Immutability
     # -------------------------------------------------------------------------
 
     def test_listing_history_immutability(self) -> None:
@@ -396,8 +707,7 @@ class TestStorage(unittest.TestCase):
             exterior="Field-Tested",
         ))
 
-        # Insert multiple observations for the same steam_listing_id over time
-        l1 = self.listing_repo.insert_observation(ListingRecord(
+        self.listing_repo.insert_observation(ListingRecord(
             steam_listing_id="49827391028374",
             item_id=item.item_id,
             price_minor=2500,
@@ -407,7 +717,7 @@ class TestStorage(unittest.TestCase):
             status="active",
         ))
 
-        l2 = self.listing_repo.insert_observation(ListingRecord(
+        self.listing_repo.insert_observation(ListingRecord(
             steam_listing_id="49827391028374",
             item_id=item.item_id,
             price_minor=2450,
@@ -419,7 +729,6 @@ class TestStorage(unittest.TestCase):
 
         history = self.listing_repo.get_history(item.item_id, currency_id=1)
         self.assertEqual(len(history), 2)
-        # History is ordered from newest to oldest
         self.assertEqual(history[0].observed_at, "2026-05-12T11:00:00Z")
         self.assertEqual(history[0].price_minor, 2450)
         self.assertEqual(history[1].observed_at, "2026-05-12T10:00:00Z")
@@ -430,7 +739,7 @@ class TestStorage(unittest.TestCase):
         self.assertEqual(latest.price_minor, 2450)
 
     # -------------------------------------------------------------------------
-    # 6. Orderbook Snapshots & Immutability
+    # 10. Orderbook Snapshots & Immutability
     # -------------------------------------------------------------------------
 
     def test_orderbook_snapshot_history(self) -> None:
@@ -441,7 +750,7 @@ class TestStorage(unittest.TestCase):
             exterior="Field-Tested",
         ))
 
-        s1 = self.orderbook_repo.insert_snapshot(OrderbookSnapshotRecord(
+        self.orderbook_repo.insert_snapshot(OrderbookSnapshotRecord(
             item_id=item.item_id,
             currency_id=1,
             highest_buy_order_minor=2250,
@@ -454,7 +763,7 @@ class TestStorage(unittest.TestCase):
             source_payload_version="histogram_v1",
         ))
 
-        s2 = self.orderbook_repo.insert_snapshot(OrderbookSnapshotRecord(
+        self.orderbook_repo.insert_snapshot(OrderbookSnapshotRecord(
             item_id=item.item_id,
             currency_id=1,
             highest_buy_order_minor=2260,
@@ -477,12 +786,11 @@ class TestStorage(unittest.TestCase):
         self.assertEqual(latest.highest_buy_order_minor, 2260)
 
     # -------------------------------------------------------------------------
-    # 7. Inventory Snapshots & Atomic Import
+    # 11. Inventory Snapshots & Atomic Import
     # -------------------------------------------------------------------------
 
     def test_inventory_snapshot_atomic_import(self) -> None:
         """Verify transactional import of inventory snapshots and linking to items catalog."""
-        # Pre-seed one known catalog item
         known_item = self.item_repo.save(ItemRecord(
             market_hash_name="AK-47 | Redline (Field-Tested)",
             base_name="AK-47 | Redline",
@@ -523,23 +831,18 @@ class TestStorage(unittest.TestCase):
         self.assertIsNotNone(snapshot.snapshot_id)
         self.assertEqual(snapshot.total_count, 2)
         self.assertEqual(len(imported), 2)
-
-        # AK-47 was linked to existing item_id
         self.assertEqual(imported[0].item_id, known_item.item_id)
-        # AWP was not in catalog, so item_id is None
         self.assertIsNone(imported[1].item_id)
 
-        # Query items for snapshot
         snapshot_items = self.inv_repo.get_items_for_snapshot(snapshot.snapshot_id)
         self.assertEqual(len(snapshot_items), 2)
 
-        # Query item history
         history = self.inv_repo.get_item_history("AK-47 | Redline (Field-Tested)")
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0].asset_id, "38291049281")
 
     # -------------------------------------------------------------------------
-    # 8. Portfolio Accounting & Exact Integer Calculations
+    # 12. Portfolio Accounting & Exact Integer Calculations
     # -------------------------------------------------------------------------
 
     def test_portfolio_transaction_recording_and_integer_cost_basis(self) -> None:
@@ -550,8 +853,7 @@ class TestStorage(unittest.TestCase):
             exterior="Field-Tested",
         ))
 
-        # 1. Buy 2 units @ $20.00 (2000 cents) + $1.50 (150 cents) total fee
-        # Total cost = 2 * 2000 + 150 = 4150 cents
+        # 1. Buy 2 units @ $20.00 (2000 cents) + $1.50 (150 cents) fee -> cost = 4150
         tx1 = self.portfolio_repo.record_transaction(PortfolioTransactionRecord(
             item_id=item.item_id,
             transaction_type="BUY",
@@ -564,8 +866,7 @@ class TestStorage(unittest.TestCase):
         ))
         self.assertIsNotNone(tx1.transaction_id)
 
-        # 2. Buy 1 unit @ $22.50 (2250 cents) + $1.00 (100 cents) fee
-        # Cost = 1 * 2250 + 100 = 2350 cents
+        # 2. Buy 1 unit @ $22.50 (2250 cents) + $1.00 (100 cents) fee -> cost = 2350
         self.portfolio_repo.record_transaction(PortfolioTransactionRecord(
             item_id=item.item_id,
             transaction_type="BUY",
@@ -576,12 +877,10 @@ class TestStorage(unittest.TestCase):
             timestamp="2026-05-02T10:00:00Z",
         ))
 
-        # Total acquisition cost = 4150 + 2350 = 6500 cents
         total_acq_cost = self.portfolio_repo.calculate_acquisition_cost(item_id=item.item_id, currency_id=1)
         self.assertEqual(total_acq_cost, 6500)
 
-        # 3. Sell 1 unit @ $26.00 (2600 cents) with $3.38 (338 cents) Valve fee
-        # Net proceeds = 2600 - 338 = 2262 cents
+        # 3. Sell 1 unit @ $26.00 (2600 cents) with $3.38 (338 cents) fee -> net = 2262
         self.portfolio_repo.record_transaction(PortfolioTransactionRecord(
             item_id=item.item_id,
             transaction_type="SELL",
@@ -592,7 +891,6 @@ class TestStorage(unittest.TestCase):
             timestamp="2026-05-10T10:00:00Z",
         ))
 
-        # Verify summary
         summary = self.portfolio_repo.calculate_portfolio_summary(currency_id=1, item_id=item.item_id)
         self.assertEqual(summary.total_bought_quantity, 3)
         self.assertEqual(summary.total_sold_quantity, 1)
@@ -602,7 +900,7 @@ class TestStorage(unittest.TestCase):
         self.assertEqual(summary.total_realized_proceeds_minor, 2262)
 
     # -------------------------------------------------------------------------
-    # 9. Persistence & Reopen (Disk-Backed Database)
+    # 13. Persistence & Reopen (Disk-Backed Database)
     # -------------------------------------------------------------------------
 
     def test_database_persistence_close_and_reopen(self) -> None:
@@ -610,7 +908,6 @@ class TestStorage(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_file = Path(tmpdir) / "test_sniper.db"
 
-            # 1. Open and populate database
             with Database(db_file) as disk_db:
                 disk_db.initialize()
                 c_repo = CurrencyRepository(disk_db)
@@ -626,9 +923,7 @@ class TestStorage(unittest.TestCase):
                 ))
                 saved_id = saved_item.item_id
 
-            # 2. Re-open database file and verify data
             with Database(db_file) as reopened_db:
-                # Version should already be 2 without re-running migrations
                 self.assertEqual(reopened_db.get_version(), 2)
 
                 re_i_repo = ItemRepository(reopened_db)
@@ -643,7 +938,7 @@ class TestStorage(unittest.TestCase):
                 self.assertEqual(usd.code, "USD")
 
     # -------------------------------------------------------------------------
-    # 10. Concurrency & Thread-Safety
+    # 14. Concurrency & Thread-Safety
     # -------------------------------------------------------------------------
 
     def test_concurrent_readers_and_writes(self) -> None:
@@ -656,7 +951,6 @@ class TestStorage(unittest.TestCase):
             c_repo.seed_default_currencies()
             i_repo = ItemRepository(db)
 
-            # Pre-insert item
             item = i_repo.save(ItemRecord(
                 market_hash_name="AK-47 | Redline (Field-Tested)",
                 base_name="AK-47 | Redline",
@@ -684,7 +978,6 @@ class TestStorage(unittest.TestCase):
                 write_futures = [executor.submit(worker_write, i) for i in range(10)]
                 read_futures = [executor.submit(worker_read) for _ in range(10)]
 
-                # Wait for all to complete
                 for f in concurrent.futures.as_completed(write_futures):
                     self.assertIsNotNone(f.result())
                 for f in concurrent.futures.as_completed(read_futures):

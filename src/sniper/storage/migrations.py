@@ -18,6 +18,11 @@ class IncompatibleSchemaVersionError(MigrationError):
     pass
 
 
+class DestructiveMigrationError(MigrationError):
+    """Raised when a rollback would destroy existing data without explicit authorization."""
+    pass
+
+
 @dataclass(frozen=True)
 class Migration:
     """Represents an atomic schema migration step."""
@@ -25,6 +30,7 @@ class Migration:
     description: str
     up: Callable[[sqlite3.Connection], None]
     down: Callable[[sqlite3.Connection], None]
+    affected_tables: tuple[str, ...] = ()
 
 
 def _migration_1_up(conn: sqlite3.Connection) -> None:
@@ -78,12 +84,12 @@ def _migration_1_up(conn: sqlite3.Connection) -> None:
     cur.execute("CREATE INDEX idx_items_group_id ON items(group_id)")
     cur.execute("CREATE INDEX idx_items_nameid ON items(item_nameid)")
 
-    # 3. Listings observations
+    # 3. Listings observations (immutable history, ON DELETE RESTRICT)
     cur.execute("""
         CREATE TABLE listings (
             listing_id INTEGER PRIMARY KEY AUTOINCREMENT,
             steam_listing_id TEXT NOT NULL,
-            item_id INTEGER NOT NULL REFERENCES items(item_id) ON DELETE CASCADE,
+            item_id INTEGER NOT NULL REFERENCES items(item_id) ON DELETE RESTRICT,
             price_minor INTEGER NOT NULL CHECK (price_minor > 0),
             fee_minor INTEGER CHECK (fee_minor IS NULL OR fee_minor >= 0),
             steam_fee_minor INTEGER CHECK (steam_fee_minor IS NULL OR steam_fee_minor >= 0),
@@ -98,11 +104,11 @@ def _migration_1_up(conn: sqlite3.Connection) -> None:
     cur.execute("CREATE INDEX idx_listings_item_curr ON listings(item_id, currency_id, observed_at)")
     cur.execute("CREATE INDEX idx_listings_steam_id ON listings(steam_listing_id)")
 
-    # 4. Orderbook snapshots
+    # 4. Orderbook snapshots (immutable history, ON DELETE RESTRICT)
     cur.execute("""
         CREATE TABLE orderbook_snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            item_id INTEGER NOT NULL REFERENCES items(item_id) ON DELETE CASCADE,
+            item_id INTEGER NOT NULL REFERENCES items(item_id) ON DELETE RESTRICT,
             currency_id INTEGER NOT NULL REFERENCES currency_configs(currency_id) ON DELETE RESTRICT,
             highest_buy_order_minor INTEGER CHECK (highest_buy_order_minor IS NULL OR highest_buy_order_minor > 0),
             lowest_sell_order_minor INTEGER CHECK (lowest_sell_order_minor IS NULL OR lowest_sell_order_minor > 0),
@@ -150,10 +156,46 @@ def _migration_1_up(conn: sqlite3.Connection) -> None:
     cur.execute("CREATE INDEX idx_inv_items_asset ON inventory_items(asset_id)")
     cur.execute("CREATE INDEX idx_inv_items_hash_name ON inventory_items(market_hash_name)")
 
+    # 7. Database-level immutability triggers for listings observations
+    cur.execute("""
+        CREATE TRIGGER prevent_listings_update
+        BEFORE UPDATE ON listings
+        BEGIN
+            SELECT RAISE(ABORT, 'Historical listing observations are immutable; UPDATE is prohibited.');
+        END;
+    """)
+    cur.execute("""
+        CREATE TRIGGER prevent_listings_delete
+        BEFORE DELETE ON listings
+        BEGIN
+            SELECT RAISE(ABORT, 'Historical listing observations are immutable; DELETE is prohibited.');
+        END;
+    """)
+
+    # 8. Database-level immutability triggers for orderbook snapshots
+    cur.execute("""
+        CREATE TRIGGER prevent_orderbook_snapshots_update
+        BEFORE UPDATE ON orderbook_snapshots
+        BEGIN
+            SELECT RAISE(ABORT, 'Historical orderbook snapshots are immutable; UPDATE is prohibited.');
+        END;
+    """)
+    cur.execute("""
+        CREATE TRIGGER prevent_orderbook_snapshots_delete
+        BEFORE DELETE ON orderbook_snapshots
+        BEGIN
+            SELECT RAISE(ABORT, 'Historical orderbook snapshots are immutable; DELETE is prohibited.');
+        END;
+    """)
+
 
 def _migration_1_down(conn: sqlite3.Connection) -> None:
     """Migration 1 Down."""
     cur = conn.cursor()
+    cur.execute("DROP TRIGGER IF EXISTS prevent_listings_update")
+    cur.execute("DROP TRIGGER IF EXISTS prevent_listings_delete")
+    cur.execute("DROP TRIGGER IF EXISTS prevent_orderbook_snapshots_update")
+    cur.execute("DROP TRIGGER IF EXISTS prevent_orderbook_snapshots_delete")
     cur.execute("DROP TABLE IF EXISTS inventory_items")
     cur.execute("DROP TABLE IF EXISTS inventory_snapshots")
     cur.execute("DROP TABLE IF EXISTS orderbook_snapshots")
@@ -195,12 +237,14 @@ MIGRATIONS: list[Migration] = [
         description="Core market items, currencies, listings, orderbook, and inventory",
         up=_migration_1_up,
         down=_migration_1_down,
+        affected_tables=("inventory_items", "inventory_snapshots", "orderbook_snapshots", "listings", "items", "currency_configs"),
     ),
     Migration(
         version=2,
         description="Portfolio transactions and tracking",
         up=_migration_2_up,
         down=_migration_2_down,
+        affected_tables=("portfolio_transactions",),
     ),
 ]
 
@@ -292,8 +336,12 @@ def apply_migrations(
 def rollback_migration(
     conn: sqlite3.Connection,
     target_version: int,
+    allow_data_loss: bool = False,
 ) -> list[int]:
     """Roll back migrations down to target_version.
+
+    If any affected table contains records and allow_data_loss is False,
+    raises DestructiveMigrationError before executing any destructive operations.
 
     Returns list of rolled back versions in reverse order.
     """
@@ -303,8 +351,32 @@ def rollback_migration(
     if target_version >= current_ver:
         return []
 
+    # 1. Safety check: inspect all affected tables for existing data
+    if not allow_data_loss:
+        for migration in reversed(MIGRATIONS):
+            if migration.version > current_ver:
+                continue
+            if migration.version <= target_version:
+                break
+            for table_name in migration.affected_tables:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?",
+                    (table_name,),
+                )
+                exists = cur.fetchone()[0] > 0
+                if exists:
+                    cur.execute(f"SELECT COUNT(*) FROM {table_name}")
+                    count = cur.fetchone()[0]
+                    if count > 0:
+                        raise DestructiveMigrationError(
+                            f"Refusing to rollback migration {migration.version} ({migration.description}): "
+                            f"table '{table_name}' contains {count} record(s). "
+                            f"Pass allow_data_loss=True to confirm destructive rollback."
+                        )
+
+    # 2. Execute rollback in reverse order
     rolled_back: list[int] = []
-    # Process in reverse order
     for migration in reversed(MIGRATIONS):
         if migration.version > current_ver:
             continue

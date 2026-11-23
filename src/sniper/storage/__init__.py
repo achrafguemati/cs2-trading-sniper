@@ -1,7 +1,8 @@
 """SQLite persistence layer and data repositories for CS2 market monitor."""
 
-from sniper.storage.database import Database
+from sniper.storage.database import Database, ExecutionResult
 from sniper.storage.migrations import (
+    DestructiveMigrationError,
     IncompatibleSchemaVersionError,
     Migration,
     MigrationError,
@@ -34,6 +35,8 @@ __all__ = [
     "CurrencyRecord",
     "CurrencyRepository",
     "Database",
+    "DestructiveMigrationError",
+    "ExecutionResult",
     "IncompatibleSchemaVersionError",
     "InventoryItemRecord",
     "InventoryRepository",
