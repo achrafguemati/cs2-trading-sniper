@@ -76,24 +76,45 @@ def calculate_seller_receives(
     currency: CurrencyConfig | None = None,
     validate_market_listing: bool = True,
 ) -> FeeBreakdown:
-    """Invert gross buyer price into seller net proceeds using exact integer boundary search.
+    """Invert gross buyer price into seller net proceeds using exact integer binary search.
     
     Requires CurrencyConfig and known listing rules when validate_market_listing=True.
     Performs mathematical inversion under the project's modeled fee formula when
     validate_market_listing=False; this does not validate a market listing.
     """
-    if currency is not None:
-        if not currency.is_fee_verified:
-            raise ValueError(f"Fee rules for {currency.code} are unverified/UNKNOWN")
-        if validate_market_listing:
-            validate_market_listing_price(requested_buyer_pays_minor, currency)
+    if type(requested_buyer_pays_minor) is not int:
+        raise TypeError(f"requested_buyer_pays_minor must be an integer, got {type(requested_buyer_pays_minor).__name__}")
+    if type(publisher_fee_pct) is not int:
+        raise TypeError(f"publisher_fee_pct must be an integer, got {type(publisher_fee_pct).__name__}")
+    if publisher_fee_pct < 0:
+        raise ValueError(f"publisher_fee_pct must be non-negative, got {publisher_fee_pct}")
+    if type(validate_market_listing) is not bool:
+        raise TypeError(f"validate_market_listing must be a boolean, got {type(validate_market_listing).__name__}")
 
-    min_steam = currency.min_fee_steam_minor if currency else 1
-    min_pub = currency.min_fee_publisher_minor if currency else 1
+    if validate_market_listing and currency is None:
+        raise ValueError("Market listing validation requires a CurrencyConfig.")
+
+    min_steam, min_pub = _validate_currency(currency)
     fee_floor = 1 + min_steam + min_pub
 
     if requested_buyer_pays_minor < fee_floor:
-        raise ValueError(f"Below fee floor of {fee_floor}")
+        raise ValueError(f"Requested price {requested_buyer_pays_minor} cannot be less than fee floor of {fee_floor}")
+
+    if validate_market_listing and currency is not None:
+        validate_market_listing_price(requested_buyer_pays_minor, currency)
+
+    low = 1
+    high = requested_buyer_pays_minor
+    best_r = 1
+
+    while low <= high:
+        mid = (low + high) // 2
+        forward = calculate_buyer_pays(mid, publisher_fee_pct=publisher_fee_pct, currency=currency)
+        if forward.actual_buyer_pays <= requested_buyer_pays_minor:
+            best_r = mid
+            low = mid + 1
+        else:
+            high = mid - 1
 ```
 
 ### 2.4 Exact Break-Even Calculation

@@ -57,7 +57,14 @@ See the complete rules in [AGENTS.md](AGENTS.md).
   - Genuine token-bucket rate limiter (`SequentialRateLimiter`): budget of 12 requests per minute (internal conservative safety policy, not an official Valve quota or guarantee), capacity of 1 token (burst prevention), monotonic refill, and randomized jitter that only slows requests down.
   - Global circuit breaker with 4 states (`CLOSED`, `OPEN`, `HALF_OPEN`, `HALTED`), exponential backoff (300s initial safety minimum up to 3600s), single-canary recovery in `HALF_OPEN` blocking waiting requests, and permanent fail-closed halt on HTTP 403 or protocol/schema violations.
   - `ReadOnlyHttpClient.get_parsed()` execution path ensuring response parsing and validation occurs within the serialized request lock, guaranteeing invalid HTML/SSR payloads trip the circuit breaker and cannot pass as canaries.
-  - 250 offline deterministic unit tests passing across all test suites without issuing live Steam network calls.
+  - 251 offline deterministic unit tests passing across all test suites without issuing live Steam network calls.
+- **Milestone 4 (Exact Fee Calculator & Math Engine):**
+  - Pure integer minor-unit fee functions in `src/sniper/core/fees.py` implementing the project's modeled CS2 fee formula with independent floor components (5% Steam, 10% CS2 publisher; Valve's exact live rounding implementation remains UNKNOWN).
+  - Mathematically safe integer binary search algorithm for backward fee inversion, finding the maximal integer seller proceeds whose forward buyer price does not exceed the target, with exact reachability tracking (`is_exact_match`).
+  - Strict input validation rejecting booleans, floats, strings, negative amounts, zero amounts, and invalid publisher percentages without silent type coercion.
+  - Fail-closed currency configuration hardening in `src/sniper/core/currency.py` preventing invalid or negative fee floors and price steps.
+  - Clear separation between pure mathematical fee calculations (`validate_market_listing=False`) and market listing validation (`validate_market_listing=True`). Currency listing minimums and price step increments remain UNKNOWN for USD, EUR, JPY, and Tunisia pending primary empirical evidence.
+  - Expanded deterministic unit test coverage in `tests/test_fees.py` covering boundary cases ($0.03, $1.00, $10.00, $1,000.00), unreachable step-jump gaps (113, 114 cents), high-tier unreachable price ($500.00 -> $434.79 net / $499.99 actual), break-even math, and exhaustive invariant verification across 3 to 5,000 cents.
 
 ---
 

@@ -40,6 +40,31 @@ class CurrencyConfig:
 
     KNOWN_CURRENCIES: ClassVar[dict[int, CurrencyConfig]] = {}
 
+    def __post_init__(self) -> None:
+        if type(self.currency_id) is not int:
+            raise TypeError(f"currency_id must be an int, got {type(self.currency_id).__name__}")
+        if type(self.minor_unit_precision) is not int:
+            raise TypeError(f"minor_unit_precision must be an int, got {type(self.minor_unit_precision).__name__}")
+        if self.minor_unit_precision < 0:
+            raise ValueError(f"minor_unit_precision must be a non-negative int, got {self.minor_unit_precision!r}")
+        if type(self.price_step_minor) is not int:
+            raise TypeError(f"price_step_minor must be an int, got {type(self.price_step_minor).__name__}")
+        if self.price_step_minor < 1:
+            raise ValueError(f"price_step_minor must be an int >= 1, got {self.price_step_minor!r}")
+        if type(self.min_fee_steam_minor) is not int:
+            raise TypeError(f"min_fee_steam_minor must be an int, got {type(self.min_fee_steam_minor).__name__}")
+        if self.min_fee_steam_minor < 1:
+            raise ValueError(f"min_fee_steam_minor must be an int >= 1, got {self.min_fee_steam_minor!r}")
+        if type(self.min_fee_publisher_minor) is not int:
+            raise TypeError(f"min_fee_publisher_minor must be an int, got {type(self.min_fee_publisher_minor).__name__}")
+        if self.min_fee_publisher_minor < 1:
+            raise ValueError(f"min_fee_publisher_minor must be an int >= 1, got {self.min_fee_publisher_minor!r}")
+        if self.min_listing_price_minor is not None:
+            if type(self.min_listing_price_minor) is not int:
+                raise TypeError(f"min_listing_price_minor must be None or an int, got {type(self.min_listing_price_minor).__name__}")
+            if self.min_listing_price_minor < 1:
+                raise ValueError(f"min_listing_price_minor must be an int >= 1, got {self.min_listing_price_minor!r}")
+
     @property
     def is_verified(self) -> bool:
         """Return True only if all metadata, fee, and listing rules are verified."""

@@ -115,9 +115,16 @@
 
 ### Milestone 4: Exact Fee Calculator & Math Engine
 * **Deliverables:**
-  - `src/sniper/core/fees.py`: Integer-cents fee functions implementing Valve's dual-floor schedule.
-  - Full test suite testing boundary conditions ($0.03, $1.00, $10.00, $1000.00).
-* **Acceptance Criteria:** 100% test pass matching Steam sell confirmation modal cents.
+  - `src/sniper/core/fees.py`: Integer minor-unit fee functions implementing the project's modeled CS2 fee formula with independent floor components:
+    - Steam fee: $\max(m_s, \lfloor (R \times 5) / 100 \rfloor)$
+    - CS2 publisher fee: $\max(m_p, \lfloor (R \times 10) / 100 \rfloor)$
+    - Buyer pays: $R + \text{steam\_fee} + \text{publisher\_fee}$
+    *(Note: Valve's documented fee rates and minimum components do not establish its exact internal rounding implementation; Valve's exact rounding implementation remains UNKNOWN).*
+  - Backward inversion function using a mathematically safe integer binary search over $[1, B_{\text{req}}]$, finding the maximal integer seller proceeds $R$ such that forward $B(R) \le B_{\text{req}}$, reporting exact reachability via `is_exact_match`.
+  - Strict input validation rejecting booleans, floats, strings, negative amounts, and invalid percentages.
+  - Strict separation between pure mathematical fee calculations (`validate_market_listing=False`) and market listing validation (`validate_market_listing=True`). Currency listing minimums and price step increments remain UNKNOWN for USD, EUR, JPY, and Tunisia pending primary empirical evidence.
+  - Comprehensive deterministic unit test suite (`tests/test_fees.py`) covering monetary boundaries ($0.03, $1.00, $10.00, $1,000.00), unreachable step-jump gaps (e.g. 113, 114 cents yielding $R=99$, actual buyer pays 112 cents), high-tier unreachable price ($500.00 yielding $R=434.79$, actual buyer pays $499.99), and monotonic range invariant tests across $B_{\text{req}} \in [3, 5000]$.
+* **Acceptance Criteria:** Verified: 100% deterministic test pass for exact arithmetic under the project's modeled formula; mathematically safe integer boundary search; fail-closed rejection on unverified currencies or market listing rules; strict non-coercing input validation.
 
 ### Milestone 5: SELL Engine + Inventory Tracker + Telegram Alerts
 * **Deliverables:**
