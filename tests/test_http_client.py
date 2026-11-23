@@ -200,7 +200,8 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(200, json={"success": 1, "final": True})
             return httpx.Response(404)
 
-        config = RateLimiterConfig(min_delay_seconds=0.03, max_delay_seconds=0.05, jitter_max_seconds=0.0)
+        # Accelerated test-only rate (2000 RPM = 0.03s interval) to test redirect pacing without real-world latency
+        config = RateLimiterConfig(requests_per_minute=2000.0, jitter_max_seconds=0.0)
         limiter = SequentialRateLimiter(config=config)
 
         orig_acquire = limiter.acquire
@@ -330,7 +331,8 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
                 content=b"<!DOCTYPE html><html><body><h3>Cloudflare Challenge</h3></body></html>"
             )
 
-        limiter = SequentialRateLimiter(config=RateLimiterConfig(min_delay_seconds=0.01, max_delay_seconds=0.02, jitter_max_seconds=0.0))
+        # Test-only accelerated limiter (6000 RPM) to keep unit tests fast
+        limiter = SequentialRateLimiter(config=RateLimiterConfig(requests_per_minute=6000.0, jitter_max_seconds=0.0))
         client = ReadOnlyHttpClient(
             rate_limiter=limiter,
             allowed_exact_paths=TEST_ALLOWED_EXACT_PATHS,
@@ -356,7 +358,8 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
             call_count += 1
             return httpx.Response(200, content=b"{malformed json without close")
 
-        limiter = SequentialRateLimiter(config=RateLimiterConfig(min_delay_seconds=0.01, max_delay_seconds=0.02, jitter_max_seconds=0.0))
+        # Test-only accelerated limiter (6000 RPM) to keep unit tests fast
+        limiter = SequentialRateLimiter(config=RateLimiterConfig(requests_per_minute=6000.0, jitter_max_seconds=0.0))
         client = ReadOnlyHttpClient(
             rate_limiter=limiter,
             allowed_exact_paths=TEST_ALLOWED_EXACT_PATHS,
@@ -382,7 +385,8 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
             call_count += 1
             return httpx.Response(200, json={"required_key": 12345})
 
-        limiter = SequentialRateLimiter(config=RateLimiterConfig(min_delay_seconds=0.01, max_delay_seconds=0.02, jitter_max_seconds=0.0))
+        # Test-only accelerated limiter (6000 RPM) to keep unit tests fast
+        limiter = SequentialRateLimiter(config=RateLimiterConfig(requests_per_minute=6000.0, jitter_max_seconds=0.0))
         client = ReadOnlyHttpClient(
             rate_limiter=limiter,
             allowed_exact_paths=TEST_ALLOWED_EXACT_PATHS,
@@ -419,7 +423,8 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(200, json={"status": "ok"})
 
         transport = httpx.MockTransport(slow_handler)
-        config = RateLimiterConfig(min_delay_seconds=0.01, max_delay_seconds=0.02, jitter_max_seconds=0.0)
+        # Test-only accelerated rate (6000 RPM) to test serialization without long pacing delays
+        config = RateLimiterConfig(requests_per_minute=6000.0, jitter_max_seconds=0.0)
         limiter = SequentialRateLimiter(config=config)
         client = ReadOnlyHttpClient(
             rate_limiter=limiter,

@@ -98,18 +98,15 @@ class RateLimiterConfig:
     """Configuration for token-bucket rate limiter and exponential backoff circuit breaker."""
     requests_per_minute: float = 12.0
     capacity: float = 1.0
-    min_delay_seconds: float = 4.0
-    max_delay_seconds: float = 6.0
+    min_delay_seconds: float = 4.0  # Deprecated: retained for backward compatibility; does not affect refill rate.
+    max_delay_seconds: float = 6.0  # Deprecated: retained for backward compatibility; does not affect refill rate.
     jitter_max_seconds: float = 1.5
     initial_backoff_seconds: float = 300.0
     max_backoff_seconds: float = 3600.0
 
     @property
     def refill_rate(self) -> float:
-        """Token refill rate in tokens per second."""
-        if self.min_delay_seconds not in (4.0, 5.0):
-            # Caller explicitly passed a custom min_delay_seconds for fast unit testing
-            return 1.0 / self.min_delay_seconds
+        """Token refill rate in tokens per second, derived solely from requests_per_minute."""
         return self.requests_per_minute / 60.0
 
 

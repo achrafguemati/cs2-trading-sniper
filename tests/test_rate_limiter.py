@@ -40,9 +40,10 @@ class TestRateLimiter(unittest.IsolatedAsyncioTestCase):
     """Existing backwards-compatible rate limiter tests."""
 
     async def test_acquire_and_pacing(self) -> None:
+        # Accelerated test-only rate (1500 RPM = 0.04s refill interval) to test pacing without slow real sleeps.
+        # Production default remains strictly 12 RPM.
         config = RateLimiterConfig(
-            min_delay_seconds=0.04,
-            max_delay_seconds=0.06,
+            requests_per_minute=1500.0,
             jitter_max_seconds=0.01,
             initial_backoff_seconds=1.0,
         )
@@ -373,6 +374,45 @@ class TestCircuitBreakerCanaryRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(limiter.state, CircuitBreakerState.CLOSED)
         self.assertFalse(limiter.is_halted)
         self.assertEqual(limiter.consecutive_429_count, 0)
+
+    async def test_legacy_delay_settings_cannot_override_refill_rate(self) -> None:
+        """Prove that deprecated min/max_delay_seconds cannot override token bucket refill rate."""
+        # 1. Default config: 12 RPM -> 0.2 tokens/sec
+        default_config = RateLimiterConfig()
+        self.assertEqual(default_config.requests_per_minute, 12.0)
+        self.assertEqual(default_config.refill_rate, 0.2)
+
+        # 2. Even with arbitrary deprecated min_delay_seconds (e.g. 4.1, 0.001, 100.0), refill_rate is unchanged
+        config_4_1 = RateLimiterConfig(requests_per_minute=12.0, min_delay_seconds=4.1, max_delay_seconds=10.0)
+        self.assertEqual(config_4_1.refill_rate, 0.2)
+
+        config_fast = RateLimiterConfig(requests_per_minute=12.0, min_delay_seconds=0.001)
+        self.assertEqual(config_fast.refill_rate, 0.2)
+
+        config_slow = RateLimiterConfig(requests_per_minute=12.0, min_delay_seconds=100.0)
+        self.assertEqual(config_slow.refill_rate, 0.2)
+
+        # 3. Custom RPM sets refill_rate strictly from requests_per_minute / 60.0
+        config_custom = RateLimiterConfig(requests_per_minute=30.0, min_delay_seconds=0.01)
+        self.assertEqual(config_custom.refill_rate, 0.5)
+
+        # 4. Prove SequentialRateLimiter wait time derives strictly from requests_per_minute using FakeClock
+        clock = FakeClock()
+        limiter = SequentialRateLimiter(
+            config=RateLimiterConfig(requests_per_minute=12.0, min_delay_seconds=0.01, jitter_max_seconds=0.0),
+            time_func=clock.time,
+            sleep_func=clock.sleep,
+        )
+
+        # First request consumes initial 1.0 token immediately without sleeping
+        await limiter.acquire()
+        self.assertEqual(clock.sleep_calls, [])
+        self.assertEqual(limiter.available_tokens, 0.0)
+
+        # Second immediate request must wait 1.0 / (12.0 / 60.0) = 5.0 seconds (not 0.01s!)
+        await limiter.acquire()
+        self.assertEqual(clock.sleep_calls, [5.0])
+        self.assertEqual(clock.time(), 1005.0)
 
 
 if __name__ == "__main__":

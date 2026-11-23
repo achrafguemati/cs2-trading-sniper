@@ -99,7 +99,8 @@ class TestOrderbookHistogramAdapter(unittest.IsolatedAsyncioTestCase):
 
         client = ReadOnlyHttpClient(
             transport=httpx.MockTransport(handler),
-            rate_limiter=SequentialRateLimiter(config=RateLimiterConfig(min_delay_seconds=0.01)),
+            # Test-only accelerated rate (6000 RPM) to keep unit tests fast
+            rate_limiter=SequentialRateLimiter(config=RateLimiterConfig(requests_per_minute=6000.0, jitter_max_seconds=0.0)),
         )
         adapter = SteamMarketAdapter(client)
         identity = make_valid_resolved_identity()
@@ -206,7 +207,8 @@ class TestListingRenderAdapter(unittest.IsolatedAsyncioTestCase):
 
         client = ReadOnlyHttpClient(
             transport=httpx.MockTransport(handler),
-            rate_limiter=SequentialRateLimiter(config=RateLimiterConfig(min_delay_seconds=0.01)),
+            # Test-only accelerated rate (6000 RPM) to keep unit tests fast
+            rate_limiter=SequentialRateLimiter(config=RateLimiterConfig(requests_per_minute=6000.0, jitter_max_seconds=0.0)),
         )
         adapter = SteamMarketAdapter(client)
         identity = make_valid_resolved_identity("AK-47 | Redline (Field-Tested)")
@@ -248,7 +250,8 @@ class TestListingRenderAdapter(unittest.IsolatedAsyncioTestCase):
 
         client = ReadOnlyHttpClient(
             transport=httpx.MockTransport(handler),
-            rate_limiter=SequentialRateLimiter(config=RateLimiterConfig(min_delay_seconds=0.01)),
+            # Test-only accelerated rate (6000 RPM) to keep unit tests fast
+            rate_limiter=SequentialRateLimiter(config=RateLimiterConfig(requests_per_minute=6000.0, jitter_max_seconds=0.0)),
         )
         adapter = SteamMarketAdapter(client)
 
@@ -380,7 +383,8 @@ class TestSsrHydrationAdapter(unittest.IsolatedAsyncioTestCase):
 
     async def test_get_ssr_listing_context_trips_breaker_on_malformed_html(self) -> None:
         """Prove that a malformed SSR payload trips the circuit breaker and cannot pass as canary."""
-        limiter = SequentialRateLimiter(config=RateLimiterConfig(min_delay_seconds=0.01))
+        # Test-only accelerated rate (6000 RPM) to keep unit tests fast
+        limiter = SequentialRateLimiter(config=RateLimiterConfig(requests_per_minute=6000.0, jitter_max_seconds=0.0))
         client = ReadOnlyHttpClient(
             rate_limiter=limiter,
             transport=httpx.MockTransport(lambda req: httpx.Response(200, text="<html><body>Missing script</body></html>")),
@@ -401,7 +405,8 @@ class TestSsrHydrationAdapter(unittest.IsolatedAsyncioTestCase):
         html = f'<html><head><script id="valve-ssr-data" type="application/json">{outer}</script></head></html>'
 
         client = ReadOnlyHttpClient(
-            rate_limiter=SequentialRateLimiter(config=RateLimiterConfig(min_delay_seconds=0.01)),
+            # Test-only accelerated rate (6000 RPM) to keep unit tests fast
+            rate_limiter=SequentialRateLimiter(config=RateLimiterConfig(requests_per_minute=6000.0, jitter_max_seconds=0.0)),
             transport=httpx.MockTransport(lambda req: httpx.Response(200, text=html)),
         )
         adapter = SteamMarketAdapter(client)
@@ -421,7 +426,8 @@ class TestSharedCircuitBreakerAcrossAdapters(unittest.IsolatedAsyncioTestCase):
 
     async def test_429_on_one_adapter_blocks_all_adapters(self) -> None:
         """HTTP 429 encountered on one adapter opens breaker for all other adapter endpoints globally."""
-        limiter = SequentialRateLimiter(config=RateLimiterConfig(initial_backoff_seconds=300.0, min_delay_seconds=0.01))
+        # Test-only accelerated rate (6000 RPM) to keep unit tests fast
+        limiter = SequentialRateLimiter(config=RateLimiterConfig(initial_backoff_seconds=300.0, requests_per_minute=6000.0, jitter_max_seconds=0.0))
 
         # First request returns 429
         def handler(request: httpx.Request) -> httpx.Response:
@@ -450,7 +456,8 @@ class TestSharedCircuitBreakerAcrossAdapters(unittest.IsolatedAsyncioTestCase):
 
     async def test_403_on_one_adapter_halts_all_adapters_permanently(self) -> None:
         """HTTP 403 on one adapter permanently halts all adapters."""
-        limiter = SequentialRateLimiter(config=RateLimiterConfig(min_delay_seconds=0.01))
+        # Test-only accelerated rate (6000 RPM) to keep unit tests fast
+        limiter = SequentialRateLimiter(config=RateLimiterConfig(requests_per_minute=6000.0, jitter_max_seconds=0.0))
 
         def handler(request: httpx.Request) -> httpx.Response:
             if "render" in str(request.url):
