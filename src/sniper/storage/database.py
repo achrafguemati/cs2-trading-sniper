@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+import re
 import sqlite3
 import threading
 from typing import Any, Generator, Sequence
@@ -26,6 +27,12 @@ class ExecutionResult:
     """
     rowcount: int
     lastrowid: int | None = None
+
+
+_INSERT_OR_REPLACE_PATTERN = re.compile(
+    r"^\s*(?:--[^\n]*\n\s*|/\*.*?\*/\s*)*(?:INSERT|REPLACE)\b",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 class Database:
@@ -139,23 +146,29 @@ class Database:
         """Execute a single parameterized SQL statement within a transaction.
 
         Returns an ExecutionResult with rowcount and lastrowid metadata.
+        For INSERT/REPLACE statements that successfully insert a row, lastrowid contains
+        the integer rowid. For UPDATE, DELETE, SELECT, DDL, or ignored inserts,
+        lastrowid is strictly None.
         For query retrieval, use fetch_one() or fetch_all().
         """
         with self.transaction() as cur:
             cur.execute(sql, params)
-            lastrowid = cur.lastrowid if cur.lastrowid != 0 else None
+            lastrowid: int | None = None
+            if _INSERT_OR_REPLACE_PATTERN.match(sql):
+                if cur.rowcount > 0 and cur.lastrowid is not None and cur.lastrowid != 0:
+                    lastrowid = cur.lastrowid
             return ExecutionResult(rowcount=cur.rowcount, lastrowid=lastrowid)
 
     def executemany(self, sql: str, seq_of_params: Sequence[Sequence[Any]]) -> ExecutionResult:
         """Execute a parameterized SQL statement against multiple parameter tuples within a transaction.
 
-        Returns an ExecutionResult with rowcount metadata.
+        Returns an ExecutionResult with total rowcount metadata.
+        lastrowid is strictly None because executemany cannot reliably report a single row ID.
         For query retrieval, use fetch_one() or fetch_all().
         """
         with self.transaction() as cur:
             cur.executemany(sql, seq_of_params)
-            lastrowid = cur.lastrowid if cur.lastrowid != 0 else None
-            return ExecutionResult(rowcount=cur.rowcount, lastrowid=lastrowid)
+            return ExecutionResult(rowcount=cur.rowcount, lastrowid=None)
 
     def fetch_one(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Row | None:
         """Execute a parameterized query and fetch a single row."""

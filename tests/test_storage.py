@@ -64,11 +64,16 @@ class TestStorage(unittest.TestCase):
         self.db.close()
 
     # -------------------------------------------------------------------------
-    # 1. Database Execution API Contract (Hotfix 1)
+    # 1. Database Execution API Contract (Hotfix 1 & Hotfix 2)
     # -------------------------------------------------------------------------
 
     def test_database_execute_returns_execution_result(self) -> None:
-        """Verify execute() returns an ExecutionResult with rowcount and lastrowid, not a closed cursor."""
+        """Verify execute() returns an ExecutionResult with rowcount and lastrowid, not a closed cursor.
+
+        Verifies that:
+        - INSERT returns the inserted row ID.
+        - Subsequent UPDATE, SELECT, DDL, and DELETE strictly return lastrowid=None (no stale row ID).
+        """
         res = self.db.execute(
             "INSERT INTO items (market_hash_name, base_name, first_seen_at, updated_at) VALUES (?, ?, ?, ?)",
             ("Test Hash", "Test Base", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
@@ -77,19 +82,52 @@ class TestStorage(unittest.TestCase):
         self.assertEqual(res.rowcount, 1)
         self.assertIsNotNone(res.lastrowid)
         self.assertGreater(res.lastrowid, 0)
+        inserted_id = res.lastrowid
 
-        # UPDATE statement
+        # UPDATE statement must strictly return lastrowid=None (not the previous inserted_id)
         res_update = self.db.execute(
             "UPDATE items SET base_name = ? WHERE item_id = ?",
-            ("Updated Base", res.lastrowid),
+            ("Updated Base", inserted_id),
         )
         self.assertIsInstance(res_update, ExecutionResult)
         self.assertEqual(res_update.rowcount, 1)
-        # SQLite's connection preserves the last inserted rowid
-        self.assertEqual(res_update.lastrowid, res.lastrowid)
+        self.assertIsNone(res_update.lastrowid)
+
+        # SELECT statement must strictly return lastrowid=None
+        res_select = self.db.execute("SELECT * FROM items WHERE item_id = ?", (inserted_id,))
+        self.assertIsInstance(res_select, ExecutionResult)
+        self.assertIsNone(res_select.lastrowid)
+
+        # DDL statement must strictly return lastrowid=None
+        res_ddl = self.db.execute("CREATE TABLE temp_contract_test (id INTEGER PRIMARY KEY)")
+        self.assertIsInstance(res_ddl, ExecutionResult)
+        self.assertIsNone(res_ddl.lastrowid)
+
+        # DELETE statement must strictly return lastrowid=None
+        res_delete = self.db.execute("DELETE FROM temp_contract_test WHERE id = 999")
+        self.assertIsInstance(res_delete, ExecutionResult)
+        self.assertEqual(res_delete.rowcount, 0)
+        self.assertIsNone(res_delete.lastrowid)
+
+    def test_insert_or_ignore_lastrowid_semantics(self) -> None:
+        """Verify INSERT OR IGNORE returns rowid when inserted, and None when ignored."""
+        res1 = self.db.execute(
+            "INSERT OR IGNORE INTO items (market_hash_name, base_name, first_seen_at, updated_at) VALUES (?, ?, ?, ?)",
+            ("Unique Item", "Base", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+        )
+        self.assertEqual(res1.rowcount, 1)
+        self.assertIsNotNone(res1.lastrowid)
+
+        # Duplicate insert ignored: rowcount = 0, lastrowid must be None (never stale res1.lastrowid)
+        res2 = self.db.execute(
+            "INSERT OR IGNORE INTO items (market_hash_name, base_name, first_seen_at, updated_at) VALUES (?, ?, ?, ?)",
+            ("Unique Item", "Base", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+        )
+        self.assertEqual(res2.rowcount, 0)
+        self.assertIsNone(res2.lastrowid)
 
     def test_database_executemany_returns_execution_result(self) -> None:
-        """Verify executemany() returns an ExecutionResult with total rowcount."""
+        """Verify executemany() returns an ExecutionResult with total rowcount and lastrowid=None."""
         items = [
             ("Item A", "Base A", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
             ("Item B", "Base B", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
@@ -100,6 +138,7 @@ class TestStorage(unittest.TestCase):
         )
         self.assertIsInstance(res, ExecutionResult)
         self.assertEqual(res.rowcount, 2)
+        self.assertIsNone(res.lastrowid)
 
     def test_supported_query_result_methods(self) -> None:
         """Verify fetch_one and fetch_all remain the supported query retrieval methods."""
@@ -122,14 +161,14 @@ class TestStorage(unittest.TestCase):
         self.assertEqual(rows[1]["market_hash_name"], "Item Q2")
 
     # -------------------------------------------------------------------------
-    # 2. Database Initialization & Migrations
+    # 2. Database Initialization & Migrations (M2.2 & M2.2.2)
     # -------------------------------------------------------------------------
 
     def test_database_initialization(self) -> None:
-        """Verify initial database version matches latest migration version."""
-        self.assertEqual(self.db.get_version(), 2)
+        """Verify initial database version matches latest migration version (V3)."""
+        self.assertEqual(self.db.get_version(), 3)
         applied = get_applied_versions(self.db.connection)
-        self.assertEqual(applied, [1, 2])
+        self.assertEqual(applied, [1, 2, 3])
 
     def test_repeated_initialization_idempotent(self) -> None:
         """Verify repeated initialization is a safe no-op that preserves existing data."""
@@ -144,15 +183,15 @@ class TestStorage(unittest.TestCase):
         # Re-initialize database
         applied_again = self.db.initialize()
         self.assertEqual(applied_again, [])
-        self.assertEqual(self.db.get_version(), 2)
+        self.assertEqual(self.db.get_version(), 3)
 
         # Existing record remains intact
         retrieved = self.item_repo.get_by_id(saved.item_id)
         self.assertIsNotNone(retrieved)
         self.assertEqual(retrieved.market_hash_name, item.market_hash_name)
 
-    def test_migration_from_v1_to_v2(self) -> None:
-        """Verify incremental migration from V1 to V2."""
+    def test_migration_from_v1_to_v2_to_v3(self) -> None:
+        """Verify incremental step-by-step migration from V1 to V2 to V3."""
         raw_db = Database(":memory:")
         applied_v1 = raw_db.initialize(target_version=1)
         self.assertEqual(applied_v1, [1])
@@ -174,13 +213,187 @@ class TestStorage(unittest.TestCase):
             "SELECT name FROM sqlite_master WHERE type='table' AND name='portfolio_transactions'"
         )
         self.assertIsNotNone(row_after)
+
+        # Immutability triggers should not exist yet in V2
+        trig = raw_db.fetch_one(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND name='prevent_listings_update'"
+        )
+        self.assertIsNone(trig)
+
+        # Migrate to V3
+        applied_v3 = raw_db.initialize(target_version=3)
+        self.assertEqual(applied_v3, [3])
+        self.assertEqual(raw_db.get_version(), 3)
+
+        # Triggers now exist in V3
+        trig_after = raw_db.fetch_one(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND name='prevent_listings_update'"
+        )
+        self.assertIsNotNone(trig_after)
         raw_db.close()
+
+    def test_upgrade_existing_m2_2_v2_database_to_v3(self) -> None:
+        """Verify that an existing M2.2 database (schema v2) upgrades cleanly to v3.
+
+        Requirements verified:
+        - Schema advances to version 3.
+        - All existing rows (items, listings, orderbooks) survive unchanged.
+        - Direct SQL UPDATE and DELETE on listings and orderbook are rejected.
+        - Deleting an item with historical observations is rejected (preventing cascade delete).
+        """
+        raw_db = Database(":memory:")
+        # 1. Initialize strictly to Version 2 (representing original M2.2 state)
+        raw_db.initialize(target_version=2)
+        self.assertEqual(raw_db.get_version(), 2)
+
+        raw_curr_repo = CurrencyRepository(raw_db)
+        raw_curr_repo.seed_default_currencies()
+        raw_item_repo = ItemRepository(raw_db)
+        raw_listing_repo = ListingRepository(raw_db)
+        raw_orderbook_repo = OrderbookRepository(raw_db)
+
+        # 2. Populate with existing item, listing, and orderbook observations
+        item1 = raw_item_repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            exterior="Field-Tested",
+        ))
+        listing = raw_listing_repo.insert_observation(ListingRecord(
+            steam_listing_id="listing_m2_2",
+            item_id=item1.item_id,
+            price_minor=2000,
+            currency_id=1,
+            observed_at="2026-05-01T00:00:00Z",
+        ))
+
+        item2 = raw_item_repo.save(ItemRecord(
+            market_hash_name="AWP | Asiimov (Field-Tested)",
+            base_name="AWP | Asiimov",
+            exterior="Field-Tested",
+        ))
+        snapshot = raw_orderbook_repo.insert_snapshot(OrderbookSnapshotRecord(
+            item_id=item2.item_id,
+            currency_id=1,
+            highest_buy_order_minor=1900,
+            lowest_sell_order_minor=2100,
+            observed_at="2026-05-01T00:00:00Z",
+        ))
+
+        # 3. Run initialize() on the existing V2 database
+        applied = raw_db.initialize()
+        self.assertEqual(applied, [3])
+        self.assertEqual(raw_db.get_version(), 3)
+
+        # 4. Verify existing rows survived unchanged
+        retrieved_item1 = raw_item_repo.get_by_id(item1.item_id)
+        self.assertIsNotNone(retrieved_item1)
+        self.assertEqual(retrieved_item1.market_hash_name, "AK-47 | Redline (Field-Tested)")
+
+        retrieved_item2 = raw_item_repo.get_by_id(item2.item_id)
+        self.assertIsNotNone(retrieved_item2)
+        self.assertEqual(retrieved_item2.market_hash_name, "AWP | Asiimov (Field-Tested)")
+
+        retrieved_listing = raw_listing_repo.get_latest(item1.item_id, 1)
+        self.assertIsNotNone(retrieved_listing)
+        self.assertEqual(retrieved_listing.steam_listing_id, "listing_m2_2")
+        self.assertEqual(retrieved_listing.price_minor, 2000)
+
+        retrieved_ob = raw_orderbook_repo.get_latest(item2.item_id, 1)
+        self.assertIsNotNone(retrieved_ob)
+        self.assertEqual(retrieved_ob.highest_buy_order_minor, 1900)
+
+        # 5. Verify direct UPDATE and DELETE on listings are rejected
+        with self.assertRaises(sqlite3.IntegrityError):
+            raw_db.execute("UPDATE listings SET price_minor = 9999 WHERE listing_id = ?", (listing.listing_id,))
+        with self.assertRaises(sqlite3.IntegrityError):
+            raw_db.execute("DELETE FROM listings WHERE listing_id = ?", (listing.listing_id,))
+
+        # 6. Verify direct UPDATE and DELETE on orderbook_snapshots are rejected
+        with self.assertRaises(sqlite3.IntegrityError):
+            raw_db.execute("UPDATE orderbook_snapshots SET highest_buy_order_minor = 9999 WHERE snapshot_id = ?", (snapshot.snapshot_id,))
+        with self.assertRaises(sqlite3.IntegrityError):
+            raw_db.execute("DELETE FROM orderbook_snapshots WHERE snapshot_id = ?", (snapshot.snapshot_id,))
+
+        # 7. Verify deleting parent item is blocked, protecting historical observations
+        with self.assertRaises(sqlite3.IntegrityError) as ctx_listing:
+            raw_db.execute("DELETE FROM items WHERE item_id = ?", (item1.item_id,))
+        self.assertIn("historical listing observations exist", str(ctx_listing.exception).lower())
+
+        with self.assertRaises(sqlite3.IntegrityError) as ctx_ob:
+            raw_db.execute("DELETE FROM items WHERE item_id = ?", (item2.item_id,))
+        self.assertIn("historical orderbook snapshots exist", str(ctx_ob.exception).lower())
+
+        # Verify parent items and observations still exist
+        self.assertIsNotNone(raw_item_repo.get_by_id(item1.item_id))
+        self.assertIsNotNone(raw_item_repo.get_by_id(item2.item_id))
+        self.assertIsNotNone(raw_listing_repo.get_latest(item1.item_id, 1))
+        self.assertIsNotNone(raw_orderbook_repo.get_latest(item2.item_id, 1))
+
+        raw_db.close()
+
+    def test_fresh_installation_converges_to_v3(self) -> None:
+        """Verify fresh installation applies all migrations up to v3 with identical protections."""
+        fresh_db = Database(":memory:")
+        applied = fresh_db.initialize()
+        self.assertEqual(applied, [1, 2, 3])
+        self.assertEqual(fresh_db.get_version(), 3)
+
+        fresh_curr_repo = CurrencyRepository(fresh_db)
+        fresh_curr_repo.seed_default_currencies()
+        fresh_item_repo = ItemRepository(fresh_db)
+        fresh_listing_repo = ListingRepository(fresh_db)
+        fresh_orderbook_repo = OrderbookRepository(fresh_db)
+
+        item = fresh_item_repo.save(ItemRecord(
+            market_hash_name="M4A4 | Howl (Factory New)",
+            base_name="M4A4 | Howl",
+            exterior="Factory New",
+        ))
+        listing = fresh_listing_repo.insert_observation(ListingRecord(
+            steam_listing_id="fresh_listing",
+            item_id=item.item_id,
+            price_minor=500000,
+            currency_id=1,
+            observed_at="2026-05-01T00:00:00Z",
+        ))
+        snapshot = fresh_orderbook_repo.insert_snapshot(OrderbookSnapshotRecord(
+            item_id=item.item_id,
+            currency_id=1,
+            highest_buy_order_minor=480000,
+            lowest_sell_order_minor=510000,
+            observed_at="2026-05-01T00:00:00Z",
+        ))
+
+        # Check immutability & parent-delete protections
+        with self.assertRaises(sqlite3.IntegrityError):
+            fresh_db.execute("UPDATE listings SET price_minor = 9999 WHERE listing_id = ?", (listing.listing_id,))
+        with self.assertRaises(sqlite3.IntegrityError):
+            fresh_db.execute("DELETE FROM listings WHERE listing_id = ?", (listing.listing_id,))
+        with self.assertRaises(sqlite3.IntegrityError):
+            fresh_db.execute("UPDATE orderbook_snapshots SET highest_buy_order_minor = 9999 WHERE snapshot_id = ?", (snapshot.snapshot_id,))
+        with self.assertRaises(sqlite3.IntegrityError):
+            fresh_db.execute("DELETE FROM orderbook_snapshots WHERE snapshot_id = ?", (snapshot.snapshot_id,))
+        with self.assertRaises(sqlite3.IntegrityError):
+            fresh_db.execute("DELETE FROM items WHERE item_id = ?", (item.item_id,))
+
+        fresh_db.close()
 
     def test_migration_rollback_empty_schema(self) -> None:
         """Verify rolling back a migration on empty schema cleanly removes schema changes."""
         raw_db = Database(":memory:")
-        raw_db.initialize(target_version=2)
+        raw_db.initialize(target_version=3)
+        self.assertEqual(raw_db.get_version(), 3)
+
+        # Roll back to Version 2 on empty schema (drops V3 triggers)
+        rolled_back_v2 = rollback_migration(raw_db.connection, target_version=2)
+        self.assertEqual(rolled_back_v2, [3])
         self.assertEqual(raw_db.get_version(), 2)
+
+        # Triggers dropped
+        trig = raw_db.fetch_one(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND name='prevent_listings_update'"
+        )
+        self.assertIsNone(trig)
 
         # Roll back to Version 1 on empty schema
         rolled_back = rollback_migration(raw_db.connection, target_version=1)
@@ -252,16 +465,80 @@ class TestStorage(unittest.TestCase):
         raw_db.close()
 
     # -------------------------------------------------------------------------
-    # 3. Destructive Rollback Protection (Hotfix 4)
+    # 3. Destructive Rollback Protection & Atomicity (Hotfix 3 & Hotfix 4)
     # -------------------------------------------------------------------------
+
+    def test_rollback_target_version_validation(self) -> None:
+        """Verify input validation on rollback target versions."""
+        raw_db = Database(":memory:")
+        raw_db.initialize()
+
+        # Negative target version rejected
+        with self.assertRaises(MigrationError):
+            raw_db.rollback(target_version=-1)
+
+        # Target version exceeding max supported rejected
+        with self.assertRaises(IncompatibleSchemaVersionError):
+            raw_db.rollback(target_version=999)
+
+        # Target version greater than current rejected
+        raw_db.rollback(target_version=2, allow_data_loss=True)
+        self.assertEqual(raw_db.get_version(), 2)
+        with self.assertRaises(MigrationError):
+            raw_db.rollback(target_version=3)
+
+        # Target version equal to current is clean no-op
+        res = raw_db.rollback(target_version=2)
+        self.assertEqual(res, [])
+        self.assertEqual(raw_db.get_version(), 2)
+        raw_db.close()
+
+    def test_rollback_failure_restores_pre_rollback_state(self) -> None:
+        """Verify that failure during a multi-step rollback aborts atomically and restores original state."""
+        raw_db = Database(":memory:")
+        raw_db.initialize()
+        self.assertEqual(raw_db.get_version(), 3)
+
+        from sniper.storage import migrations
+        # Simulate a failure in migration 2 down during rollback from 3 down to 1
+        m2 = next(m for m in migrations.MIGRATIONS if m.version == 2)
+        broken_m2 = Migration(
+            version=m2.version,
+            description=m2.description,
+            up=m2.up,
+            down=lambda conn: conn.execute("SYNTAX ERROR IN DOWN MIGRATION;"),
+            affected_tables=m2.affected_tables,
+        )
+        original_migrations = list(migrations.MIGRATIONS)
+        try:
+            migrations.MIGRATIONS[1] = broken_m2
+            with self.assertRaises(MigrationError):
+                raw_db.rollback(target_version=1, allow_data_loss=True)
+        finally:
+            migrations.MIGRATIONS = original_migrations
+
+        # Entire rollback was undone: schema version must still be 3, triggers must still exist
+        self.assertEqual(raw_db.get_version(), 3)
+        trig = raw_db.fetch_one(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND name='prevent_listings_update'"
+        )
+        self.assertIsNotNone(trig)
+        raw_db.close()
 
     def test_destructive_rollback_rejected_on_populated_v2(self) -> None:
         """Verify rollback from V2 to V1 fails with DestructiveMigrationError when portfolio data exists."""
-        item = self.item_repo.save(ItemRecord(
+        raw_db = Database(":memory:")
+        raw_db.initialize(target_version=2)
+        c_repo = CurrencyRepository(raw_db)
+        c_repo.seed_default_currencies()
+        i_repo = ItemRepository(raw_db)
+        p_repo = PortfolioRepository(raw_db)
+
+        item = i_repo.save(ItemRecord(
             market_hash_name="AK-47 | Redline (Field-Tested)",
             base_name="AK-47 | Redline",
         ))
-        self.portfolio_repo.record_transaction(PortfolioTransactionRecord(
+        p_repo.record_transaction(PortfolioTransactionRecord(
             item_id=item.item_id,
             transaction_type="BUY",
             quantity=1,
@@ -271,20 +548,21 @@ class TestStorage(unittest.TestCase):
 
         # Rollback without allow_data_loss=True must be rejected
         with self.assertRaises(DestructiveMigrationError) as ctx:
-            self.db.rollback(target_version=1, allow_data_loss=False)
+            raw_db.rollback(target_version=1, allow_data_loss=False)
 
         self.assertIn("portfolio_transactions", str(ctx.exception))
         self.assertIn("1 record(s)", str(ctx.exception))
 
         # Data and schema version remain unchanged
-        self.assertEqual(self.db.get_version(), 2)
-        txs = self.portfolio_repo.get_transactions()
+        self.assertEqual(raw_db.get_version(), 2)
+        txs = p_repo.get_transactions()
         self.assertEqual(len(txs), 1)
 
         # Rollback with allow_data_loss=True succeeds
-        rolled_back = self.db.rollback(target_version=1, allow_data_loss=True)
+        rolled_back = raw_db.rollback(target_version=1, allow_data_loss=True)
         self.assertEqual(rolled_back, [2])
-        self.assertEqual(self.db.get_version(), 1)
+        self.assertEqual(raw_db.get_version(), 1)
+        raw_db.close()
 
     def test_destructive_rollback_rejected_on_populated_v1(self) -> None:
         """Verify rollback from V1 to V0 fails when core tables contain items."""
@@ -530,13 +808,31 @@ class TestStorage(unittest.TestCase):
             observed_at="2026-05-12T10:00:00Z",
         ))
 
-        # Attempting to delete the item must fail with IntegrityError
-        with self.assertRaises(sqlite3.IntegrityError):
+        # Attempting to delete the item with listings must fail with IntegrityError
+        with self.assertRaises(sqlite3.IntegrityError) as ctx1:
             self.db.execute("DELETE FROM items WHERE item_id = ?", (item.item_id,))
+        self.assertIn("historical listing observations exist", str(ctx1.exception).lower())
 
         # Item and listing remain intact
         self.assertIsNotNone(self.item_repo.get_by_id(item.item_id))
         self.assertIsNotNone(self.listing_repo.get_latest(item.item_id, 1))
+
+        # Test item with orderbook snapshots
+        item2 = self.item_repo.save(ItemRecord(
+            market_hash_name="AWP | Asiimov (Field-Tested)",
+            base_name="AWP | Asiimov",
+        ))
+        self.orderbook_repo.insert_snapshot(OrderbookSnapshotRecord(
+            item_id=item2.item_id,
+            currency_id=1,
+            highest_buy_order_minor=5000,
+            lowest_sell_order_minor=6000,
+            observed_at="2026-05-12T10:00:00Z",
+        ))
+        with self.assertRaises(sqlite3.IntegrityError) as ctx2:
+            self.db.execute("DELETE FROM items WHERE item_id = ?", (item2.item_id,))
+        self.assertIn("historical orderbook snapshots exist", str(ctx2.exception).lower())
+        self.assertIsNotNone(self.item_repo.get_by_id(item2.item_id))
 
     # -------------------------------------------------------------------------
     # 6. Foreign Key & Check Constraints
@@ -924,7 +1220,7 @@ class TestStorage(unittest.TestCase):
                 saved_id = saved_item.item_id
 
             with Database(db_file) as reopened_db:
-                self.assertEqual(reopened_db.get_version(), 2)
+                self.assertEqual(reopened_db.get_version(), 3)
 
                 re_i_repo = ItemRepository(reopened_db)
                 re_item = re_i_repo.get_by_id(saved_id)
