@@ -16,9 +16,12 @@ import time
 import unittest
 
 from sniper.core.identity import (
+    VERIFIED_MAPPING_LICENSE,
     VERIFIED_MAPPING_RECORD_COUNT,
     VERIFIED_MAPPING_REPOSITORY,
     VERIFIED_MAPPING_REVISION,
+    VERIFIED_MAPPING_SHA256,
+    VERIFIED_MAPPING_SOURCE_PATH,
     IdentityResolutionError,
     ItemIdentityResult,
     ItemNameIdDatabase,
@@ -177,6 +180,107 @@ class TestMappingTrustPolicy(unittest.TestCase):
             self.assertEqual(provenance["item_nameid_source"], "SYNTHETIC_TEST_DATA")
             self.assertEqual(provenance["classid"], "11111")
             self.assertEqual(provenance["classid_source"], "SYNTHETIC_TEST_DATA")
+
+    def test_missing_metadata_blocks_trusted_resolution(self) -> None:
+        """A row claiming trusted source/revision fails closed if dataset_metadata is absent."""
+        with ItemNameIdDatabase(":memory:") as db:
+            with db._lock, db._conn:
+                db._conn.execute("""
+                    INSERT INTO item_mappings
+                    (market_hash_name, item_nameid, item_nameid_source, item_nameid_revision,
+                     classid, classid_source, classid_revision, source, updated_at)
+                    VALUES ('AK-47 | Redline (Field-Tested)', 7178002, ?, ?,
+                            NULL, NULL, NULL, 'manual', '2026-01-01T00:00:00Z')
+                """, (VERIFIED_MAPPING_REPOSITORY, VERIFIED_MAPPING_REVISION))
+
+            # dataset_metadata table is empty
+            self.assertFalse(db.has_verified_metadata())
+
+            # Both lookup paths must fail closed
+            nameid, classid = db.lookup_item_nameid("AK-47 | Redline (Field-Tested)")
+            self.assertIsNone(nameid)
+            self.assertIsNone(classid)
+
+            verified = db.lookup_verified_mapping("AK-47 | Redline (Field-Tested)")
+            self.assertIsNone(verified)
+
+            url = "https://steamcommunity.com/market/listings/730/AK-47%20%7C%20Redline%20%28Field-Tested%29"
+            res = resolve_item_identity(url, db=db)
+            self.assertEqual(res.resolution_status, ResolutionStatus.CANONICAL_RESOLVED)
+            self.assertIsNone(res.item_nameid)
+
+            # Diagnostic provenance inspection still returns raw record
+            prov = db.lookup_item_provenance("AK-47 | Redline (Field-Tested)")
+            self.assertIsNotNone(prov)
+            self.assertEqual(prov["item_nameid"], 7178002)
+
+    def test_tampered_metadata_blocks_trusted_resolution(self) -> None:
+        """Any discrepancy in pinned metadata fields causes fail-closed lookup and resolution."""
+        tampered_cases = [
+            ("sha256", "0" * 64),
+            ("record_count", 9999),
+            ("upstream_repo", "https://github.com/evil/steam-market-ids"),
+            ("revision", "wrong_revision"),
+            ("source_path", "data/CS2/wrong_path.json"),
+            ("license", "GPL-3.0"),
+        ]
+
+        valid_base = {
+            "upstream_repo": VERIFIED_MAPPING_REPOSITORY,
+            "revision": VERIFIED_MAPPING_REVISION,
+            "retrieval_date": "2026-01-01T00:00:00Z",
+            "source_path": VERIFIED_MAPPING_SOURCE_PATH,
+            "license": VERIFIED_MAPPING_LICENSE,
+            "sha256": VERIFIED_MAPPING_SHA256,
+            "record_count": VERIFIED_MAPPING_RECORD_COUNT,
+            "imported_at": "2026-01-01T00:00:00Z",
+        }
+
+        url = "https://steamcommunity.com/market/listings/730/AK-47%20%7C%20Redline%20%28Field-Tested%29"
+
+        for field_name, bad_value in tampered_cases:
+            with self.subTest(tampered_field=field_name):
+                with ItemNameIdDatabase(":memory:") as db:
+                    # Insert mapping row claiming trusted provenance
+                    with db._lock, db._conn:
+                        db._conn.execute("""
+                            INSERT INTO item_mappings
+                            (market_hash_name, item_nameid, item_nameid_source, item_nameid_revision,
+                             classid, classid_source, classid_revision, source, updated_at)
+                            VALUES ('AK-47 | Redline (Field-Tested)', 7178002, ?, ?,
+                                    NULL, NULL, NULL, 'test', '2026-01-01T00:00:00Z')
+                        """, (VERIFIED_MAPPING_REPOSITORY, VERIFIED_MAPPING_REVISION))
+
+                        meta = dict(valid_base)
+                        meta[field_name] = bad_value
+
+                        db._conn.execute("""
+                            INSERT INTO dataset_metadata
+                            (upstream_repo, revision, retrieval_date, source_path, license, sha256, record_count, imported_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            meta["upstream_repo"],
+                            meta["revision"],
+                            meta["retrieval_date"],
+                            meta["source_path"],
+                            meta["license"],
+                            meta["sha256"],
+                            meta["record_count"],
+                            meta["imported_at"],
+                        ))
+
+                    self.assertFalse(db.has_verified_metadata(), f"Metadata with tampered {field_name} must not be verified")
+
+                    nameid, classid = db.lookup_item_nameid("AK-47 | Redline (Field-Tested)")
+                    self.assertIsNone(nameid, f"lookup_item_nameid must return None when {field_name} is tampered")
+                    self.assertIsNone(classid)
+
+                    verified = db.lookup_verified_mapping("AK-47 | Redline (Field-Tested)")
+                    self.assertIsNone(verified)
+
+                    res = resolve_item_identity(url, db=db)
+                    self.assertIsNone(res.item_nameid, f"resolve_item_identity must return item_nameid=None when {field_name} is tampered")
+                    self.assertEqual(res.resolution_status, ResolutionStatus.CANONICAL_RESOLVED)
 
 
 class TestIdentityParsingAndPersistence(unittest.TestCase):
@@ -488,6 +592,297 @@ class TestRepositoryIntegrityAndProvenance(unittest.TestCase):
         self.assertEqual(updated.item_nameid, 7178002, "Existing item_nameid must not be erased")
         self.assertEqual(updated.item_nameid_source, VERIFIED_MAPPING_REPOSITORY)
         self.assertEqual(updated.item_nameid_revision, VERIFIED_MAPPING_REVISION)
+        db.close()
+
+    def test_unknown_incoming_source_cannot_overwrite_trusted(self) -> None:
+        """Incoming unknown repository source cannot overwrite an existing trusted item_nameid."""
+        db = Database(":memory:")
+        db.initialize()
+        repo = ItemRepository(db)
+
+        repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=7178002,
+            item_nameid_source=VERIFIED_MAPPING_REPOSITORY,
+            item_nameid_revision=VERIFIED_MAPPING_REVISION,
+        ))
+
+        attempt = repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=99999999,
+            item_nameid_source="https://unknown-domain.com/repo",
+            item_nameid_revision=VERIFIED_MAPPING_REVISION,
+        ))
+
+        self.assertEqual(attempt.item_nameid, 7178002)
+        self.assertEqual(attempt.item_nameid_source, VERIFIED_MAPPING_REPOSITORY)
+        self.assertEqual(attempt.item_nameid_revision, VERIFIED_MAPPING_REVISION)
+
+        stored = repo.get_by_market_hash_name("AK-47 | Redline (Field-Tested)")
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored.item_nameid, 7178002)
+        db.close()
+
+    def test_correct_repo_with_incorrect_or_missing_revision_cannot_overwrite_trusted(self) -> None:
+        """Correct repository URL with wrong or missing revision cannot overwrite trusted item_nameid."""
+        db = Database(":memory:")
+        db.initialize()
+        repo = ItemRepository(db)
+
+        repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=7178002,
+            item_nameid_source=VERIFIED_MAPPING_REPOSITORY,
+            item_nameid_revision=VERIFIED_MAPPING_REVISION,
+        ))
+
+        # Attempt with wrong revision
+        wrong_rev = repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=88888888,
+            item_nameid_source=VERIFIED_MAPPING_REPOSITORY,
+            item_nameid_revision="wrong_revision_hash_value",
+        ))
+        self.assertEqual(wrong_rev.item_nameid, 7178002)
+        self.assertEqual(wrong_rev.item_nameid_revision, VERIFIED_MAPPING_REVISION)
+
+        # Attempt with missing revision
+        missing_rev = repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=77777777,
+            item_nameid_source=VERIFIED_MAPPING_REPOSITORY,
+            item_nameid_revision=None,
+        ))
+        self.assertEqual(missing_rev.item_nameid, 7178002)
+        self.assertEqual(missing_rev.item_nameid_revision, VERIFIED_MAPPING_REVISION)
+        db.close()
+
+    def test_trusted_item_survives_every_untrusted_update_category(self) -> None:
+        """Existing trusted mapping survives every category of untrusted or degraded update."""
+        db = Database(":memory:")
+        db.initialize()
+        repo = ItemRepository(db)
+
+        repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=7178002,
+            item_nameid_source=VERIFIED_MAPPING_REPOSITORY,
+            item_nameid_revision=VERIFIED_MAPPING_REVISION,
+            classid="7993038091",
+            classid_source="steam_ssr_bucket",
+        ))
+
+        untrusted_attempts = [
+            (None, None, None),
+            (12345, "SYNTHETIC_TEST_DATA", None),
+            (23456, "legacy_unverified", None),
+            (34567, "https://unknown.com", "rev1"),
+            (45678, VERIFIED_MAPPING_REPOSITORY, "wrong_rev"),
+            (56789, VERIFIED_MAPPING_REPOSITORY, None),
+            (67890, None, VERIFIED_MAPPING_REVISION),
+            (78901, "", ""),
+        ]
+
+        for bad_id, bad_source, bad_rev in untrusted_attempts:
+            res = repo.save(ItemRecord(
+                market_hash_name="AK-47 | Redline (Field-Tested)",
+                base_name="AK-47 | Redline",
+                item_nameid=bad_id,
+                item_nameid_source=bad_source,
+                item_nameid_revision=bad_rev,
+            ))
+            self.assertEqual(res.item_nameid, 7178002, f"Failed preserving for ({bad_id}, {bad_source}, {bad_rev})")
+            self.assertEqual(res.item_nameid_source, VERIFIED_MAPPING_REPOSITORY)
+            self.assertEqual(res.item_nameid_revision, VERIFIED_MAPPING_REVISION)
+
+        db.close()
+
+    def test_unknown_incoming_classid_source_cannot_overwrite_trusted_ssr(self) -> None:
+        """Unknown incoming classid source cannot overwrite existing trusted SSR classid."""
+        db = Database(":memory:")
+        db.initialize()
+        repo = ItemRepository(db)
+
+        repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            classid="7993038091",
+            classid_source="steam_ssr_bucket",
+        ))
+
+        attempt = repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            classid="9999999999",
+            classid_source="unknown_custom_source",
+        ))
+        self.assertEqual(attempt.classid, "7993038091")
+        self.assertEqual(attempt.classid_source, "steam_ssr_bucket")
+        self.assertIsNone(attempt.classid_revision)
+        db.close()
+
+    def test_wrong_or_missing_classid_provenance_cannot_replace_trusted_ssr(self) -> None:
+        """Wrong, synthetic, legacy, or missing classid provenance cannot replace trusted SSR provenance."""
+        db = Database(":memory:")
+        db.initialize()
+        repo = ItemRepository(db)
+
+        repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            classid="7993038091",
+            classid_source="steam_ssr_bucket",
+        ))
+
+        bad_classid_attempts = [
+            ("8888888888", "steam_ssr_bucket", "unexpected_rev"),
+            ("7777777777", None, None),
+            (None, None, None),
+            ("6666666666", "SYNTHETIC_TEST_DATA", None),
+            ("5555555555", "legacy_unverified", None),
+        ]
+
+        for bad_cid, bad_src, bad_rev in bad_classid_attempts:
+            res = repo.save(ItemRecord(
+                market_hash_name="AK-47 | Redline (Field-Tested)",
+                base_name="AK-47 | Redline",
+                classid=bad_cid,
+                classid_source=bad_src,
+                classid_revision=bad_rev,
+            ))
+            self.assertEqual(res.classid, "7993038091", f"Failed protecting SSR classid against ({bad_cid}, {bad_src}, {bad_rev})")
+            self.assertEqual(res.classid_source, "steam_ssr_bucket")
+            self.assertIsNone(res.classid_revision)
+
+        db.close()
+
+    def test_trusted_item_nameid_and_classid_provenance_remain_atomic(self) -> None:
+        """Provenance triples (id, source, revision) for item_nameid and classid remain atomic."""
+        db = Database(":memory:")
+        db.initialize()
+        repo = ItemRepository(db)
+
+        repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=7178002,
+            item_nameid_source=VERIFIED_MAPPING_REPOSITORY,
+            item_nameid_revision=VERIFIED_MAPPING_REVISION,
+            classid="7993038091",
+            classid_source="steam_ssr_bucket",
+        ))
+
+        # Attempt partial change of item_nameid group
+        repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=9999999,
+            item_nameid_source=VERIFIED_MAPPING_REPOSITORY,
+            item_nameid_revision="tampered_rev",
+        ))
+
+        stored = repo.get_by_market_hash_name("AK-47 | Redline (Field-Tested)")
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored.item_nameid, 7178002)
+        self.assertEqual(stored.item_nameid_source, VERIFIED_MAPPING_REPOSITORY)
+        self.assertEqual(stored.item_nameid_revision, VERIFIED_MAPPING_REVISION)
+
+        # Attempt partial change of classid group
+        repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            classid="12345678",
+            classid_source="steam_ssr_bucket",
+            classid_revision="unwanted_rev",
+        ))
+
+        stored2 = repo.get_by_market_hash_name("AK-47 | Redline (Field-Tested)")
+        self.assertIsNotNone(stored2)
+        self.assertEqual(stored2.classid, "7993038091")
+        self.assertEqual(stored2.classid_source, "steam_ssr_bucket")
+        self.assertIsNone(stored2.classid_revision)
+        db.close()
+
+    def test_conflicting_id_claiming_pinned_source_and_revision_preserved_safely(self) -> None:
+        """Conflicting IDs claiming pinned source/revision are preserved safely and log a warning."""
+        db = Database(":memory:")
+        db.initialize()
+        repo = ItemRepository(db)
+
+        repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=7178002,
+            item_nameid_source=VERIFIED_MAPPING_REPOSITORY,
+            item_nameid_revision=VERIFIED_MAPPING_REVISION,
+        ))
+
+        # Attempt to save a conflicting item_nameid with the same pinned repository and revision
+        with self.assertLogs("sniper.storage.repositories", level="WARNING") as cm:
+            res = repo.save(ItemRecord(
+                market_hash_name="AK-47 | Redline (Field-Tested)",
+                base_name="AK-47 | Redline",
+                item_nameid=99999999,
+                item_nameid_source=VERIFIED_MAPPING_REPOSITORY,
+                item_nameid_revision=VERIFIED_MAPPING_REVISION,
+            ))
+
+        self.assertEqual(res.item_nameid, 7178002, "Existing trusted item_nameid must be preserved on conflict")
+        self.assertTrue(any("conflicting item_nameid 99999999" in msg for msg in cm.output))
+
+        stored = repo.get_by_market_hash_name("AK-47 | Redline (Field-Tested)")
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored.item_nameid, 7178002)
+        db.close()
+
+    def test_valid_trusted_mapping_remains_available_after_all_rejected_updates(self) -> None:
+        """After sequential rejected downgrade attempts, the trusted item remains fully queryable."""
+        db = Database(":memory:")
+        db.initialize()
+        repo = ItemRepository(db)
+
+        initial = repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            exterior="Field-Tested",
+            is_stattrak=False,
+            is_souvenir=False,
+            item_nameid=7178002,
+            item_nameid_source=VERIFIED_MAPPING_REPOSITORY,
+            item_nameid_revision=VERIFIED_MAPPING_REVISION,
+            classid="7993038091",
+            classid_source="steam_ssr_bucket",
+        ))
+
+        # Sequential invalid updates
+        for bad_id in (None, 999, 888, 777):
+            repo.save(ItemRecord(
+                market_hash_name="AK-47 | Redline (Field-Tested)",
+                base_name="AK-47 | Redline",
+                item_nameid=bad_id,
+                item_nameid_source="untrusted",
+                item_nameid_revision=None,
+            ))
+
+        # Query by ID
+        by_id = repo.get_by_id(initial.item_id)
+        self.assertIsNotNone(by_id)
+        self.assertEqual(by_id.item_nameid, 7178002)
+        self.assertEqual(by_id.classid, "7993038091")
+        self.assertEqual(by_id.item_nameid_source, VERIFIED_MAPPING_REPOSITORY)
+        self.assertEqual(by_id.classid_source, "steam_ssr_bucket")
+
+        # Query by market_hash_name
+        by_name = repo.get_by_market_hash_name("AK-47 | Redline (Field-Tested)")
+        self.assertIsNotNone(by_name)
+        self.assertEqual(by_name.item_nameid, 7178002)
+        self.assertEqual(by_name.classid, "7993038091")
         db.close()
 
     def test_invalid_or_incomplete_identity_cannot_create_blank_canonical_records(self) -> None:

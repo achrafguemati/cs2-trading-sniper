@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from typing import Any, Sequence
+import logging
 import sqlite3
 
 from sniper.core.currency import CurrencyConfig
+from sniper.core.identity import (
+    VERIFIED_MAPPING_REPOSITORY,
+    VERIFIED_MAPPING_REVISION,
+)
 from sniper.storage.database import Database
 from sniper.storage.models import (
     CurrencyRecord,
@@ -18,6 +23,8 @@ from sniper.storage.models import (
     PortfolioTransactionRecord,
     current_utc_iso,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ItemRepository:
@@ -42,6 +49,46 @@ class ItemRepository:
         updated = item.updated_at or now
 
         with self._db.transaction() as cur:
+            # Check existing item to detect and log downgrade or conflicting attempts
+            cur.execute(
+                "SELECT item_nameid, item_nameid_source, item_nameid_revision, "
+                "classid, classid_source, classid_revision "
+                "FROM items WHERE market_hash_name = ?",
+                (item.market_hash_name,),
+            )
+            existing_row = cur.fetchone()
+            if existing_row is not None:
+                if (
+                    existing_row["item_nameid_source"] == VERIFIED_MAPPING_REPOSITORY
+                    and existing_row["item_nameid_revision"] == VERIFIED_MAPPING_REVISION
+                ):
+                    if item.item_nameid is not None and item.item_nameid != existing_row["item_nameid"]:
+                        logger.warning(
+                            "Rejected attempt to overwrite trusted item_nameid %s for '%s' "
+                            "(source=%s, rev=%s) with conflicting item_nameid %s (source=%s, rev=%s). "
+                            "Preserved existing trusted value.",
+                            existing_row["item_nameid"],
+                            item.market_hash_name,
+                            existing_row["item_nameid_source"],
+                            existing_row["item_nameid_revision"],
+                            item.item_nameid,
+                            item.item_nameid_source,
+                            item.item_nameid_revision,
+                        )
+                if (
+                    existing_row["classid_source"] == "steam_ssr_bucket"
+                    and existing_row["classid_revision"] is None
+                ):
+                    if item.classid is not None and item.classid != existing_row["classid"]:
+                        logger.warning(
+                            "Rejected attempt to overwrite trusted SSR classid %s for '%s' "
+                            "with classid %s (source=%s). Preserved existing trusted SSR classid.",
+                            existing_row["classid"],
+                            item.market_hash_name,
+                            item.classid,
+                            item.classid_source,
+                        )
+
             cur.execute("""
                 INSERT INTO items (
                     appid, market_hash_name, base_name, exterior,
@@ -57,45 +104,45 @@ class ItemRepository:
                     is_souvenir = excluded.is_souvenir,
                     group_id = coalesce(excluded.group_id, items.group_id),
                     item_nameid = CASE
-                        -- Protect trusted mapping provenance from synthetic or legacy downgrade
+                        -- Protect trusted mapping provenance from synthetic, legacy, unknown, or conflicting downgrade
                         WHEN items.item_nameid_source = 'https://github.com/somespecialone/steam-market-ids'
-                             AND excluded.item_nameid_source IN ('SYNTHETIC_TEST_DATA', 'legacy_unverified')
+                             AND items.item_nameid_revision = 'caac34bd8a28578e800501da5cc9f16c7cb3fa67'
                         THEN items.item_nameid
                         WHEN excluded.item_nameid IS NOT NULL THEN excluded.item_nameid
                         ELSE items.item_nameid
                     END,
                     item_nameid_source = CASE
                         WHEN items.item_nameid_source = 'https://github.com/somespecialone/steam-market-ids'
-                             AND excluded.item_nameid_source IN ('SYNTHETIC_TEST_DATA', 'legacy_unverified')
+                             AND items.item_nameid_revision = 'caac34bd8a28578e800501da5cc9f16c7cb3fa67'
                         THEN items.item_nameid_source
                         WHEN excluded.item_nameid IS NOT NULL THEN excluded.item_nameid_source
                         ELSE items.item_nameid_source
                     END,
                     item_nameid_revision = CASE
                         WHEN items.item_nameid_source = 'https://github.com/somespecialone/steam-market-ids'
-                             AND excluded.item_nameid_source IN ('SYNTHETIC_TEST_DATA', 'legacy_unverified')
+                             AND items.item_nameid_revision = 'caac34bd8a28578e800501da5cc9f16c7cb3fa67'
                         THEN items.item_nameid_revision
                         WHEN excluded.item_nameid IS NOT NULL THEN excluded.item_nameid_revision
                         ELSE items.item_nameid_revision
                     END,
                     classid = CASE
-                        -- Protect verified SSR classid from synthetic or legacy downgrade
+                        -- Protect verified SSR classid from synthetic, legacy, unknown, or missing downgrade
                         WHEN items.classid_source = 'steam_ssr_bucket'
-                             AND excluded.classid_source IN ('SYNTHETIC_TEST_DATA', 'legacy_unverified')
+                             AND items.classid_revision IS NULL
                         THEN items.classid
                         WHEN excluded.classid IS NOT NULL THEN excluded.classid
                         ELSE items.classid
                     END,
                     classid_source = CASE
                         WHEN items.classid_source = 'steam_ssr_bucket'
-                             AND excluded.classid_source IN ('SYNTHETIC_TEST_DATA', 'legacy_unverified')
+                             AND items.classid_revision IS NULL
                         THEN items.classid_source
                         WHEN excluded.classid IS NOT NULL THEN excluded.classid_source
                         ELSE items.classid_source
                     END,
                     classid_revision = CASE
                         WHEN items.classid_source = 'steam_ssr_bucket'
-                             AND excluded.classid_source IN ('SYNTHETIC_TEST_DATA', 'legacy_unverified')
+                             AND items.classid_revision IS NULL
                         THEN items.classid_revision
                         WHEN excluded.classid IS NOT NULL THEN excluded.classid_revision
                         ELSE items.classid_revision
