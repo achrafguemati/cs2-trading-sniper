@@ -15,6 +15,8 @@ import tempfile
 import time
 import unittest
 
+from pydantic import ValidationError
+
 from sniper.core.identity import (
     VERIFIED_MAPPING_LICENSE,
     VERIFIED_MAPPING_RECORD_COUNT,
@@ -38,7 +40,7 @@ from sniper.core.identity import (
 from sniper.models.schemas import SsrListingLoaderData
 from sniper.storage.database import Database
 from sniper.storage.models import ItemRecord
-from sniper.storage.repositories import ItemRepository
+from sniper.storage.repositories import ItemRepository, normalize_item_nameid_provenance
 from sniper.storage.service import IngestedItemResult, ItemIdentityService, ingest_market_item
 
 
@@ -1146,6 +1148,169 @@ class TestNewRecordProvenanceValidation(unittest.TestCase):
             self.assertIsNone(res2.record.item_nameid_source)
             self.assertEqual(res2.record.market_hash_name, "AK-47 | Redline (Field-Tested)")
         db2.close()
+
+
+class TestItemNameIdStrictIntegerValidation(unittest.TestCase):
+    """Offline unit tests proving strict integer validation for ItemRecord.item_nameid (M2.3.1.2)."""
+
+    def setUp(self) -> None:
+        self.db = Database(":memory:")
+        self.db.initialize()
+        self.repo = ItemRepository(self.db)
+
+    def tearDown(self) -> None:
+        self.db.close()
+
+    def test_item_record_rejects_bool_true(self) -> None:
+        """Prove that boolean True is strictly rejected by ItemRecord.item_nameid."""
+        with self.assertRaises((ValidationError, ValueError)):
+            ItemRecord(
+                market_hash_name="AK-47 | Redline (Field-Tested)",
+                base_name="AK-47 | Redline",
+                item_nameid=True,  # type: ignore[arg-type]
+                item_nameid_source=VERIFIED_MAPPING_REPOSITORY,
+                item_nameid_revision=VERIFIED_MAPPING_REVISION,
+            )
+
+    def test_item_record_rejects_bool_false(self) -> None:
+        """Prove that boolean False is strictly rejected by ItemRecord.item_nameid."""
+        with self.assertRaises((ValidationError, ValueError)):
+            ItemRecord(
+                market_hash_name="AK-47 | Redline (Field-Tested)",
+                base_name="AK-47 | Redline",
+                item_nameid=False,  # type: ignore[arg-type]
+            )
+
+    def test_item_record_rejects_float_values(self) -> None:
+        """Prove that integral and non-integral floats are strictly rejected."""
+        with self.assertRaises((ValidationError, ValueError)):
+            ItemRecord(
+                market_hash_name="AK-47 | Redline (Field-Tested)",
+                base_name="AK-47 | Redline",
+                item_nameid=1.0,  # type: ignore[arg-type]
+            )
+        with self.assertRaises((ValidationError, ValueError)):
+            ItemRecord(
+                market_hash_name="AK-47 | Redline (Field-Tested)",
+                base_name="AK-47 | Redline",
+                item_nameid=7178002.5,  # type: ignore[arg-type]
+            )
+
+    def test_item_record_rejects_string_digits(self) -> None:
+        """Prove that strings containing numeric digits are strictly rejected without coercion."""
+        with self.assertRaises((ValidationError, ValueError)):
+            ItemRecord(
+                market_hash_name="AK-47 | Redline (Field-Tested)",
+                base_name="AK-47 | Redline",
+                item_nameid="7178002",  # type: ignore[arg-type]
+            )
+
+    def test_item_record_rejects_non_integer_composite_types(self) -> None:
+        """Prove that arbitrary non-integer objects and sequences are strictly rejected."""
+        for invalid_val in ([1], {"id": 1}, (1,), object()):
+            with self.subTest(invalid_val=invalid_val):
+                with self.assertRaises((ValidationError, ValueError)):
+                    ItemRecord(
+                        market_hash_name="AK-47 | Redline (Field-Tested)",
+                        base_name="AK-47 | Redline",
+                        item_nameid=invalid_val,  # type: ignore[arg-type]
+                    )
+
+    def test_item_record_model_validate_rejects_non_integers(self) -> None:
+        """Prove that model_validate input path enforces identical strict integer rejection."""
+        for bad in (True, False, 1.0, "7178002", [7178002]):
+            with self.subTest(bad=bad):
+                with self.assertRaises((ValidationError, ValueError)):
+                    ItemRecord.model_validate({
+                        "market_hash_name": "AK-47 | Redline (Field-Tested)",
+                        "base_name": "AK-47 | Redline",
+                        "item_nameid": bad,
+                    })
+
+    def test_repository_normalizes_zero_and_negative_to_null(self) -> None:
+        """Prove that 0 and negative integers are normalized to NULL by the repository provenance policy."""
+        for non_positive_id in (0, -1, -7178002):
+            with self.subTest(non_positive_id=non_positive_id):
+                item = ItemRecord(
+                    market_hash_name=f"Test Item ({non_positive_id})",
+                    base_name="Test Item",
+                    item_nameid=non_positive_id,
+                    item_nameid_source=VERIFIED_MAPPING_REPOSITORY,
+                    item_nameid_revision=VERIFIED_MAPPING_REVISION,
+                )
+                saved = self.repo.save(item)
+                self.assertIsNone(saved.item_nameid)
+                self.assertIsNone(saved.item_nameid_source)
+                self.assertIsNone(saved.item_nameid_revision)
+
+                retrieved = self.repo.get_by_market_hash_name(f"Test Item ({non_positive_id})")
+                self.assertIsNotNone(retrieved)
+                self.assertIsNone(retrieved.item_nameid)
+                self.assertIsNone(retrieved.item_nameid_source)
+                self.assertIsNone(retrieved.item_nameid_revision)
+
+    def test_repository_accepts_valid_positive_integer_with_pinned_provenance(self) -> None:
+        """Prove that an actual positive integer with pinned repository and revision is accepted and persisted."""
+        item = ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+            item_nameid=7178002,
+            item_nameid_source=VERIFIED_MAPPING_REPOSITORY,
+            item_nameid_revision=VERIFIED_MAPPING_REVISION,
+        )
+        saved = self.repo.save(item)
+        self.assertEqual(saved.item_nameid, 7178002)
+        self.assertEqual(saved.item_nameid_source, VERIFIED_MAPPING_REPOSITORY)
+        self.assertEqual(saved.item_nameid_revision, VERIFIED_MAPPING_REVISION)
+
+        retrieved = self.repo.get_by_market_hash_name("AK-47 | Redline (Field-Tested)")
+        self.assertIsNotNone(retrieved)
+        self.assertEqual(retrieved.item_nameid, 7178002)
+        self.assertEqual(retrieved.item_nameid_source, VERIFIED_MAPPING_REPOSITORY)
+        self.assertEqual(retrieved.item_nameid_revision, VERIFIED_MAPPING_REVISION)
+
+    def test_repository_persists_canonical_identity_with_none_item_nameid(self) -> None:
+        """Prove that canonical identities with item_nameid=None still persist normally."""
+        item = ItemRecord(
+            market_hash_name="AWP | Asiimov (Field-Tested)",
+            base_name="AWP | Asiimov",
+            item_nameid=None,
+        )
+        saved = self.repo.save(item)
+        self.assertIsNone(saved.item_nameid)
+        self.assertIsNone(saved.item_nameid_source)
+        self.assertIsNone(saved.item_nameid_revision)
+
+        retrieved = self.repo.get_by_market_hash_name("AWP | Asiimov (Field-Tested)")
+        self.assertIsNotNone(retrieved)
+        self.assertIsNone(retrieved.item_nameid)
+        self.assertEqual(retrieved.market_hash_name, "AWP | Asiimov (Field-Tested)")
+
+    def test_normalize_item_nameid_provenance_rejects_bools_and_non_positives(self) -> None:
+        """Prove normalize_item_nameid_provenance helper strictly rejects bools, 0, and negatives."""
+        # Bools must fail closed even if pinned metadata is supplied
+        self.assertEqual(
+            normalize_item_nameid_provenance(True, VERIFIED_MAPPING_REPOSITORY, VERIFIED_MAPPING_REVISION),
+            (None, None, None),
+        )
+        self.assertEqual(
+            normalize_item_nameid_provenance(False, VERIFIED_MAPPING_REPOSITORY, VERIFIED_MAPPING_REVISION),
+            (None, None, None),
+        )
+        # Non-positives must normalize to NULL
+        self.assertEqual(
+            normalize_item_nameid_provenance(0, VERIFIED_MAPPING_REPOSITORY, VERIFIED_MAPPING_REVISION),
+            (None, None, None),
+        )
+        self.assertEqual(
+            normalize_item_nameid_provenance(-100, VERIFIED_MAPPING_REPOSITORY, VERIFIED_MAPPING_REVISION),
+            (None, None, None),
+        )
+        # Valid positive integer with pinned metadata succeeds
+        self.assertEqual(
+            normalize_item_nameid_provenance(7178002, VERIFIED_MAPPING_REPOSITORY, VERIFIED_MAPPING_REVISION),
+            (7178002, VERIFIED_MAPPING_REPOSITORY, VERIFIED_MAPPING_REVISION),
+        )
 
 
 if __name__ == "__main__":

@@ -34,6 +34,17 @@ class ItemRecord(BaseModel):
     first_seen_at: str = Field(default_factory=current_utc_iso)
     updated_at: str = Field(default_factory=current_utc_iso)
 
+    @field_validator("item_nameid", mode="before")
+    @classmethod
+    def validate_item_nameid(cls, v: Any) -> int | None:
+        if v is None:
+            return None
+        if type(v) is not int:
+            raise ValueError(
+                f"item_nameid must be an integer or None, got {type(v).__name__} ({v!r})"
+            )
+        return v
+
     @field_validator("market_hash_name")
     @classmethod
     def validate_market_hash_name(cls, v: str) -> str:

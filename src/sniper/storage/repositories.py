@@ -44,7 +44,7 @@ def normalize_item_nameid_provenance(
     if item_nameid is None or source is None or revision is None:
         return None, None, None
 
-    if not isinstance(item_nameid, int) or item_nameid <= 0:
+    if type(item_nameid) is not int or item_nameid <= 0:
         return None, None, None
 
     if source != VERIFIED_MAPPING_REPOSITORY or revision != VERIFIED_MAPPING_REVISION:
