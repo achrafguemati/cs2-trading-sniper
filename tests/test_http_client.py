@@ -190,7 +190,7 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
         acquire_count = 0
 
         def handler(request: httpx.Request) -> httpx.Response:
-            hop_timestamps.append(time.monotonic())
+            hop_timestamps.append(time.perf_counter())
             hop_requests.append(str(request.url))
             if request.url.path == "/market/listings/730/hop1":
                 return httpx.Response(302, headers={"Location": "/market/listings/730/hop2"})
@@ -200,7 +200,7 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(200, json={"success": 1, "final": True})
             return httpx.Response(404)
 
-        config = RateLimiterConfig(min_delay_seconds=0.01, max_delay_seconds=0.02, jitter_max_seconds=0.0)
+        config = RateLimiterConfig(min_delay_seconds=0.03, max_delay_seconds=0.05, jitter_max_seconds=0.0)
         limiter = SequentialRateLimiter(config=config)
 
         orig_acquire = limiter.acquire
@@ -222,8 +222,8 @@ class TestHttpClient(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(acquire_count, 3)
         # Prove the interval exists between successive redirect network requests.
         self.assertEqual(len(hop_timestamps), 3)
-        self.assertGreaterEqual(hop_timestamps[1] - hop_timestamps[0], 0.009)
-        self.assertGreaterEqual(hop_timestamps[2] - hop_timestamps[1], 0.009)
+        self.assertGreaterEqual(hop_timestamps[1] - hop_timestamps[0], 0.025)
+        self.assertGreaterEqual(hop_timestamps[2] - hop_timestamps[1], 0.025)
 
     async def test_exact_outgoing_headers(self):
         """Verify client sends transparent, non-spoofed application headers and zero Sec-Fetch-* headers."""
