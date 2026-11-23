@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from sniper.core.currency import CurrencyConfig
-from sniper.core.identity import ItemIdentityResult
+from sniper.core.identity import ItemIdentityResult, ResolutionStatus
 
 
 def current_utc_iso() -> str:
@@ -34,6 +34,20 @@ class ItemRecord(BaseModel):
     first_seen_at: str = Field(default_factory=current_utc_iso)
     updated_at: str = Field(default_factory=current_utc_iso)
 
+    @field_validator("market_hash_name")
+    @classmethod
+    def validate_market_hash_name(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("market_hash_name must not be empty or blank.")
+        return v.strip()
+
+    @field_validator("base_name")
+    @classmethod
+    def validate_base_name(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("base_name must not be empty or blank.")
+        return v.strip()
+
     @classmethod
     def from_identity_result(
         cls,
@@ -42,6 +56,15 @@ class ItemRecord(BaseModel):
         updated_at: str | None = None,
     ) -> ItemRecord:
         """Create an ItemRecord from an ItemIdentityResult."""
+        if identity.resolution_status == ResolutionStatus.PARSED_URL_ONLY:
+            raise ValueError(
+                "Cannot construct ItemRecord from PARSED_URL_ONLY identity result. "
+                "Canonical market_hash_name resolution is required."
+            )
+        if not identity.market_hash_name or not identity.market_hash_name.strip():
+            raise ValueError(
+                "Cannot construct ItemRecord with an empty or blank market_hash_name."
+            )
         now = current_utc_iso()
         return cls(
             appid=identity.appid,

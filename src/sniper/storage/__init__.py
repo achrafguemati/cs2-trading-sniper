@@ -31,6 +31,11 @@ from sniper.storage.repositories import (
     OrderbookRepository,
     PortfolioRepository,
 )
+from sniper.storage.service import (
+    IngestedItemResult,
+    ItemIdentityService,
+    ingest_market_item,
+)
 
 __all__ = [
     "CurrencyRecord",
@@ -39,10 +44,12 @@ __all__ = [
     "DestructiveMigrationError",
     "ExecutionResult",
     "IncompatibleSchemaVersionError",
+    "IngestedItemResult",
     "IntegrityDowngradeError",
     "InventoryItemRecord",
     "InventoryRepository",
     "InventorySnapshotRecord",
+    "ItemIdentityService",
     "ItemRecord",
     "ItemRepository",
     "ListingRecord",
@@ -58,5 +65,6 @@ __all__ = [
     "current_utc_iso",
     "get_applied_versions",
     "get_current_version",
+    "ingest_market_item",
     "rollback_migration",
 ]

@@ -79,8 +79,26 @@
 ### Milestone 2: Item Identity Resolver & URL Parser
 * **Deliverables:**
   - `src/sniper/core/identity.py`: Parser handling both canonical URLs and grouped `G...` URLs with `category_Exterior` query parameters.
-  - Integration of `somespecialone/steam-item-name-ids` database in local SQLite.
+  - Integration of `somespecialone/steam-item-name-ids` database in local SQLite with pinned upstream dataset.
 * **Acceptance Criteria:** Given any valid Steam URL (standard or grouped), outputs exact canonical item name, wear condition, and `item_nameid`.
+
+### Milestone 2.2: Persistent SQLite Storage & Repository Layer
+* **Deliverables:**
+  - `src/sniper/storage/`: SQLite storage layer with schema version 3, atomic immediate migrations, and triggers protecting historical observation immutability.
+  - Repositories: `ItemRepository`, `CurrencyRepository`, `ListingRepository`, `OrderbookRepository`, `PortfolioRepository`, `InventoryRepository`.
+* **Acceptance Criteria:** Integer minor-unit currency storage, parent-delete protection, transaction isolation, concurrent migration serialization, and full rollback guards.
+
+### Milestone 2.3: Identity Trust & SQLite Integration
+* **Deliverables:**
+  - `src/sniper/storage/service.py`: `ItemIdentityService` and `ingest_market_item` application service layer connecting URL parsing, SSR bucket resolution, and offline mapping database with the SQLite catalog.
+  - Strict mapping trust policy: `SYNTHETIC_TEST_DATA` and `legacy_unverified` are rejected from production identity resolution; only verified dataset provenance matching pinned repository and revision is accepted.
+  - Provenance protection in `ItemRepository.save()`: prevents lower-trust or unverified updates from downgrading verified mapping provenance.
+* **Acceptance Criteria:**
+  - Verified pinned mappings produce `ITEM_NAMEID_RESOLVED`; synthetic or unverified mappings produce `CANONICAL_RESOLVED` with `item_nameid=None`.
+  - Synthetic `classid` values never leak into identity results.
+  - Incomplete grouped URLs (`PARSED_URL_ONLY`) are blocked from persistence.
+  - Idempotent repeated persistence preserves `first_seen_at` and original primary keys across close/reopen.
+  - 100% offline deterministic test coverage across all identity-to-storage paths.
 
 ### Milestone 3: Order-Book & Listing Adapters + Safe Rate Limiter
 * **Deliverables:**

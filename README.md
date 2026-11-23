@@ -25,7 +25,7 @@ See the complete rules in [AGENTS.md](AGENTS.md).
 
 ---
 
-## Current Status: M2.1 Identity Data Integrity & SSR Resolution
+## Current Status: M2.3 Identity Trust & SQLite Integration
 
 - **Milestone 1 / 1.1 / 1.2 / 1.2.1 / 1.2.2 / 1.2.3 (Previously completed):**
   - Read-only asynchronous HTTP client (`ReadOnlyHttpClient`) with strict request-level serialization (`asyncio.Lock`), preventing concurrent execution overlap.
@@ -42,12 +42,16 @@ See the complete rules in [AGENTS.md](AGENTS.md).
   - Strict minor-unit currency model (`CurrencyConfig`) with hardened grammar and trailing zero exactness (accepts `Decimal("22.500") -> 2250`, continues rejecting `22.501`, `22.505`, `22.50001`).
   - Strict orderbook graph validation: strictly positive orderbook prices, non-negative integer quantities without silent fractional truncation.
   - Research skills (`.agents/skills/`) and intelligence registers (`docs/research/`).
-- **M2.1 (Identity source integrity & SSR fail-closed resolution):**
-  - The packaged `item_nameid` mapping is pinned to upstream commit `caac34bd8a28578e800501da5cc9f16c7cb3fa67`, WTFPL 2.0, source SHA-256 `9f34cee0a6f5479017d227568e1c8132c8b3c4f82b2d87123a80951e5adb3212`, with 26,935 entries in a partial upstream snapshot.
-  - Upstream `item_nameid` provenance and SSR-derived `classid` provenance are stored separately. The upstream file contains no `classid` values.
-  - Unknown names remain unresolved (`None`); no ID is inferred from a neighboring wear variant.
-  - Verified imports require the actual pinned source bytes and matching revision, path, timestamp, license, SHA-256, and imported record count. Synthetic imports have a separate API and are never written as verified dataset provenance.
-  - Grouped SSR resolution requires a source URL context matching the requested `G...` group and validates loader success/appid before any resolution. M2.2 and M3 work remains out of scope here.
+- **Milestone 2.1 & 2.2 (Previously completed):**
+  - M2.1: Canonical and grouped Steam listing URL parsing, SSR hydration bucket resolution, and pinned offline mapping database (`somespecialone/steam-market-ids` at `caac34bd8a28578e800501da5cc9f16c7cb3fa67`).
+  - M2.2: Persistent SQLite storage layer (schema version 3) with integer minor-unit financial arithmetic, typed repositories (`ItemRepository`, `CurrencyRepository`, `ListingRepository`, `OrderbookRepository`, `PortfolioRepository`, `InventoryRepository`), triggers protecting immutable listing/orderbook history and parent-item integrity, atomic migrations, and concurrency serialization with full rollback guards.
+- **M2.3 (Identity Trust & SQLite Integration):**
+  - Application service layer (`ItemIdentityService`, `ingest_market_item` in `src/sniper/storage/service.py`) integrating URL parsing, grouped SSR hydration, and trusted offline mapping lookup directly into the SQLite catalog.
+  - Strict mapping trust policy: `SYNTHETIC_TEST_DATA` and `legacy_unverified` are strictly rejected from production identity resolution; only verified dataset provenance matching pinned repository and revision is accepted.
+  - Fail-closed synthetic classid protection: synthetic or unverified `classid` values never leak into identity results.
+  - Provenance protection in `ItemRepository.save()`: prevents lower-trust, unverified, or missing incoming data from overwriting verified mapping provenance.
+  - Persistence validation: grouped URLs remaining in `PARSED_URL_ONLY` status and items with blank `market_hash_name` are blocked from creating database records.
+  - 100% offline deterministic test coverage across all identity-to-storage paths.
 
 ---
 

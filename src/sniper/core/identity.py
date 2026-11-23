@@ -33,6 +33,28 @@ VERIFIED_MAPPING_SHA256 = "9f34cee0a6f5479017d227568e1c8132c8b3c4f82b2d87123a809
 VERIFIED_MAPPING_RECORD_COUNT = 26935
 
 
+def is_trusted_mapping_source(source: str | None, revision: str | None) -> bool:
+    """Validate whether an item_nameid mapping source and revision satisfy the pinned verified dataset policy."""
+    if not source or not revision:
+        return False
+    return (
+        source == VERIFIED_MAPPING_REPOSITORY
+        and revision == VERIFIED_MAPPING_REVISION
+    )
+
+
+def is_trusted_classid_source(source: str | None) -> bool:
+    """Validate whether a classid source is trusted for production identity results.
+
+    Synthetic test data and legacy unverified sources are strictly rejected.
+    """
+    if not source:
+        return False
+    if source in ("SYNTHETIC_TEST_DATA", "legacy_unverified"):
+        return False
+    return source in ("steam_ssr_bucket",)
+
+
 # -----------------------------------------------------------------------------
 # Enums
 # -----------------------------------------------------------------------------
@@ -688,18 +710,40 @@ class ItemNameIdDatabase:
         return len(normalized)
 
     def lookup_item_nameid(self, market_hash_name: str) -> tuple[int | None, str | None]:
-        """Look up item_nameid and classid by market_hash_name.
+        """Look up verified item_nameid and classid by market_hash_name.
+
+        Enforces strict mapping trust policy:
+        - Rejects SYNTHETIC_TEST_DATA.
+        - Rejects legacy_unverified mappings.
+        - Fails closed on unknown or unrecognized provenance.
+        - Only returns item_nameid when source and revision match the pinned verified dataset policy.
+        - Never leaks synthetic or unverified classid values.
         
-        Returns (item_nameid, classid) if found, else (None, None).
+        Returns (item_nameid, classid) if verified, else (None, None).
         Never invents or fabricates IDs.
         """
         if not market_hash_name:
             return None, None
 
         provenance = self.lookup_item_provenance(market_hash_name)
-        if provenance is None or provenance["item_nameid_source"] == "legacy_unverified":
+        if provenance is None:
             return None, None
-        return int(provenance["item_nameid"]), provenance["classid"]
+
+        nameid_source = provenance.get("item_nameid_source")
+        nameid_rev = provenance.get("item_nameid_revision")
+        if not is_trusted_mapping_source(nameid_source, nameid_rev):
+            return None, None
+
+        trusted_nameid = int(provenance["item_nameid"])
+
+        classid_source = provenance.get("classid_source")
+        trusted_classid = (
+            provenance.get("classid")
+            if is_trusted_classid_source(classid_source)
+            else None
+        )
+
+        return trusted_nameid, trusted_classid
 
     def lookup_item_provenance(self, market_hash_name: str) -> dict[str, Any] | None:
         """Return separate source/revision metadata for item_nameid and classid."""
@@ -747,6 +791,18 @@ class ItemNameIdDatabase:
                 )
                 for r in rows
             ]
+
+    def has_verified_metadata(self) -> bool:
+        """Check if database contains verified dataset metadata matching pinned constants."""
+        for meta in self.get_metadata():
+            if (
+                meta.upstream_repo == VERIFIED_MAPPING_REPOSITORY
+                and meta.revision == VERIFIED_MAPPING_REVISION
+                and meta.sha256 == VERIFIED_MAPPING_SHA256
+                and meta.record_count == VERIFIED_MAPPING_RECORD_COUNT
+            ):
+                return True
+        return False
 
     def close(self) -> None:
         """Close SQLite connection."""
@@ -859,21 +915,35 @@ def resolve_item_identity(
     # 2. Offline item_nameid resolution
     if db is not None and result.market_hash_name:
         provenance = db.lookup_item_provenance(result.market_hash_name)
-        if provenance is not None and provenance["item_nameid_source"] != "legacy_unverified":
+        if (
+            provenance is not None
+            and is_trusted_mapping_source(
+                provenance.get("item_nameid_source"),
+                provenance.get("item_nameid_revision"),
+            )
+        ):
             result.item_nameid = int(provenance["item_nameid"])
             result.item_nameid_source = provenance["item_nameid_source"]
             result.item_nameid_revision = provenance["item_nameid_revision"]
-            if not result.classid and provenance["classid"]:
-                result.classid = provenance["classid"]
-                result.classid_source = provenance["classid_source"]
-                result.classid_revision = provenance["classid_revision"]
+
+            # classid from offline DB is only accepted if trusted and not already set by SSR
+            if not result.classid and provenance.get("classid"):
+                cid_source = provenance.get("classid_source")
+                if is_trusted_classid_source(cid_source):
+                    result.classid = provenance["classid"]
+                    result.classid_source = cid_source
+                    result.classid_revision = provenance.get("classid_revision")
+
             result.resolution_status = ResolutionStatus.ITEM_NAMEID_RESOLVED
             if result.resolution_source == ResolutionSource.SSR_BUCKET:
                 result.resolution_source = ResolutionSource.COMBINED
             else:
                 result.resolution_source = ResolutionSource.OFFLINE_DB
         else:
-            # Unknown in DB: remains CANONICAL_RESOLVED with item_nameid=None
+            # Unmapped, synthetic, legacy, or untrusted in DB:
+            # fails closed, returning item_nameid=None while preserving CANONICAL_RESOLVED
             result.item_nameid = None
+            result.item_nameid_source = None
+            result.item_nameid_revision = None
 
     return result

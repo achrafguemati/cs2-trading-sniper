@@ -30,7 +30,13 @@ class ItemRepository:
         """Insert or update an exact item identity record.
 
         Preserves original item_id and first_seen_at if record already exists.
+        Protects trusted provenance against downgrade or conflicting lower-trust updates.
         """
+        if not item.market_hash_name or not item.market_hash_name.strip():
+            raise ValueError("Cannot persist an item record with an empty or blank market_hash_name.")
+        if not item.base_name or not item.base_name.strip():
+            raise ValueError("Cannot persist an item record with an empty or blank base_name.")
+
         now = current_utc_iso()
         first_seen = item.first_seen_at or now
         updated = item.updated_at or now
@@ -51,26 +57,46 @@ class ItemRepository:
                     is_souvenir = excluded.is_souvenir,
                     group_id = coalesce(excluded.group_id, items.group_id),
                     item_nameid = CASE
+                        -- Protect trusted mapping provenance from synthetic or legacy downgrade
+                        WHEN items.item_nameid_source = 'https://github.com/somespecialone/steam-market-ids'
+                             AND excluded.item_nameid_source IN ('SYNTHETIC_TEST_DATA', 'legacy_unverified')
+                        THEN items.item_nameid
                         WHEN excluded.item_nameid IS NOT NULL THEN excluded.item_nameid
                         ELSE items.item_nameid
                     END,
                     item_nameid_source = CASE
+                        WHEN items.item_nameid_source = 'https://github.com/somespecialone/steam-market-ids'
+                             AND excluded.item_nameid_source IN ('SYNTHETIC_TEST_DATA', 'legacy_unverified')
+                        THEN items.item_nameid_source
                         WHEN excluded.item_nameid IS NOT NULL THEN excluded.item_nameid_source
                         ELSE items.item_nameid_source
                     END,
                     item_nameid_revision = CASE
+                        WHEN items.item_nameid_source = 'https://github.com/somespecialone/steam-market-ids'
+                             AND excluded.item_nameid_source IN ('SYNTHETIC_TEST_DATA', 'legacy_unverified')
+                        THEN items.item_nameid_revision
                         WHEN excluded.item_nameid IS NOT NULL THEN excluded.item_nameid_revision
                         ELSE items.item_nameid_revision
                     END,
                     classid = CASE
+                        -- Protect verified SSR classid from synthetic or legacy downgrade
+                        WHEN items.classid_source = 'steam_ssr_bucket'
+                             AND excluded.classid_source IN ('SYNTHETIC_TEST_DATA', 'legacy_unverified')
+                        THEN items.classid
                         WHEN excluded.classid IS NOT NULL THEN excluded.classid
                         ELSE items.classid
                     END,
                     classid_source = CASE
+                        WHEN items.classid_source = 'steam_ssr_bucket'
+                             AND excluded.classid_source IN ('SYNTHETIC_TEST_DATA', 'legacy_unverified')
+                        THEN items.classid_source
                         WHEN excluded.classid IS NOT NULL THEN excluded.classid_source
                         ELSE items.classid_source
                     END,
                     classid_revision = CASE
+                        WHEN items.classid_source = 'steam_ssr_bucket'
+                             AND excluded.classid_source IN ('SYNTHETIC_TEST_DATA', 'legacy_unverified')
+                        THEN items.classid_revision
                         WHEN excluded.classid IS NOT NULL THEN excluded.classid_revision
                         ELSE items.classid_revision
                     END,
