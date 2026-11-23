@@ -77,9 +77,14 @@ class Database:
 
             # Configure performance pragmas for persistent file-backed databases
             if not self._is_memory:
-                self._conn.execute("PRAGMA journal_mode = WAL;")
-                self._conn.execute("PRAGMA synchronous = NORMAL;")
                 self._conn.execute(f"PRAGMA busy_timeout = {int(self._timeout * 1000)};")
+                try:
+                    mode = self._conn.execute("PRAGMA journal_mode;").fetchone()[0]
+                    if str(mode).lower() != "wal":
+                        self._conn.execute("PRAGMA journal_mode = WAL;")
+                except sqlite3.OperationalError:
+                    pass
+                self._conn.execute("PRAGMA synchronous = NORMAL;")
 
     @property
     def connection(self) -> sqlite3.Connection:
@@ -108,13 +113,19 @@ class Database:
         with self._lock:
             return get_current_version(self.connection)
 
-    def rollback(self, target_version: int, allow_data_loss: bool = False) -> list[int]:
-        """Roll back migrations down to target_version with explicit data loss protection."""
+    def rollback(
+        self,
+        target_version: int,
+        allow_data_loss: bool = False,
+        allow_integrity_downgrade: bool = False,
+    ) -> list[int]:
+        """Roll back migrations down to target_version with explicit data loss and integrity downgrade protection."""
         with self._lock:
             return rollback_migration(
                 self.connection,
                 target_version=target_version,
                 allow_data_loss=allow_data_loss,
+                allow_integrity_downgrade=allow_integrity_downgrade,
             )
 
     @contextmanager

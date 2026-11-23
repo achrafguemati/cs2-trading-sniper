@@ -23,6 +23,11 @@ class DestructiveMigrationError(MigrationError):
     pass
 
 
+class IntegrityDowngradeError(MigrationError):
+    """Raised when attempting to roll back integrity protections while protected records exist."""
+    pass
+
+
 @dataclass(frozen=True)
 class Migration:
     """Represents an atomic schema migration step."""
@@ -328,15 +333,19 @@ def apply_migrations(
 ) -> list[int]:
     """Apply pending migrations up to target_version (or latest if None).
 
+    Acquires an atomic BEGIN IMMEDIATE write reservation before reading the schema version,
+    preventing concurrent processes from applying migrations based on stale reads.
+    Re-checks schema version under the write reservation and safely skips already-applied migrations.
+
+    Rejects active outer transactions: apply_migrations must own its transaction boundary.
+
     Returns list of newly applied migration versions.
     Enforces atomic migration transactions with rollback on failure.
     """
-    ensure_migrations_table(conn)
-    current_ver = get_current_version(conn)
-
-    if current_ver > MAX_SUPPORTED_VERSION:
-        raise IncompatibleSchemaVersionError(
-            f"Database schema version {current_ver} exceeds maximum supported version {MAX_SUPPORTED_VERSION}."
+    if conn.in_transaction:
+        raise MigrationError(
+            "Cannot execute apply_migrations() on a connection with an active transaction. "
+            "apply_migrations must own its BEGIN IMMEDIATE / COMMIT / ROLLBACK transaction boundary."
         )
 
     if target_version is not None and target_version < 0:
@@ -348,93 +357,131 @@ def apply_migrations(
             f"Target version {target} exceeds maximum supported version {MAX_SUPPORTED_VERSION}."
         )
 
-    applied_now: list[int] = []
+    # Acquire write reservation first, before checking version or applying migrations
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        ensure_migrations_table(conn)
+        applied_versions = get_applied_versions(conn)
+        current_ver = applied_versions[-1] if applied_versions else 0
 
-    for migration in MIGRATIONS:
-        if migration.version <= current_ver:
-            continue
-        if migration.version > target:
-            break
+        if current_ver > MAX_SUPPORTED_VERSION:
+            raise IncompatibleSchemaVersionError(
+                f"Database schema version {current_ver} exceeds maximum supported version {MAX_SUPPORTED_VERSION}."
+            )
 
-        now_iso = datetime.now(timezone.utc).isoformat()
-        in_tx = conn.in_transaction
-        if not in_tx:
-            conn.execute("BEGIN IMMEDIATE")
-        try:
+        applied_now: list[int] = []
+        for migration in MIGRATIONS:
+            if migration.version <= current_ver:
+                continue
+            if migration.version > target:
+                break
+
+            now_iso = datetime.now(timezone.utc).isoformat()
             migration.up(conn)
             conn.execute(
                 "INSERT INTO schema_migrations (version, applied_at, description) VALUES (?, ?, ?)",
                 (migration.version, now_iso, migration.description),
             )
-            if not in_tx:
-                conn.execute("COMMIT")
             applied_now.append(migration.version)
-        except Exception as exc:
-            if not in_tx:
-                try:
-                    conn.execute("ROLLBACK")
-                except Exception:
-                    pass
-            raise MigrationError(
-                f"Failed to apply migration {migration.version} ({migration.description}): {exc}"
-            ) from exc
 
-    return applied_now
+        conn.execute("COMMIT")
+        return applied_now
+    except Exception as exc:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        if isinstance(exc, MigrationError):
+            raise
+        raise MigrationError(f"Failed to apply migrations: {exc}") from exc
 
 
 def rollback_migration(
     conn: sqlite3.Connection,
     target_version: int,
     allow_data_loss: bool = False,
+    allow_integrity_downgrade: bool = False,
 ) -> list[int]:
     """Roll back migrations down to target_version.
 
-    Acquires an atomic BEGIN IMMEDIATE transaction before inspecting affected tables,
-    ensuring no concurrent writes can occur between the data-loss check and table drops.
-    If any affected table contains records and allow_data_loss is False, rolls back
-    and raises DestructiveMigrationError.
+    Acquires an atomic BEGIN IMMEDIATE transaction before inspecting schema version,
+    calculating rollback targets, or inspecting tables, ensuring no concurrent writes
+    or migrations can occur between the check and table/trigger operations.
 
-    If any migration down-step fails, rolls back the entire transaction, leaving no
-    partially applied rollback state.
+    Rejects active outer transactions: rollback_migration must own its transaction boundary.
+
+    Protections:
+    - Integrity downgrade guard: Refuses to remove Migration 3 observation protection
+      triggers while historical observations exist in listings or orderbook_snapshots,
+      unless allow_integrity_downgrade=True.
+    - Data loss guard: Refuses to drop tables containing data unless allow_data_loss=True.
+    - Atomicity: If any step fails, rolls back the entire transaction, leaving no partial state.
 
     Returns list of rolled back versions in reverse order.
     """
-    ensure_migrations_table(conn)
-    current_ver = get_current_version(conn)
-
-    if target_version < 0:
-        raise MigrationError(f"Target rollback version {target_version} is invalid (must be >= 0).")
-
-    if target_version > MAX_SUPPORTED_VERSION:
-        raise IncompatibleSchemaVersionError(
-            f"Target rollback version {target_version} exceeds maximum supported version {MAX_SUPPORTED_VERSION}."
-        )
-
-    if current_ver > MAX_SUPPORTED_VERSION:
-        raise IncompatibleSchemaVersionError(
-            f"Database schema version {current_ver} exceeds maximum supported version {MAX_SUPPORTED_VERSION}."
-        )
-
-    if target_version > current_ver:
+    if conn.in_transaction:
         raise MigrationError(
-            f"Cannot rollback to target version {target_version} because it is greater than current version {current_ver}."
+            "Cannot execute rollback_migration() on a connection with an active transaction. "
+            "rollback_migration must own its BEGIN IMMEDIATE / COMMIT / ROLLBACK transaction boundary."
         )
 
-    if target_version == current_ver:
-        return []
-
-    migrations_to_rollback = [
-        m for m in reversed(MIGRATIONS)
-        if target_version < m.version <= current_ver
-    ]
-
-    in_tx = conn.in_transaction
-    if not in_tx:
-        conn.execute("BEGIN IMMEDIATE")
-
-    rolled_back: list[int] = []
+    # Acquire write reservation first, before checking version or calculating rollback
+    conn.execute("BEGIN IMMEDIATE")
     try:
-        # 1. Safety check: inspect all affected tables while holding BEGIN IMMEDIATE write lock
+        ensure_migrations_table(conn)
+        applied_versions = get_applied_versions(conn)
+        current_ver = applied_versions[-1] if applied_versions else 0
+
+        if target_version < 0:
+            raise MigrationError(f"Target rollback version {target_version} is invalid (must be >= 0).")
+
+        if target_version > MAX_SUPPORTED_VERSION:
+            raise IncompatibleSchemaVersionError(
+                f"Target rollback version {target_version} exceeds maximum supported version {MAX_SUPPORTED_VERSION}."
+            )
+
+        if current_ver > MAX_SUPPORTED_VERSION:
+            raise IncompatibleSchemaVersionError(
+                f"Database schema version {current_ver} exceeds maximum supported version {MAX_SUPPORTED_VERSION}."
+            )
+
+        if target_version > current_ver:
+            raise MigrationError(
+                f"Cannot rollback to target version {target_version} because it is greater than current version {current_ver}."
+            )
+
+        if target_version == current_ver:
+            conn.execute("COMMIT")
+            return []
+
+        migrations_to_rollback = [
+            m for m in reversed(MIGRATIONS)
+            if target_version < m.version <= current_ver
+        ]
+
+        # 1. Integrity downgrade guard: check if any migration to be rolled back removes
+        # observation protection triggers while protected records exist
+        if not allow_integrity_downgrade:
+            for migration in migrations_to_rollback:
+                if migration.version == 3:
+                    for protected_table in ("listings", "orderbook_snapshots"):
+                        cur = conn.cursor()
+                        cur.execute(
+                            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?",
+                            (protected_table,),
+                        )
+                        if cur.fetchone()[0] > 0:
+                            cur.execute(f"SELECT COUNT(*) FROM {protected_table}")
+                            count = cur.fetchone()[0]
+                            if count > 0:
+                                raise IntegrityDowngradeError(
+                                    f"Refusing to rollback migration 3 ({migration.description}): "
+                                    f"protected observations exist in '{protected_table}' ({count} record(s)). "
+                                    f"Rolling back will remove observation immutability triggers. "
+                                    f"Pass allow_integrity_downgrade=True to confirm integrity downgrade."
+                                )
+
+        # 2. Safety check: inspect all affected tables for existing data (data loss)
         if not allow_data_loss:
             for migration in migrations_to_rollback:
                 for table_name in migration.affected_tables:
@@ -454,7 +501,8 @@ def rollback_migration(
                                 f"Pass allow_data_loss=True to confirm destructive rollback."
                             )
 
-        # 2. Execute down migrations atomically
+        # 3. Execute down migrations atomically
+        rolled_back: list[int] = []
         for migration in migrations_to_rollback:
             migration.down(conn)
             conn.execute(
@@ -463,17 +511,14 @@ def rollback_migration(
             )
             rolled_back.append(migration.version)
 
-        if not in_tx:
-            conn.execute("COMMIT")
-
+        conn.execute("COMMIT")
         return rolled_back
 
     except Exception as exc:
-        if not in_tx:
-            try:
-                conn.execute("ROLLBACK")
-            except Exception:
-                pass
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
         if isinstance(exc, MigrationError):
             raise
         raise MigrationError(f"Failed to rollback migrations down to version {target_version}: {exc}") from exc

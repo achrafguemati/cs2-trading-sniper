@@ -4,6 +4,7 @@ from sniper.storage.database import Database, ExecutionResult
 from sniper.storage.migrations import (
     DestructiveMigrationError,
     IncompatibleSchemaVersionError,
+    IntegrityDowngradeError,
     Migration,
     MigrationError,
     apply_migrations,
@@ -38,6 +39,7 @@ __all__ = [
     "DestructiveMigrationError",
     "ExecutionResult",
     "IncompatibleSchemaVersionError",
+    "IntegrityDowngradeError",
     "InventoryItemRecord",
     "InventoryRepository",
     "InventorySnapshotRecord",

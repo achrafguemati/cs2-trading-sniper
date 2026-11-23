@@ -20,6 +20,7 @@ from sniper.storage.database import Database, ExecutionResult
 from sniper.storage.migrations import (
     DestructiveMigrationError,
     IncompatibleSchemaVersionError,
+    IntegrityDowngradeError,
     Migration,
     MigrationError,
     apply_migrations,
@@ -585,6 +586,220 @@ class TestStorage(unittest.TestCase):
         rolled_back = rollback_migration(raw_db.connection, target_version=0, allow_data_loss=True)
         self.assertEqual(rolled_back, [1])
         self.assertEqual(raw_db.get_version(), 0)
+        raw_db.close()
+
+    def test_schema_version_read_occurs_under_write_reservation(self) -> None:
+        """Verify that rollback_migration and apply_migrations acquire BEGIN IMMEDIATE before reading version."""
+        raw_db = Database(":memory:")
+        raw_db.initialize()
+
+        conn = raw_db.connection
+        stmts: list[str] = []
+        conn.set_trace_callback(lambda s: stmts.append(s.strip().upper()))
+        try:
+            # 1. Test rollback_migration
+            stmts.clear()
+            rollback_migration(conn, target_version=2)
+            begin_idx = next(i for i, s in enumerate(stmts) if "BEGIN IMMEDIATE" in s)
+            select_idx = next(i for i, s in enumerate(stmts) if "SCHEMA_MIGRATIONS" in s)
+            self.assertLess(
+                begin_idx,
+                select_idx,
+                "rollback_migration must acquire BEGIN IMMEDIATE before querying schema_migrations",
+            )
+
+            # 2. Test apply_migrations
+            stmts.clear()
+            apply_migrations(conn, target_version=3)
+            begin_idx_apply = next(i for i, s in enumerate(stmts) if "BEGIN IMMEDIATE" in s)
+            select_idx_apply = next(i for i, s in enumerate(stmts) if "SCHEMA_MIGRATIONS" in s)
+            self.assertLess(
+                begin_idx_apply,
+                select_idx_apply,
+                "apply_migrations must acquire BEGIN IMMEDIATE before querying schema_migrations",
+            )
+        finally:
+            conn.set_trace_callback(None)
+            raw_db.close()
+
+    def test_rollback_inside_active_transaction_rejected(self) -> None:
+        """Verify rollback_migration rejects execution on a connection with an active outer transaction."""
+        raw_db = Database(":memory:")
+        raw_db.initialize()
+        conn = raw_db.connection
+
+        # Start outer transaction manually
+        conn.execute("BEGIN IMMEDIATE")
+        self.assertTrue(conn.in_transaction)
+
+        with self.assertRaises(MigrationError) as ctx:
+            rollback_migration(conn, target_version=2)
+        self.assertIn("active transaction", str(ctx.exception).lower())
+
+        # Roll back outer transaction cleanly
+        conn.execute("ROLLBACK")
+        self.assertEqual(raw_db.get_version(), 3)
+        raw_db.close()
+
+    def test_apply_migrations_inside_active_transaction_rejected(self) -> None:
+        """Verify apply_migrations rejects execution on a connection with an active outer transaction."""
+        raw_db = Database(":memory:")
+        raw_db.initialize(target_version=2)
+        conn = raw_db.connection
+
+        # Start outer transaction manually
+        conn.execute("BEGIN IMMEDIATE")
+        self.assertTrue(conn.in_transaction)
+
+        with self.assertRaises(MigrationError) as ctx:
+            apply_migrations(conn, target_version=3)
+        self.assertIn("active transaction", str(ctx.exception).lower())
+
+        conn.execute("ROLLBACK")
+        self.assertEqual(raw_db.get_version(), 2)
+        raw_db.close()
+
+    def test_concurrent_migrations_serialize_cleanly(self) -> None:
+        """Verify multiple connections attempting concurrent migrations serialize without state corruption."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "concurrent_mig.db"
+
+            # Pre-create database
+            with Database(db_path) as init_db:
+                pass
+
+            def run_init(i: int) -> int:
+                with Database(db_path) as db:
+                    db.initialize()
+                    return db.get_version()
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                futures = [executor.submit(run_init, i) for i in range(4)]
+                results = [f.result() for f in concurrent.futures.as_completed(futures)]
+
+            self.assertEqual(results, [3, 3, 3, 3])
+            with Database(db_path) as final_db:
+                self.assertEqual(final_db.get_version(), 3)
+                applied = get_applied_versions(final_db.connection)
+                self.assertEqual(applied, [1, 2, 3])
+
+    def test_v3_integrity_downgrade_blocked_when_listings_exist(self) -> None:
+        """Verify rolling back V3 to V2 is blocked by default when historical listings exist."""
+        raw_db = Database(":memory:")
+        raw_db.initialize()
+        c_repo = CurrencyRepository(raw_db)
+        c_repo.seed_default_currencies()
+        i_repo = ItemRepository(raw_db)
+        l_repo = ListingRepository(raw_db)
+
+        item = i_repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+        ))
+        listing = l_repo.insert_observation(ListingRecord(
+            steam_listing_id="listing_protect_test",
+            item_id=item.item_id,
+            price_minor=2500,
+            currency_id=1,
+            observed_at="2026-05-12T10:00:00Z",
+        ))
+
+        # 1. Rollback without allow_integrity_downgrade is rejected
+        with self.assertRaises(IntegrityDowngradeError) as ctx:
+            raw_db.rollback(target_version=2)
+        self.assertIn("listings", str(ctx.exception))
+        self.assertIn("immutability triggers", str(ctx.exception))
+
+        # 2. allow_data_loss=True does NOT authorize integrity downgrade (separate semantics)
+        with self.assertRaises(IntegrityDowngradeError):
+            raw_db.rollback(target_version=2, allow_data_loss=True)
+
+        # 3. Schema version and triggers remain intact
+        self.assertEqual(raw_db.get_version(), 3)
+        with self.assertRaises(sqlite3.IntegrityError):
+            raw_db.execute("UPDATE listings SET price_minor = 9999 WHERE listing_id = ?", (listing.listing_id,))
+        with self.assertRaises(sqlite3.IntegrityError):
+            raw_db.execute("DELETE FROM listings WHERE listing_id = ?", (listing.listing_id,))
+
+        # History remains intact
+        self.assertIsNotNone(l_repo.get_latest(item.item_id, 1))
+        raw_db.close()
+
+    def test_v3_integrity_downgrade_blocked_when_orderbook_snapshots_exist(self) -> None:
+        """Verify rolling back V3 to V2 is blocked by default when orderbook snapshots exist."""
+        raw_db = Database(":memory:")
+        raw_db.initialize()
+        c_repo = CurrencyRepository(raw_db)
+        c_repo.seed_default_currencies()
+        i_repo = ItemRepository(raw_db)
+        ob_repo = OrderbookRepository(raw_db)
+
+        item = i_repo.save(ItemRecord(
+            market_hash_name="AWP | Asiimov (Field-Tested)",
+            base_name="AWP | Asiimov",
+        ))
+        ob_repo.insert_snapshot(OrderbookSnapshotRecord(
+            item_id=item.item_id,
+            currency_id=1,
+            highest_buy_order_minor=5000,
+            lowest_sell_order_minor=6000,
+            observed_at="2026-05-12T10:00:00Z",
+        ))
+
+        with self.assertRaises(IntegrityDowngradeError) as ctx:
+            raw_db.rollback(target_version=2)
+        self.assertIn("orderbook_snapshots", str(ctx.exception))
+        self.assertEqual(raw_db.get_version(), 3)
+        raw_db.close()
+
+    def test_v3_integrity_downgrade_explicit_opt_in_preserves_history(self) -> None:
+        """Verify explicit allow_integrity_downgrade=True removes triggers but preserves all historical data."""
+        raw_db = Database(":memory:")
+        raw_db.initialize()
+        c_repo = CurrencyRepository(raw_db)
+        c_repo.seed_default_currencies()
+        i_repo = ItemRepository(raw_db)
+        l_repo = ListingRepository(raw_db)
+        ob_repo = OrderbookRepository(raw_db)
+
+        item = i_repo.save(ItemRecord(
+            market_hash_name="AK-47 | Redline (Field-Tested)",
+            base_name="AK-47 | Redline",
+        ))
+        listing = l_repo.insert_observation(ListingRecord(
+            steam_listing_id="listing_downgrade_test",
+            item_id=item.item_id,
+            price_minor=2000,
+            currency_id=1,
+            observed_at="2026-05-12T10:00:00Z",
+        ))
+        snapshot = ob_repo.insert_snapshot(OrderbookSnapshotRecord(
+            item_id=item.item_id,
+            currency_id=1,
+            highest_buy_order_minor=1900,
+            lowest_sell_order_minor=2100,
+            observed_at="2026-05-12T10:00:00Z",
+        ))
+
+        # Explicit downgrade with allow_integrity_downgrade=True
+        rolled_back = raw_db.rollback(target_version=2, allow_integrity_downgrade=True)
+        self.assertEqual(rolled_back, [3])
+        self.assertEqual(raw_db.get_version(), 2)
+
+        # Triggers are removed in V2
+        trig = raw_db.fetch_one(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND name='prevent_listings_update'"
+        )
+        self.assertIsNone(trig)
+
+        # Historical records survive completely intact
+        retrieved_listing = l_repo.get_latest(item.item_id, 1)
+        self.assertIsNotNone(retrieved_listing)
+        self.assertEqual(retrieved_listing.steam_listing_id, "listing_downgrade_test")
+
+        retrieved_snapshot = ob_repo.get_latest(item.item_id, 1)
+        self.assertIsNotNone(retrieved_snapshot)
+        self.assertEqual(retrieved_snapshot.highest_buy_order_minor, 1900)
         raw_db.close()
 
     # -------------------------------------------------------------------------
