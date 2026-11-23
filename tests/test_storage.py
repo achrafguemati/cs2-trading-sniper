@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import concurrent.futures
 from pathlib import Path
+import re
 import sqlite3
 import tempfile
+import threading
 import unittest
 
 from sniper.core.currency import CurrencyConfig
@@ -596,27 +598,37 @@ class TestStorage(unittest.TestCase):
         conn = raw_db.connection
         stmts: list[str] = []
         conn.set_trace_callback(lambda s: stmts.append(s.strip().upper()))
+        select_version_pattern = re.compile(
+            r"^\s*SELECT\s+version\s+FROM\s+schema_migrations",
+            re.IGNORECASE,
+        )
         try:
             # 1. Test rollback_migration
             stmts.clear()
             rollback_migration(conn, target_version=2)
-            begin_idx = next(i for i, s in enumerate(stmts) if "BEGIN IMMEDIATE" in s)
-            select_idx = next(i for i, s in enumerate(stmts) if "SCHEMA_MIGRATIONS" in s)
+            begin_indices = [i for i, s in enumerate(stmts) if s.strip() == "BEGIN IMMEDIATE"]
+            select_indices = [i for i, s in enumerate(stmts) if select_version_pattern.search(s)]
+
+            self.assertTrue(len(begin_indices) > 0, "Expected BEGIN IMMEDIATE statement in rollback_migration trace")
+            self.assertTrue(len(select_indices) > 0, "Expected SELECT version FROM schema_migrations in rollback trace")
             self.assertLess(
-                begin_idx,
-                select_idx,
-                "rollback_migration must acquire BEGIN IMMEDIATE before querying schema_migrations",
+                begin_indices[0],
+                select_indices[0],
+                "rollback_migration must acquire BEGIN IMMEDIATE before executing SELECT version FROM schema_migrations",
             )
 
             # 2. Test apply_migrations
             stmts.clear()
             apply_migrations(conn, target_version=3)
-            begin_idx_apply = next(i for i, s in enumerate(stmts) if "BEGIN IMMEDIATE" in s)
-            select_idx_apply = next(i for i, s in enumerate(stmts) if "SCHEMA_MIGRATIONS" in s)
+            begin_indices_apply = [i for i, s in enumerate(stmts) if s.strip() == "BEGIN IMMEDIATE"]
+            select_indices_apply = [i for i, s in enumerate(stmts) if select_version_pattern.search(s)]
+
+            self.assertTrue(len(begin_indices_apply) > 0, "Expected BEGIN IMMEDIATE statement in apply_migrations trace")
+            self.assertTrue(len(select_indices_apply) > 0, "Expected SELECT version FROM schema_migrations in apply trace")
             self.assertLess(
-                begin_idx_apply,
-                select_idx_apply,
-                "apply_migrations must acquire BEGIN IMMEDIATE before querying schema_migrations",
+                begin_indices_apply[0],
+                select_indices_apply[0],
+                "apply_migrations must acquire BEGIN IMMEDIATE before executing SELECT version FROM schema_migrations",
             )
         finally:
             conn.set_trace_callback(None)
@@ -682,6 +694,182 @@ class TestStorage(unittest.TestCase):
                 self.assertEqual(final_db.get_version(), 3)
                 applied = get_applied_versions(final_db.connection)
                 self.assertEqual(applied, [1, 2, 3])
+
+    def test_concurrent_apply_versus_rollback_serialize_cleanly(self) -> None:
+        """Verify concurrent apply and rollback across independent connections serialize cleanly without corruption."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "concurrent_apply_rollback.db"
+
+            # 1. Initialize database to version 2
+            with Database(db_path) as init_db:
+                applied = init_db.initialize(target_version=2)
+                self.assertEqual(applied, [1, 2])
+                self.assertEqual(init_db.get_version(), 2)
+
+            # 2. Set up synchronization barrier for 2 threads
+            barrier = threading.Barrier(2)
+            results: dict[str, list[int]] = {}
+            exceptions: dict[str, Exception] = {}
+
+            def worker_apply() -> None:
+                try:
+                    with Database(db_path) as db_a:
+                        barrier.wait(timeout=10.0)
+                        results["apply"] = apply_migrations(db_a.connection, target_version=3)
+                except Exception as exc:
+                    exceptions["apply"] = exc
+
+            def worker_rollback() -> None:
+                try:
+                    with Database(db_path) as db_b:
+                        barrier.wait(timeout=10.0)
+                        results["rollback"] = rollback_migration(
+                            db_b.connection,
+                            target_version=1,
+                            allow_data_loss=True,
+                            allow_integrity_downgrade=True,
+                        )
+                except Exception as exc:
+                    exceptions["rollback"] = exc
+
+            thread_a = threading.Thread(target=worker_apply, name="worker_apply")
+            thread_b = threading.Thread(target=worker_rollback, name="worker_rollback")
+
+            thread_a.start()
+            thread_b.start()
+
+            thread_a.join(timeout=15.0)
+            thread_b.join(timeout=15.0)
+
+            self.assertFalse(thread_a.is_alive(), "worker_apply thread timed out")
+            self.assertFalse(thread_b.is_alive(), "worker_rollback thread timed out")
+            self.assertEqual(exceptions, {}, f"Unexpected exceptions during concurrent migration: {exceptions}")
+
+            # 3. Verify SQLite serialized the write operations into a valid serial order
+            with Database(db_path) as verify_db:
+                final_version = verify_db.get_version()
+                applied_versions = get_applied_versions(verify_db.connection)
+
+                # Query physical schema
+                portfolio_tbl = verify_db.fetch_one(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='portfolio_transactions'"
+                )
+                listing_trig = verify_db.fetch_one(
+                    "SELECT name FROM sqlite_master WHERE type='trigger' AND name='prevent_listings_update'"
+                )
+
+                if results["apply"] == [3] and results["rollback"] == [3, 2]:
+                    # Serial Order 1: Apply ran first (2 -> 3), then Rollback ran (3 -> 1)
+                    self.assertEqual(final_version, 1)
+                    self.assertEqual(applied_versions, [1])
+                    self.assertIsNone(portfolio_tbl, "portfolio_transactions table must not exist at v1")
+                    self.assertIsNone(listing_trig, "prevent_listings_update trigger must not exist at v1")
+                elif results["rollback"] == [2] and results["apply"] == [2, 3]:
+                    # Serial Order 2: Rollback ran first (2 -> 1), then Apply ran (1 -> 3)
+                    self.assertEqual(final_version, 3)
+                    self.assertEqual(applied_versions, [1, 2, 3])
+                    self.assertIsNotNone(portfolio_tbl, "portfolio_transactions table must exist at v3")
+                    self.assertIsNotNone(listing_trig, "prevent_listings_update trigger must exist at v3")
+                else:
+                    self.fail(
+                        f"Non-serial outcome observed: apply={results.get('apply')}, "
+                        f"rollback={results.get('rollback')}, final_version={final_version}"
+                    )
+
+                # Core items table from v1 must always exist intact
+                items_tbl = verify_db.fetch_one(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='items'"
+                )
+                self.assertIsNotNone(items_tbl, "Core items table must exist under both serial outcomes")
+
+    def test_concurrent_apply_vs_rollback_rejects_integrity_downgrade(self) -> None:
+        """Verify concurrent apply vs rollback rejects integrity downgrade when listings exist."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "concurrent_integrity.db"
+
+            # Initialize database to version 2 and insert an item and listing observation
+            with Database(db_path) as init_db:
+                init_db.initialize(target_version=2)
+                curr_repo = CurrencyRepository(init_db)
+                curr_repo.seed_default_currencies()
+                item_repo = ItemRepository(init_db)
+                listing_repo = ListingRepository(init_db)
+
+                item = item_repo.save(ItemRecord(
+                    market_hash_name="AK-47 | Slate (Field-Tested)",
+                    base_name="AK-47 | Slate",
+                ))
+                listing_repo.insert_observation(ListingRecord(
+                    steam_listing_id="integrity_test_listing",
+                    item_id=item.item_id,
+                    price_minor=1200,
+                    currency_id=1,
+                    observed_at="2026-05-15T00:00:00Z",
+                ))
+
+            barrier = threading.Barrier(2)
+            results: dict[str, list[int]] = {}
+            exceptions: dict[str, Exception] = {}
+
+            def worker_apply() -> None:
+                try:
+                    with Database(db_path) as db_a:
+                        barrier.wait(timeout=10.0)
+                        results["apply"] = apply_migrations(db_a.connection, target_version=3)
+                except Exception as exc:
+                    exceptions["apply"] = exc
+
+            def worker_rollback() -> None:
+                try:
+                    with Database(db_path) as db_b:
+                        barrier.wait(timeout=10.0)
+                        # allow_integrity_downgrade is False (default)
+                        results["rollback"] = rollback_migration(
+                            db_b.connection,
+                            target_version=1,
+                            allow_data_loss=True,
+                            allow_integrity_downgrade=False,
+                        )
+                except Exception as exc:
+                    exceptions["rollback"] = exc
+
+            thread_a = threading.Thread(target=worker_apply, name="worker_apply_int")
+            thread_b = threading.Thread(target=worker_rollback, name="worker_rollback_int")
+
+            thread_a.start()
+            thread_b.start()
+
+            thread_a.join(timeout=15.0)
+            thread_b.join(timeout=15.0)
+
+            self.assertFalse(thread_a.is_alive())
+            self.assertFalse(thread_b.is_alive())
+
+            with Database(db_path) as verify_db:
+                final_version = verify_db.get_version()
+                applied_versions = get_applied_versions(verify_db.connection)
+
+                if "rollback" in exceptions:
+                    # Apply ran first (2 -> 3), installing V3 triggers.
+                    # Then Rollback saw V3 with listings present and raised IntegrityDowngradeError.
+                    self.assertIsInstance(exceptions["rollback"], IntegrityDowngradeError)
+                    self.assertEqual(results.get("apply"), [3])
+                    self.assertEqual(final_version, 3)
+                    self.assertEqual(applied_versions, [1, 2, 3])
+                else:
+                    # Rollback ran first (2 -> 1, V2 doesn't have observation triggers, only portfolio table).
+                    # Then Apply ran (1 -> 3).
+                    self.assertEqual(results.get("rollback"), [2])
+                    self.assertEqual(results.get("apply"), [2, 3])
+                    self.assertEqual(final_version, 3)
+                    self.assertEqual(applied_versions, [1, 2, 3])
+
+                # Under both execution paths, the listing data and schema remain completely intact
+                v_listing_repo = ListingRepository(verify_db)
+                obs = v_listing_repo.get_latest(item.item_id, 1)
+                self.assertIsNotNone(obs, "Historical listing observation must remain intact")
+                self.assertEqual(obs.steam_listing_id, "integrity_test_listing")
+                self.assertEqual(obs.price_minor, 1200)
 
     def test_v3_integrity_downgrade_blocked_when_listings_exist(self) -> None:
         """Verify rolling back V3 to V2 is blocked by default when historical listings exist."""
