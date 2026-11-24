@@ -714,6 +714,86 @@ class TestSellEngine(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(is_cd)
 
+    async def test_repeated_sell_scans_respect_cumulative_retry_limit(self) -> None:
+        """Verify repeated SELL scans cannot create unlimited retries and stop after max_retries."""
+        for i in range(8):
+            self.ob_repo.insert_snapshot(OrderbookSnapshotRecord(
+                item_id=self.item.item_id,
+                currency_id=1,
+                highest_buy_order_minor=2000,
+                lowest_sell_order_minor=2500,
+                observed_at=(datetime.now(timezone.utc) - timedelta(days=i + 1)).isoformat(),
+            ))
+
+        mock_tg = MagicMock(spec=BaseNotifier)
+        mock_tg.channel_name = "telegram"
+        mock_tg.is_configured = True
+        mock_tg.is_enabled = True
+        # Telegram always fails with network error
+        mock_tg.send = AsyncMock(return_value=NotificationResult(
+            channel="telegram", status=DeliveryStatus.FAILED, error_message="Network error"
+        ))
+
+        dispatcher = NotificationDispatcher(channels=[mock_tg], alert_repo=self.alert_repo)
+        mock_adapter = MagicMock(spec=SteamMarketAdapter)
+        mock_adapter.get_orderbook_histogram = AsyncMock(return_value=make_histogram(2500, 3000, 5, 20))
+
+        engine = SellSniperEngine(
+            db=self.db,
+            market_adapter=mock_adapter,
+            dispatcher=dispatcher,
+            config=SellEvaluationConfig(
+                cooldown_seconds=1800,
+                failed_retry_backoff_seconds=60,
+                max_delivery_retries=3,
+            ),
+        )
+
+        # 1. Initial attempt: fails (attempt #1)
+        eval1 = await engine.evaluate_item(self.item)
+        self.assertTrue(eval1.is_actionable)
+        self.assertEqual(mock_tg.send.call_count, 1)
+
+        # 2. Repeated scan within backoff window (< 60s): suppressed, no send
+        eval_in_backoff = await engine.evaluate_item(self.item)
+        self.assertFalse(eval_in_backoff.is_actionable)
+        self.assertEqual(eval_in_backoff.status, "Suppressed (Cooldown)")
+        self.assertEqual(mock_tg.send.call_count, 1)
+
+        # 3. Simulate retry 1 (expire backoff): fails (attempt #2, retry #1)
+        self.db.execute("UPDATE notification_deliveries SET created_at = datetime('now', '-70 seconds') WHERE channel = 'telegram'")
+        eval_retry1 = await engine.evaluate_item(self.item)
+        self.assertTrue(eval_retry1.is_actionable)
+        self.assertEqual(mock_tg.send.call_count, 2)
+
+        # 4. Simulate retry 2: fails (attempt #3, retry #2)
+        self.db.execute("UPDATE notification_deliveries SET created_at = datetime('now', '-70 seconds') WHERE channel = 'telegram'")
+        eval_retry2 = await engine.evaluate_item(self.item)
+        self.assertTrue(eval_retry2.is_actionable)
+        self.assertEqual(mock_tg.send.call_count, 3)
+
+        # 5. Simulate retry 3: fails (attempt #4, retry #3)
+        self.db.execute("UPDATE notification_deliveries SET created_at = datetime('now', '-70 seconds') WHERE channel = 'telegram'")
+        eval_retry3 = await engine.evaluate_item(self.item)
+        self.assertTrue(eval_retry3.is_actionable)
+        self.assertEqual(mock_tg.send.call_count, 4)
+
+        # 6. Now 4 failed deliveries recorded (1 initial + 3 retries).
+        # Even after backoff expires, the cumulative retry limit is exhausted!
+        self.db.execute("UPDATE notification_deliveries SET created_at = datetime('now', '-70 seconds') WHERE channel = 'telegram'")
+        eval_exhausted = await engine.evaluate_item(self.item)
+        self.assertFalse(eval_exhausted.is_actionable)
+        self.assertEqual(eval_exhausted.status, "Suppressed (Cooldown)")
+        # mock_tg.send was NOT called again (capped at 4 total attempts):
+        self.assertEqual(mock_tg.send.call_count, 4)
+
+        # 7. Materially different opportunity arrives (bid increases from 2500 to 2700):
+        # Produces a new fingerprint and receives a fresh retry budget!
+        mock_adapter.get_orderbook_histogram = AsyncMock(return_value=make_histogram(2700, 3000, 5, 20))
+        eval_new_bid = await engine.evaluate_item(self.item)
+        self.assertTrue(eval_new_bid.is_actionable)
+        self.assertEqual(mock_tg.send.call_count, 5)
+
 
 if __name__ == "__main__":
     unittest.main()

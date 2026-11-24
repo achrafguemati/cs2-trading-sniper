@@ -574,6 +574,8 @@ class ListingRepository:
 class OrderbookRepository:
     """Repository for immutable orderbook depth and price snapshots."""
 
+    MAX_CLOCK_SKEW_SECONDS: float = 5.0
+
     def __init__(self, db: Database) -> None:
         self._db = db
 
@@ -648,11 +650,17 @@ class OrderbookRepository:
         limit: int = 100,
         max_age_seconds: int | None = None,
         exclude_snapshot_id: int | None = None,
+        now_dt: datetime | None = None,
     ) -> list[int]:
         """Retrieve historical highest_buy_order_minor values for an item and currency.
 
         Ordered from newest to oldest, optionally excluding a specific snapshot (e.g. current)
         and filtering out observations older than max_age_seconds.
+
+        Timestamp validation and clock skew policy:
+        - Malformed or missing timestamps are excluded (fail-closed).
+        - Observations with timestamps beyond MAX_CLOCK_SKEW_SECONDS (5.0s) in the future are rejected.
+        - Historical records are never deleted; invalid records are simply excluded from calculations.
         """
         query = (
             "SELECT snapshot_id, highest_buy_order_minor, observed_at "
@@ -671,25 +679,44 @@ class OrderbookRepository:
         if not rows:
             return []
 
-        if max_age_seconds is not None:
+        if now_dt is None:
             now_dt = datetime.now(timezone.utc)
-            valid_bids: list[int] = []
-            for r in rows:
-                try:
-                    obs_str = r["observed_at"]
-                    if obs_str.endswith("Z"):
-                        obs_str = obs_str[:-1] + "+00:00"
-                    obs_dt = datetime.fromisoformat(obs_str)
-                    if obs_dt.tzinfo is None:
-                        obs_dt = obs_dt.replace(tzinfo=timezone.utc)
-                    age = (now_dt - obs_dt).total_seconds()
-                    if age <= max_age_seconds:
-                        valid_bids.append(int(r["highest_buy_order_minor"]))
-                except Exception:
-                    valid_bids.append(int(r["highest_buy_order_minor"]))
-            return valid_bids
+        elif now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=timezone.utc)
 
-        return [int(r["highest_buy_order_minor"]) for r in rows]
+        valid_bids: list[int] = []
+        for r in rows:
+            obs_str = r["observed_at"]
+            if not obs_str or not isinstance(obs_str, str) or not obs_str.strip():
+                # Missing or empty timestamp: exclude
+                continue
+
+            obs_clean = obs_str.strip()
+            if obs_clean.endswith("Z"):
+                obs_clean = obs_clean[:-1] + "+00:00"
+
+            try:
+                obs_dt = datetime.fromisoformat(obs_clean)
+            except (ValueError, TypeError):
+                # Malformed timestamp: exclude
+                continue
+
+            if obs_dt.tzinfo is None:
+                obs_dt = obs_dt.replace(tzinfo=timezone.utc)
+
+            age = (now_dt - obs_dt).total_seconds()
+
+            # Reject future timestamps beyond clock skew tolerance:
+            if age < -self.MAX_CLOCK_SKEW_SECONDS:
+                continue
+
+            # Reject observations older than max_age_seconds if specified:
+            if max_age_seconds is not None and age > max_age_seconds:
+                continue
+
+            valid_bids.append(int(r["highest_buy_order_minor"]))
+
+        return valid_bids
 
     @staticmethod
     def _row_to_record(row: sqlite3.Row) -> OrderbookSnapshotRecord:
@@ -1237,33 +1264,98 @@ class AlertRepository:
         # In cooldown and not a meaningful increase: suppress!
         return True
 
+    def get_delivery_history_for_fingerprint(
+        self,
+        item_id: int,
+        currency_id: int,
+        alert_type: str,
+        channel: str,
+        alert_fingerprint: str,
+    ) -> list[NotificationDeliveryRecord]:
+        """Fetch all delivery records for a specific fingerprint and channel, ordered newest to oldest."""
+        rows = self._db.fetch_all("""
+            SELECT
+                d.delivery_id, d.alert_id, d.channel, d.status, d.attempts, d.last_error,
+                d.delivered_at, d.created_at
+            FROM notification_deliveries d
+            JOIN alert_events a ON d.alert_id = a.alert_id
+            WHERE a.item_id = ? AND a.currency_id = ? AND a.alert_type = ?
+              AND d.channel = ? AND a.alert_fingerprint = ?
+            ORDER BY d.delivery_id DESC
+        """, (item_id, currency_id, alert_type, channel, alert_fingerprint))
+        return [self._row_to_delivery(r) for r in rows]
+
     def is_channel_in_retry_backoff(
         self,
         item_id: int,
         currency_id: int,
         alert_type: str,
         channel: str,
+        alert_fingerprint: str | None = None,
         backoff_seconds: int = 60,
         max_retries: int = 3,
         now_dt: datetime | None = None,
     ) -> bool:
-        """Check whether a channel is currently in retry backoff after a failed delivery."""
-        res = self.get_latest_delivery_attempt(item_id, currency_id, alert_type, channel)
-        if res is None:
-            return False
-        delivery, _ = res
+        """Check whether a channel is currently in retry backoff or has exhausted retry attempts.
 
-        if delivery.status != "failed":
+        Cumulative retry accounting semantics:
+        - Accounting is tracked independently per (item_id, currency_id, alert_type, channel, alert_fingerprint).
+        - A cycle is counted as a failure only when a delivery record has status = 'failed'.
+        - Skipped or disabled deliveries (status = 'skipped') do NOT consume retry budget.
+        - Cooldown-suppressed or non-actionable evaluations do NOT reset or alter failure counts.
+        - Initial send is attempt #1 (1 failure). The configured `max_retries` (default 3) specifies
+          the maximum number of retry attempts *after* the initial failure.
+          Total allowed failures before permanent suppression for this fingerprint = 1 + max_retries (e.g. 1 + 3 = 4).
+        - When cumulative failed attempts >= (1 + max_retries), further retries for this fingerprint
+          are suppressed permanently (returns True).
+        - A successful delivery (status = 'delivered') clears retry backoff (returns False).
+        - A new or materially different bid generates a new fingerprint and receives a fresh retry budget.
+        - If elapsed time since the most recent failure is < backoff_seconds (default 60s), returns True.
+        - If elapsed time >= backoff_seconds and cumulative retries < max_retries, returns False (retry eligible).
+        """
+        if alert_fingerprint is None:
+            latest = self.get_latest_alert_for_item(item_id, currency_id, alert_type)
+            if latest is not None:
+                alert_fingerprint = latest.alert_fingerprint
+
+        if not alert_fingerprint:
             return False
 
-        if delivery.attempts >= max_retries:
+        deliveries = self.get_delivery_history_for_fingerprint(
+            item_id=item_id,
+            currency_id=currency_id,
+            alert_type=alert_type,
+            channel=channel,
+            alert_fingerprint=alert_fingerprint,
+        )
+        if not deliveries:
+            return False
+
+        # If this fingerprint was successfully delivered on this channel, retry state is cleared:
+        if any(d.status == "delivered" for d in deliveries):
+            return False
+
+        failed_deliveries = [d for d in deliveries if d.status == "failed"]
+        failed_count = len(failed_deliveries)
+
+        if failed_count == 0:
+            return False
+
+        # Maximum cumulative attempts: 1 initial send + max_retries retries
+        max_allowed_failures = 1 + max_retries
+        if failed_count >= max_allowed_failures:
+            # Retry limit exhausted for this fingerprint: suppress further attempts
             return True
 
         if now_dt is None:
             now_dt = datetime.now(timezone.utc)
+        elif now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=timezone.utc)
 
+        # Check failure backoff window from the latest failed attempt:
+        latest_failed = failed_deliveries[0]
         try:
-            ref_str = delivery.created_at
+            ref_str = latest_failed.created_at
             if ref_str.endswith("Z"):
                 ref_str = ref_str[:-1] + "+00:00"
             ref_dt = datetime.fromisoformat(ref_str)

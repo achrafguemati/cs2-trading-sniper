@@ -131,8 +131,13 @@ To prevent notification spam while ensuring critical price movements are immedia
 * **Anchored to Successful Deliveries:** Cooldown is tracked per-channel and referenced exclusively against rows in the `notification_deliveries` table where `status = 'delivered'`.
 * **Zero Cooldown Resets from Suppressed Events:** Intervening non-actionable observations (such as `DATA INSUFFICIENT`, missing buy depth, or crossed books) or evaluations suppressed by cooldown (`Suppressed (Cooldown)`) **NEVER** update or reset the cooldown reference timestamp or reference bid amount.
 * **Meaningful Increase Bypass:** An alert is suppressed only if the elapsed time is within `cooldown_seconds` (default 1800s / 30m) **AND** the new bid is less than the last delivered bid plus `meaningful_bid_increase_pct` (default 5%). A $\ge 5\%$ bid spike immediately bypasses cooldown.
-* **Channel Independence & Failure Retry Backoff:**
+* **Channel Independence & Cumulative Failure Retry Backoff:**
   - If delivery to Discord succeeds but Telegram fails (e.g. temporary network glitch), Discord enters normal cooldown while Telegram enters a short failure retry backoff (default 60s, max 3 retries).
+  - Retry accounting is persistent and cumulative per `(item_id, currency_id, alert_type, channel, alert_fingerprint)`.
+  - The initial send counts as attempt #1 (1 failure). The configured `max_delivery_retries` (default 3) sets the maximum number of retry attempts *after* the initial failure, capping total failures at 4 (1 initial + 3 retries).
+  - Reaching the cumulative maximum (4 failures) permanently suppresses further retries for that specific opportunity fingerprint.
+  - A materially new bid generates a new fingerprint and immediately receives a fresh retry budget.
+  - A successful delivery clears retry state. Skipped or cooldown-suppressed evaluations do not consume retry budget.
   - On the next cycle after backoff expires, Telegram is retried without sending a duplicate notification to Discord.
 * **Unconfigured Channels:** Disabled or unconfigured channels never enter cooldown or block other channels.
 

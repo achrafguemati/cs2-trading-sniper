@@ -111,6 +111,7 @@ class NotificationDispatcher:
                     currency_id=getattr(alert, "currency_id", 1),
                     alert_type="sell_target_bid",
                     channel=ch_name,
+                    alert_fingerprint=getattr(alert, "alert_fingerprint", None),
                     backoff_seconds=failed_retry_backoff_seconds,
                     max_retries=max_delivery_retries,
                 )

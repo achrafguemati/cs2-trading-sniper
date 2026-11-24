@@ -76,6 +76,7 @@ class PublicInventoryClient:
         desc_map: dict[tuple[str, str], Any] = {}
 
         start_assetid: str | None = None
+        seen_cursors: set[str] = set()
         pages_fetched = 0
         pagination_completed = False
 
@@ -106,6 +107,13 @@ class PublicInventoryClient:
 
             all_assets.extend(resp.assets)
 
+            # Check if total accumulated assets exceeded max_items:
+            if len(all_assets) > max_items:
+                raise PublicInventoryError(
+                    f"Inventory asset count ({len(all_assets)}) exceeded max_items ({max_items}). "
+                    "Incomplete inventory import aborted."
+                )
+
             # Check pagination completion:
             has_more = bool(resp.more_items)
             if not has_more:
@@ -118,11 +126,14 @@ class PublicInventoryClient:
                     f"Missing last_assetid pagination cursor from Steam while more_items=True on page {pages_fetched}. "
                     "Incomplete inventory import aborted."
                 )
-            if resp.last_assetid == start_assetid:
+            cursor_str = str(resp.last_assetid)
+            if cursor_str in seen_cursors or cursor_str == start_assetid:
                 raise PublicInventoryError(
-                    f"Repeated last_assetid pagination cursor ('{resp.last_assetid}') detected from Steam on page {pages_fetched}. "
+                    f"Repeated last_assetid pagination cursor ('{cursor_str}') detected from Steam on page {pages_fetched}. "
                     "Incomplete inventory import aborted."
                 )
+            seen_cursors.add(cursor_str)
+
             if len(all_assets) >= max_items:
                 raise PublicInventoryError(
                     f"Inventory item limit reached ({len(all_assets)} >= max_items={max_items}) while Steam reports more items. "
@@ -134,7 +145,7 @@ class PublicInventoryClient:
                     "Incomplete inventory import aborted."
                 )
 
-            start_assetid = str(resp.last_assetid)
+            start_assetid = cursor_str
 
         if not pagination_completed:
             raise PublicInventoryError(
@@ -142,9 +153,15 @@ class PublicInventoryClient:
                 "Incomplete inventory import aborted."
             )
 
+        if len(all_assets) > max_items:
+            raise PublicInventoryError(
+                f"Inventory asset count ({len(all_assets)}) exceeded max_items ({max_items}). "
+                "Incomplete inventory import aborted."
+            )
+
         # Build inventory item records
         item_records: list[InventoryItemRecord] = []
-        for asset in all_assets[:max_items]:
+        for asset in all_assets:
             cid = str(asset.classid)
             iid = str(asset.instanceid)
             # Match descriptions exclusively by exact (classid, instanceid) key:
@@ -212,6 +229,52 @@ class ManualInventoryImporter:
     ACCEPTED_BOOLEAN_FALSE = frozenset({"false", "0", "no", "n"})
 
     @classmethod
+    def _parse_amount(
+        cls,
+        raw_amount: Any,
+        row_label: str,
+    ) -> tuple[int | None, str | None]:
+        """Parse inventory amount strictly as a positive integer.
+
+        Accepts only positive actual integers and positive integer strings.
+        Rejects booleans, floats (e.g. 1.0, 1.9), non-positive numbers, and malformed strings.
+        Never silently truncates values.
+        """
+        if raw_amount is None or raw_amount == "":
+            return 1, None
+        if type(raw_amount) is bool:
+            return None, (
+                f"{row_label}: Invalid boolean amount '{raw_amount}'. "
+                "Amount must be a positive integer."
+            )
+        if isinstance(raw_amount, float):
+            return None, (
+                f"{row_label}: Invalid float amount '{raw_amount}'. "
+                "Amount must be a positive integer."
+            )
+        if type(raw_amount) is int:
+            if raw_amount <= 0:
+                return None, f"{row_label}: Amount must be a positive integer, got {raw_amount}."
+            return raw_amount, None
+        if isinstance(raw_amount, str):
+            s = raw_amount.strip()
+            if not s:
+                return 1, None
+            if s.isdigit():
+                val = int(s)
+                if val <= 0:
+                    return None, f"{row_label}: Amount must be a positive integer, got {val}."
+                return val, None
+            return None, (
+                f"{row_label}: Invalid non-integer amount '{raw_amount}'. "
+                "Amount must be a positive integer."
+            )
+        return None, (
+            f"{row_label}: Invalid amount type '{type(raw_amount).__name__}'. "
+            "Amount must be a positive integer."
+        )
+
+    @classmethod
     def _parse_strict_bool(
         cls,
         val: Any,
@@ -221,9 +284,14 @@ class ManualInventoryImporter:
         """Parse boolean flag strictly with fail-closed semantics."""
         if val is None or val == "":
             return False, None
-        if isinstance(val, bool):
+        if type(val) is bool:
             return val, None
-        if isinstance(val, (int, float)):
+        if isinstance(val, float):
+            return False, (
+                f"{row_label}: Invalid float {field_name} value '{val}'. "
+                "Floats cannot be used as boolean values."
+            )
+        if type(val) is int:
             if val == 1:
                 return True, None
             if val == 0:
@@ -232,13 +300,18 @@ class ManualInventoryImporter:
                 f"{row_label}: Invalid {field_name} value '{val}'. "
                 "Accepted boolean values are: true, false, 1, 0, yes, no, y, n."
             )
-        s = str(val).strip().lower()
-        if s in cls.ACCEPTED_BOOLEAN_TRUE:
-            return True, None
-        if s in cls.ACCEPTED_BOOLEAN_FALSE:
-            return False, None
+        if isinstance(val, str):
+            s = val.strip().lower()
+            if s in cls.ACCEPTED_BOOLEAN_TRUE:
+                return True, None
+            if s in cls.ACCEPTED_BOOLEAN_FALSE:
+                return False, None
+            return False, (
+                f"{row_label}: Invalid {field_name} value '{val}'. "
+                "Accepted boolean values are: true, false, 1, 0, yes, no, y, n."
+            )
         return False, (
-            f"{row_label}: Invalid {field_name} value '{val}'. "
+            f"{row_label}: Invalid {field_name} type '{type(val).__name__}'. "
             "Accepted boolean values are: true, false, 1, 0, yes, no, y, n."
         )
 
@@ -251,24 +324,46 @@ class ManualInventoryImporter:
         """Parse market restriction days, requiring non-negative integer or None."""
         if raw_restr is None or raw_restr == "":
             return None, None
-        if isinstance(raw_restr, bool):
+        if type(raw_restr) is bool:
             return None, (
-                f"{row_label}: Invalid market_restriction_days '{raw_restr}'. "
+                f"{row_label}: Invalid boolean market_restriction_days '{raw_restr}'. "
                 "Must be a non-negative integer."
             )
-        try:
-            days = int(raw_restr)
-            if days < 0:
+        if isinstance(raw_restr, float):
+            return None, (
+                f"{row_label}: Invalid float market_restriction_days '{raw_restr}'. "
+                "Must be a non-negative integer."
+            )
+        if type(raw_restr) is int:
+            if raw_restr < 0:
                 return None, (
                     f"{row_label}: Invalid negative market_restriction_days '{raw_restr}'. "
                     "Must be a non-negative integer."
                 )
-            return days, None
-        except (ValueError, TypeError):
+            return raw_restr, None
+        if isinstance(raw_restr, str):
+            s = raw_restr.strip()
+            if not s:
+                return None, None
+            if s.startswith("-"):
+                try:
+                    int(s)
+                    return None, (
+                        f"{row_label}: Invalid negative market_restriction_days '{raw_restr}'. "
+                        "Must be a non-negative integer."
+                    )
+                except ValueError:
+                    pass
+            if s.isdigit():
+                return int(s), None
             return None, (
                 f"{row_label}: Invalid non-integer market_restriction_days '{raw_restr}'. "
                 "Must be a non-negative integer."
             )
+        return None, (
+            f"{row_label}: Invalid market_restriction_days type '{type(raw_restr).__name__}'. "
+            "Must be a non-negative integer."
+        )
 
     @classmethod
     def import_csv(
@@ -331,19 +426,17 @@ class ManualInventoryImporter:
                 continue
 
             raw_amount = get_val(row, "amount", "quantity", "count", "qty")
-            amount = 1
-            if raw_amount is not None:
-                try:
-                    amount = int(raw_amount)
-                    if amount <= 0:
-                        errors.append(f"{row_label}: Amount must be a positive integer, got {amount}.")
-                        continue
-                except ValueError:
-                    errors.append(f"{row_label}: Invalid non-integer amount '{raw_amount}'.")
-                    continue
+            amount, a_err = cls._parse_amount(raw_amount, row_label)
+            if a_err is not None:
+                errors.append(a_err)
+                continue
 
             raw_asset_id = get_val(row, "asset_id", "id", "assetid")
-            asset_id = raw_asset_id if raw_asset_id else f"manual_{uuid.uuid4().hex[:12]}"
+            if raw_asset_id:
+                clean_aid = str(raw_asset_id).strip()
+                asset_id = clean_aid if clean_aid.startswith(("manual_", "manual:")) else f"manual_{clean_aid}"
+            else:
+                asset_id = f"manual_{uuid.uuid4().hex[:12]}"
 
             raw_marketable = get_val(row, "is_marketable", "marketable")
             is_marketable, m_err = cls._parse_strict_bool(raw_marketable, "marketable", row_label)
@@ -447,17 +540,18 @@ class ManualInventoryImporter:
             if raw_amount is None:
                 raw_amount = item.get("count")
             if raw_amount is None:
-                raw_amount = 1
-            try:
-                amount = int(raw_amount)
-                if amount <= 0:
-                    errors.append(f"{row_label}: Amount must be a positive integer, got {amount}.")
-                    continue
-            except (ValueError, TypeError):
-                errors.append(f"{row_label}: Invalid non-integer amount '{raw_amount}'.")
+                raw_amount = item.get("qty")
+            amount, a_err = cls._parse_amount(raw_amount, row_label)
+            if a_err is not None:
+                errors.append(a_err)
                 continue
 
-            asset_id = str(item.get("asset_id") or item.get("id") or f"manual_{uuid.uuid4().hex[:12]}")
+            raw_asset_id = item.get("asset_id") or item.get("id") or item.get("assetid")
+            if raw_asset_id:
+                clean_aid = str(raw_asset_id).strip()
+                asset_id = clean_aid if clean_aid.startswith(("manual_", "manual:")) else f"manual_{clean_aid}"
+            else:
+                asset_id = f"manual_{uuid.uuid4().hex[:12]}"
 
             raw_marketable = item.get("is_marketable")
             if raw_marketable is None:

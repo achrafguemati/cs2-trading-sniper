@@ -82,6 +82,11 @@ See the complete rules in [AGENTS.md](AGENTS.md).
   - Per-channel delivery-aware cooldown: cooldown references actual successful deliveries (`status = 'delivered'`) per channel in `notification_deliveries`; intervening non-actionable or suppressed observations do not alter the cooldown reference timestamp or reference bid; supports short failure retry backoff (default 60s, max 3 retries) with channel independence.
   - Actionable status alignment: `High-confidence signal` and `Candidate` are notification-eligible; `Needs verification` is suppressed by default unless explicitly configured.
   - Local environment loading: integrates `python-dotenv` with `override=False` to preserve existing process environment variables while loading `.env` on Windows and Linux; ensures clean HTTP client lifecycle management via `ReadOnlyHttpClient.aclose()`.
+- **Milestone 5.2 (Final Inventory Integrity & Notification Retry Hardening):**
+  - Public inventory truncation elimination: verified total accumulated asset count against `max_items` across completed inventories (including when `more_items=False`); raises `PublicInventoryError` on limit breach without creating snapshots, and tracks cursor histories (`seen_cursors`) to reject cycles.
+  - Cumulative notification retry accounting: persistent retry accounting independently tracked per `(item_id, currency_id, alert_type, channel, alert_fingerprint)`; counts failed delivery cycles cumulatively, enforcing the maximum of 3 retries after the initial failed send; skipped/cooldown evaluations never consume or reset failure counts; fresh bids receive a fresh retry budget; successful delivery clears retry state.
+  - Fail-closed historical timestamp validation: `OrderbookRepository.get_historical_buy_orders()` excludes malformed, missing, or far-future timestamps from age-filtered baselines under an explicit clock-skew tolerance policy (`MAX_CLOCK_SKEW_SECONDS = 5.0s`), preserving historical database records without deletion.
+  - Strict manual JSON/CSV numeric validation: `ManualInventoryImporter` rejects booleans, floats (`1.0`, `1.9`, `0.0`, `7.0`), non-positive amounts, and negative restriction days without silent truncation; enforces an explicit manual-only namespace (`manual_`) for all manual asset IDs.
 
 ---
 

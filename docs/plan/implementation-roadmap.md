@@ -165,6 +165,19 @@
     - Explicit asynchronous resource closing via `ReadOnlyHttpClient.aclose()`.
 * **Acceptance Criteria:** Verified: All edge cases covered by deterministic offline regression tests; 100% test pass without live network dependencies.
 
+### Milestone 5.2: Final Inventory Integrity & Notification Retry Hardening (COMPLETED)
+* **Status:** Complete & Verified.
+* **Deliverables:**
+  - `src/sniper/adapters/inventory.py`:
+    - Elimination of silent inventory truncation: checks total accumulated assets against `max_items` across completed pages, raising `PublicInventoryError` without modifying database snapshots.
+    - Cursor history set (`seen_cursors`) tracking all pagination cursors to reject cursor cycles promptly.
+    - Strict manual JSON/CSV numeric parsing: `_parse_amount` rejects booleans, floats (1.0, 1.9), and negative/zero values; `_parse_restriction_days` rejects booleans, floats, and negative numbers; `_parse_strict_bool` rejects floats.
+    - Explicit manual asset ID namespace (`manual_`) ensuring manual imports never fabricate or mimic real Steam asset IDs.
+  - `src/sniper/storage/repositories.py`:
+    - `OrderbookRepository.get_historical_buy_orders()`: fail-closed timestamp validation rejecting missing, malformed, or far-future timestamps under documented clock skew tolerance policy (`MAX_CLOCK_SKEW_SECONDS = 5.0s`), preserving historical rows in storage.
+    - `AlertRepository.is_channel_in_retry_backoff()`: cumulative retry accounting per `(item_id, currency_id, alert_type, channel, alert_fingerprint)`, enforcing a maximum of 3 retries (4 total failures) after the initial failure; cleared upon successful delivery or new bid fingerprint.
+* **Acceptance Criteria:** Verified: Cumulative retries cap at 3; new bids receive fresh budget; malformed timestamps excluded from baseline; manual JSON rejects floats and booleans; 342 offline unit tests pass cleanly.
+
 ### Milestone 6: BUY Engine + Listing Evaluator
 * **Deliverables:**
   - Listing-level parser extracting listing ID, asset ID, price, and stickers.

@@ -447,6 +447,7 @@ class SellSniperEngine:
                         currency_id=self._config.currency_id,
                         alert_type="sell_target_bid",
                         channel=ch.channel_name,
+                        alert_fingerprint=fingerprint,
                         backoff_seconds=self._config.failed_retry_backoff_seconds,
                         max_retries=self._config.max_delivery_retries,
                     )
@@ -492,6 +493,7 @@ class SellSniperEngine:
             listing_url = f"https://steamcommunity.com/market/listings/730/{quote(name)}"
             payload = AlertPayload(
                 alert_id=alert_id,
+                alert_fingerprint=fingerprint,
                 item_id=item_id,
                 currency_id=self._config.currency_id,
                 market_hash_name=name,

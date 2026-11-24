@@ -515,6 +515,221 @@ Invalid String Restriction,true,true,foo
         self.assertIn("Item #4: Invalid tradable value '2'", errors[1])
         self.assertIn("Item #5: Invalid negative market_restriction_days '-5'", errors[2])
 
+    async def test_public_inventory_final_page_exceeds_max_items_while_more_items_false(self) -> None:
+        """Verify final page exceeding max_items raises PublicInventoryError and never truncates."""
+        from sniper.adapters.inventory import PublicInventoryError
+
+        # Steam returns 4 items on a single page (more_items=False), but max_items=2
+        resp_data = {
+            "success": 1,
+            "more_items": 0,
+            "assets": [
+                {"assetid": "1", "classid": "100", "instanceid": "1", "amount": "1"},
+                {"assetid": "2", "classid": "100", "instanceid": "1", "amount": "1"},
+                {"assetid": "3", "classid": "100", "instanceid": "1", "amount": "1"},
+                {"assetid": "4", "classid": "100", "instanceid": "1", "amount": "1"},
+            ],
+            "descriptions": [
+                {"classid": "100", "instanceid": "1", "market_hash_name": "Item 100", "name": "Item 100", "marketable": 1, "tradable": 1}
+            ],
+        }
+        client = PublicInventoryClient(
+            http_client=self.make_test_http_client(httpx.MockTransport(lambda r: httpx.Response(200, json=resp_data))),
+            db=self.db,
+        )
+        with self.assertRaises(PublicInventoryError) as ctx:
+            await client.fetch_and_import("76561198000000000", max_items=2)
+        self.assertIn("exceeded max_items (2)", str(ctx.exception))
+
+        # Confirm 0 snapshots created
+        count = self.db.fetch_one("SELECT COUNT(*) FROM inventory_snapshots")[0]
+        self.assertEqual(count, 0)
+
+    async def test_public_inventory_earlier_pages_consume_limit(self) -> None:
+        """Verify reaching limit on earlier page while more_items=True aborts cleanly."""
+        from sniper.adapters.inventory import PublicInventoryError
+
+        resp_page1 = {
+            "success": 1,
+            "more_items": 1,
+            "last_assetid": "asset_2",
+            "assets": [
+                {"assetid": "1", "classid": "100", "instanceid": "1", "amount": "1"},
+                {"assetid": "2", "classid": "100", "instanceid": "1", "amount": "1"},
+            ],
+            "descriptions": [
+                {"classid": "100", "instanceid": "1", "market_hash_name": "Item 100", "name": "Item 100", "marketable": 1, "tradable": 1}
+            ],
+        }
+        client = PublicInventoryClient(
+            http_client=self.make_test_http_client(httpx.MockTransport(lambda r: httpx.Response(200, json=resp_page1))),
+            db=self.db,
+        )
+        # max_items=2: page 1 already has 2 items while more_items=True
+        with self.assertRaises(PublicInventoryError) as ctx:
+            await client.fetch_and_import("76561198000000000", max_items=2)
+        self.assertIn("Inventory item limit reached", str(ctx.exception))
+
+        count = self.db.fetch_one("SELECT COUNT(*) FROM inventory_snapshots")[0]
+        self.assertEqual(count, 0)
+
+    async def test_public_inventory_exactly_max_items_with_complete_pagination_succeeds(self) -> None:
+        """Verify exactly max_items with complete pagination succeeds without error."""
+        resp_data = {
+            "success": 1,
+            "more_items": 0,
+            "assets": [
+                {"assetid": "1", "classid": "100", "instanceid": "1", "amount": "1"},
+                {"assetid": "2", "classid": "100", "instanceid": "1", "amount": "1"},
+            ],
+            "descriptions": [
+                {"classid": "100", "instanceid": "1", "market_hash_name": "Item 100", "name": "Item 100", "marketable": 1, "tradable": 1}
+            ],
+        }
+        client = PublicInventoryClient(
+            http_client=self.make_test_http_client(httpx.MockTransport(lambda r: httpx.Response(200, json=resp_data))),
+            db=self.db,
+        )
+        snap, items = await client.fetch_and_import("76561198000000000", max_items=2)
+        self.assertEqual(snap.total_count, 2)
+        self.assertEqual(len(items), 2)
+
+    async def test_public_inventory_cursor_cycle_rejected(self) -> None:
+        """Verify repeated cursor cycle across multiple pages is rejected promptly."""
+        from sniper.adapters.inventory import PublicInventoryError
+
+        page_calls = 0
+
+        def mock_handler(request: httpx.Request) -> httpx.Response:
+            nonlocal page_calls
+            page_calls += 1
+            if page_calls == 1:
+                return httpx.Response(200, json={
+                    "success": 1, "more_items": 1, "last_assetid": "cursor_A",
+                    "assets": [{"assetid": "1", "classid": "100", "instanceid": "1", "amount": "1"}],
+                    "descriptions": [{"classid": "100", "instanceid": "1", "market_hash_name": "Item 100", "name": "Item 100"}],
+                })
+            elif page_calls == 2:
+                return httpx.Response(200, json={
+                    "success": 1, "more_items": 1, "last_assetid": "cursor_B",
+                    "assets": [{"assetid": "2", "classid": "100", "instanceid": "1", "amount": "1"}],
+                    "descriptions": [{"classid": "100", "instanceid": "1", "market_hash_name": "Item 100", "name": "Item 100"}],
+                })
+            else:
+                # Page 3 repeats cursor_A!
+                return httpx.Response(200, json={
+                    "success": 1, "more_items": 1, "last_assetid": "cursor_A",
+                    "assets": [{"assetid": "3", "classid": "100", "instanceid": "1", "amount": "1"}],
+                    "descriptions": [{"classid": "100", "instanceid": "1", "market_hash_name": "Item 100", "name": "Item 100"}],
+                })
+
+        client = PublicInventoryClient(
+            http_client=self.make_test_http_client(httpx.MockTransport(mock_handler)),
+            db=self.db,
+        )
+        with self.assertRaises(PublicInventoryError) as ctx:
+            await client.fetch_and_import("76561198000000000", max_pages=10)
+        self.assertIn("Repeated last_assetid pagination cursor ('cursor_A')", str(ctx.exception))
+
+    def test_manual_json_strict_numeric_amount_validation(self) -> None:
+        """Verify JSON amount accepts only positive integers, rejecting floats, booleans, and negatives."""
+        payload = [
+            {"market_hash_name": "Valid Int", "amount": 2},
+            {"market_hash_name": "Valid Str Int", "amount": "3"},
+            {"market_hash_name": "Invalid Bool", "amount": True},
+            {"market_hash_name": "Invalid Float Integral", "amount": 1.0},
+            {"market_hash_name": "Invalid Float Fractional", "amount": 1.9},
+            {"market_hash_name": "Invalid Zero", "amount": 0},
+            {"market_hash_name": "Invalid Negative", "amount": -2},
+            {"market_hash_name": "Invalid Float Str", "amount": "1.0"},
+            {"market_hash_name": "Invalid Malformed Str", "amount": "two"},
+        ]
+        snapshot, items, errors = ManualInventoryImporter.import_json(
+            json_content=json.dumps(payload),
+            db=self.db,
+        )
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0].market_hash_name, "Valid Int")
+        self.assertEqual(items[0].amount, 2)
+        self.assertEqual(items[1].market_hash_name, "Valid Str Int")
+        self.assertEqual(items[1].amount, 3)
+
+        self.assertEqual(len(errors), 7)
+        self.assertIn("Item #3: Invalid boolean amount 'True'", errors[0])
+        self.assertIn("Item #4: Invalid float amount '1.0'", errors[1])
+        self.assertIn("Item #5: Invalid float amount '1.9'", errors[2])
+        self.assertIn("Item #6: Amount must be a positive integer, got 0", errors[3])
+        self.assertIn("Item #7: Amount must be a positive integer, got -2", errors[4])
+        self.assertIn("Item #8: Invalid non-integer amount '1.0'", errors[5])
+        self.assertIn("Item #9: Invalid non-integer amount 'two'", errors[6])
+
+    def test_manual_json_strict_numeric_restriction_days_validation(self) -> None:
+        """Verify JSON restriction_days accepts only non-negative integers or None, rejecting floats and booleans."""
+        payload = [
+            {"market_hash_name": "Valid None", "market_restriction_days": None},
+            {"market_hash_name": "Valid Zero", "market_restriction_days": 0},
+            {"market_hash_name": "Valid Positive Str", "market_restriction_days": "7"},
+            {"market_hash_name": "Invalid Bool", "market_restriction_days": True},
+            {"market_hash_name": "Invalid Float Zero", "market_restriction_days": 0.0},
+            {"market_hash_name": "Invalid Float Positive", "market_restriction_days": 7.5},
+            {"market_hash_name": "Invalid Negative Int", "market_restriction_days": -7},
+            {"market_hash_name": "Invalid Negative Str", "market_restriction_days": "-3"},
+            {"market_hash_name": "Invalid Malformed Str", "market_restriction_days": "seven"},
+        ]
+        snapshot, items, errors = ManualInventoryImporter.import_json(
+            json_content=json.dumps(payload),
+            db=self.db,
+        )
+        self.assertEqual(len(items), 3)
+        self.assertIsNone(items[0].market_restriction_days)
+        self.assertEqual(items[1].market_restriction_days, 0)
+        self.assertEqual(items[2].market_restriction_days, 7)
+
+        self.assertEqual(len(errors), 6)
+        self.assertIn("Item #4: Invalid boolean market_restriction_days 'True'", errors[0])
+        self.assertIn("Item #5: Invalid float market_restriction_days '0.0'", errors[1])
+        self.assertIn("Item #6: Invalid float market_restriction_days '7.5'", errors[2])
+        self.assertIn("Item #7: Invalid negative market_restriction_days '-7'", errors[3])
+        self.assertIn("Item #8: Invalid negative market_restriction_days '-3'", errors[4])
+        self.assertIn("Item #9: Invalid non-integer market_restriction_days 'seven'", errors[5])
+
+    def test_manual_json_strict_boolean_marketability_validation(self) -> None:
+        """Verify JSON marketable/tradable rejects float 1.0 and 0.0."""
+        payload = [
+            {"market_hash_name": "Float 1.0 Marketable", "is_marketable": 1.0},
+            {"market_hash_name": "Float 0.0 Tradable", "is_tradable": 0.0},
+        ]
+        snapshot, items, errors = ManualInventoryImporter.import_json(
+            json_content=json.dumps(payload),
+            db=self.db,
+        )
+        self.assertEqual(len(items), 0)
+        self.assertEqual(len(errors), 2)
+        self.assertIn("Item #1: Invalid float marketable value '1.0'", errors[0])
+        self.assertIn("Item #2: Invalid float tradable value '0.0'", errors[1])
+
+    def test_manual_inventory_asset_id_namespace(self) -> None:
+        """Verify manual imports preserve explicit manual-only asset ID namespace."""
+        # 1. JSON import with explicit numeric ID and without ID
+        payload = [
+            {"market_hash_name": "Item A", "asset_id": "777788889999"},
+            {"market_hash_name": "Item B"},
+            {"market_hash_name": "Item C", "asset_id": "manual_existing_custom"},
+        ]
+        _, items, _ = ManualInventoryImporter.import_json(json_content=json.dumps(payload), db=self.db)
+        self.assertEqual(len(items), 3)
+        self.assertEqual(items[0].asset_id, "manual_777788889999")
+        self.assertTrue(items[1].asset_id.startswith("manual_"))
+        self.assertEqual(items[2].asset_id, "manual_existing_custom")
+
+        # 2. CSV import with explicit numeric ID and without ID
+        csv_data = "market_hash_name,asset_id\nItem D,123456\nItem E,\nItem F,manual:prefixed\n"
+        _, csv_items, _ = ManualInventoryImporter.import_csv(csv_content=csv_data, db=self.db)
+        self.assertEqual(len(csv_items), 3)
+        self.assertEqual(csv_items[0].asset_id, "manual_123456")
+        self.assertTrue(csv_items[1].asset_id.startswith("manual_"))
+        self.assertEqual(csv_items[2].asset_id, "manual:prefixed")
+
 
 if __name__ == "__main__":
     unittest.main()
