@@ -69,11 +69,11 @@ See the complete rules in [AGENTS.md](AGENTS.md).
   - Public Steam inventory ingestion client (`PublicInventoryClient` in `src/sniper/adapters/inventory.py`) querying public endpoints with pagination bounds and exact `(classid, instanceid)` asset matching.
   - Manual inventory CSV and JSON importers (`ManualInventoryImporter`) with row-level validation for private profiles.
   - SELL Sniper Engine (`SellSniperEngine` in `src/sniper/engine/sell_engine.py`) with strict identity provenance gating, historical buy-order median baselines, crossed-book detection, top-level quantity anomaly filters (`Single-Item Top Bid`), exact M4 modeled seller proceeds, and quantitative opportunity/confidence scoring.
-  - Free multi-channel notification infrastructure (`src/sniper/notifications/`): Discord Webhooks with rich embeds, Telegram Bot API with HTML formatting, standard-library SMTP email (STARTTLS/SSL, Gmail App Passwords), and documented Meta Facebook Messenger platform policy analysis (`UNAVAILABLE`).
+  - Free multi-channel notification infrastructure (`src/sniper/notifications/`): Discord Webhooks (`DiscordNotifier`) with rich embeds and Telegram Bot API (`TelegramNotifier`) with safely escaped HTML formatting.
   - Zero-cost architecture: 100% free operation without paid subscriptions, paid APIs, or cloud servers.
   - Complete credential redaction (`redact_secrets()`) preventing secret leakage into database records, logs, or exception traces.
   - Database schema Migration 4 adding `alert_events` and `notification_deliveries` tables with fingerprint deduplication and cooldown controls.
-  - CLI command-line interface (`src/sniper/cli.py`) supporting `import-inventory`, `import-csv`, `import-json`, `scan-sell`, `test-notifications`, and `status`.
+  - CLI command-line interface (`src/sniper/cli.py`) supporting `import-inventory`, `import-csv`, `import-json`, `scan-sell`, `test-notification`, and `channel-status`.
 
 ---
 

@@ -1,9 +1,8 @@
-"""Deterministic unit tests for free multi-channel notification transports and secret redaction."""
+"""Deterministic unit tests for free notification transports (Discord & Telegram) and secret redaction."""
 
 from __future__ import annotations
 
 import asyncio
-import smtplib
 from typing import Any
 from unittest.mock import MagicMock, patch
 import unittest
@@ -14,14 +13,14 @@ _REAL_ASYNC_CLIENT = httpx.AsyncClient
 
 from sniper.notifications import (
     AlertPayload,
+    BaseNotifier,
     DeliveryStatus,
+    DiscordNotifier,
     DiscordWebhookChannel,
-    EmailConfig,
-    EmailSmtpChannel,
-    MessengerChannel,
     NotificationDispatcher,
     NotificationResult,
     TelegramBotChannel,
+    TelegramNotifier,
     redact_secrets,
 )
 from sniper.storage.database import Database
@@ -30,7 +29,7 @@ from sniper.storage.repositories import AlertRepository
 
 
 class TestNotifications(unittest.IsolatedAsyncioTestCase):
-    """Test suite for Discord, Telegram, Email, and Messenger notification transports."""
+    """Test suite for Discord and Telegram notification transports."""
 
     def setUp(self) -> None:
         self.alert = AlertPayload(
@@ -193,66 +192,26 @@ class TestNotifications(unittest.IsolatedAsyncioTestCase):
 
     async def test_telegram_unconfigured_skips(self) -> None:
         """Verify unconfigured Telegram channel skips cleanly."""
-        channel = TelegramBotChannel(bot_token="", chat_id="")
+        channel = TelegramNotifier(bot_token="", chat_id="")
         self.assertFalse(channel.is_configured)
         res = await channel.send(self.alert)
         self.assertEqual(res.status, DeliveryStatus.SKIPPED)
 
-    async def test_email_smtp_success(self) -> None:
-        """Verify standard-library SMTP channel sends dual plain-text and HTML MIME."""
-        cfg = EmailConfig(
-            host="smtp.gmail.com",
-            port=587,
-            username="test_user@gmail.com",
-            password="test_app_password",
-            from_email="test_user@gmail.com",
-            to_email="dest_user@gmail.com",
-            use_tls=True,
-            use_ssl=False,
-        )
-        channel = EmailSmtpChannel(config=cfg)
-        self.assertTrue(channel.is_configured)
-
-        mock_server = MagicMock()
-        with patch("smtplib.SMTP", return_value=mock_server):
-            res = await channel.send(self.alert)
-
-        self.assertEqual(res.status, DeliveryStatus.DELIVERED)
-        mock_server.__enter__.return_value.starttls.assert_called_once()
-        mock_server.__enter__.return_value.login.assert_called_once_with("test_user@gmail.com", "test_app_password")
-        mock_server.__enter__.return_value.send_message.assert_called_once()
-
-    async def test_email_smtp_failure_redacts_password(self) -> None:
-        """Verify SMTP failure scrubs password from error message."""
-        cfg = EmailConfig(
-            host="smtp.gmail.com",
-            port=587,
-            username="test_user@gmail.com",
-            password="secret_app_password_999",
-            from_email="test_user@gmail.com",
-            to_email="dest_user@gmail.com",
-        )
-        channel = EmailSmtpChannel(config=cfg)
-
-        def mock_smtp(*args, **kwargs):
-            raise smtplib.SMTPAuthenticationError(535, b"Auth failed for secret_app_password_999")
-
-        with patch("smtplib.SMTP", side_effect=mock_smtp):
-            res = await channel.send(self.alert)
-
-        self.assertEqual(res.status, DeliveryStatus.FAILED)
-        self.assertNotIn("secret_app_password_999", res.last_error or "")
-        self.assertIn("***[REDACTED]***", res.last_error or "")
-
-    async def test_messenger_unavailable_status(self) -> None:
-        """Verify Messenger channel explicitly reports UNAVAILABLE due to Meta policy."""
-        channel = MessengerChannel()
-        self.assertFalse(channel.is_configured)
-
+    async def test_discord_disabled_skips(self) -> None:
+        """Verify disabled Discord channel skips delivery cleanly."""
+        channel = DiscordNotifier(webhook_url="https://discord.com/api/webhooks/123/token", enabled=False)
+        self.assertFalse(channel.is_enabled)
         res = await channel.send(self.alert)
-        self.assertEqual(res.status, DeliveryStatus.UNAVAILABLE)
-        self.assertIn("UNAVAILABLE", res.last_error or "")
-        self.assertIn("Meta messaging setup", res.last_error or "")
+        self.assertEqual(res.status, DeliveryStatus.SKIPPED)
+        self.assertIn("disabled", res.last_error or "")
+
+    async def test_telegram_disabled_skips(self) -> None:
+        """Verify disabled Telegram channel skips delivery cleanly."""
+        channel = TelegramNotifier(bot_token="123:abc", chat_id="456", enabled=False)
+        self.assertFalse(channel.is_enabled)
+        res = await channel.send(self.alert)
+        self.assertEqual(res.status, DeliveryStatus.SKIPPED)
+        self.assertIn("disabled", res.last_error or "")
 
     async def test_dispatcher_channel_isolation_and_persistence(self) -> None:
         """Verify dispatcher delivers across channels with failure isolation and SQLite logging."""
@@ -292,10 +251,11 @@ class TestNotifications(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        # Mock channels: channel A succeeds, channel B fails, channel C raises unhandled exception
+        # Mock channels: channel A succeeds, channel B fails
         mock_a = MagicMock()
         mock_a.channel_name = "discord"
         mock_a.is_configured = True
+        mock_a.is_enabled = True
         mock_a.send = unittest.mock.AsyncMock(return_value=NotificationResult(
             channel="discord", status=DeliveryStatus.DELIVERED, attempts=1
         ))
@@ -303,17 +263,13 @@ class TestNotifications(unittest.IsolatedAsyncioTestCase):
         mock_b = MagicMock()
         mock_b.channel_name = "telegram"
         mock_b.is_configured = True
+        mock_b.is_enabled = True
         mock_b.send = unittest.mock.AsyncMock(return_value=NotificationResult(
             channel="telegram", status=DeliveryStatus.FAILED, attempts=1, last_error="HTTP 401 Unauthorized"
         ))
 
-        mock_c = MagicMock()
-        mock_c.channel_name = "email"
-        mock_c.is_configured = True
-        mock_c.send = unittest.mock.AsyncMock(side_effect=RuntimeError("Unexpected network crash"))
-
         dispatcher = NotificationDispatcher(
-            channels=[mock_a, mock_b, mock_c],
+            channels=[mock_a, mock_b],
             alert_repo=repo,
         )
 
@@ -322,17 +278,14 @@ class TestNotifications(unittest.IsolatedAsyncioTestCase):
         # Verification of results
         self.assertEqual(results["discord"].status, DeliveryStatus.DELIVERED)
         self.assertEqual(results["telegram"].status, DeliveryStatus.FAILED)
-        self.assertEqual(results["email"].status, DeliveryStatus.FAILED)
-        self.assertIn("Unexpected network crash", results["email"].last_error or "")
 
         # Verification of SQLite delivery audit logging
         deliveries = repo.get_deliveries_for_alert(alert_event.alert_id)
-        self.assertEqual(len(deliveries), 3)
+        self.assertEqual(len(deliveries), 2)
 
         by_ch = {d.channel: d for d in deliveries}
         self.assertEqual(by_ch["discord"].status, "delivered")
         self.assertEqual(by_ch["telegram"].status, "failed")
-        self.assertEqual(by_ch["email"].status, "failed")
 
         db.close()
 

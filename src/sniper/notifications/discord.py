@@ -10,21 +10,34 @@ from typing import Any
 
 import httpx
 
-from sniper.notifications.base import BaseNotificationChannel, redact_secrets
+from sniper.notifications.base import BaseNotificationChannel, BaseNotifier, redact_secrets
 from sniper.notifications.models import AlertPayload, DeliveryStatus, NotificationResult
 
 logger = logging.getLogger(__name__)
 
 
-class DiscordWebhookChannel(BaseNotificationChannel):
+class DiscordNotifier(BaseNotifier):
     """Dispatches formatted rich embed alerts via Discord Incoming Webhooks."""
 
-    def __init__(self, webhook_url: str | None = None) -> None:
-        self._webhook_url = webhook_url or os.getenv("DISCORD_WEBHOOK_URL", "")
+    def __init__(
+        self,
+        webhook_url: str | None = None,
+        enabled: bool | None = None,
+    ) -> None:
+        self._webhook_url = webhook_url if webhook_url is not None else os.getenv("DISCORD_WEBHOOK_URL", "")
+        if enabled is not None:
+            self._enabled = bool(enabled)
+        else:
+            env_val = os.getenv("DISCORD_ENABLED", "true").strip().lower()
+            self._enabled = env_val not in ("0", "false", "no", "off")
 
     @property
     def channel_name(self) -> str:
         return "discord"
+
+    @property
+    def is_enabled(self) -> bool:
+        return self._enabled
 
     @property
     def is_configured(self) -> bool:
@@ -117,6 +130,14 @@ class DiscordWebhookChannel(BaseNotificationChannel):
 
     async def send(self, alert: AlertPayload) -> NotificationResult:
         """Deliver alert to configured Discord Webhook."""
+        if not self.is_enabled:
+            return NotificationResult(
+                channel=self.channel_name,
+                status=DeliveryStatus.SKIPPED,
+                attempts=0,
+                last_error="Discord channel is disabled.",
+            )
+
         if not self.is_configured:
             return NotificationResult(
                 channel=self.channel_name,
@@ -189,3 +210,7 @@ class DiscordWebhookChannel(BaseNotificationChannel):
             attempts=attempts,
             last_error="Discord delivery exhausted retry attempts.",
         )
+
+
+# Backwards compatibility alias
+DiscordWebhookChannel = DiscordNotifier

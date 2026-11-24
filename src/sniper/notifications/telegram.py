@@ -11,26 +11,36 @@ from typing import Any
 
 import httpx
 
-from sniper.notifications.base import BaseNotificationChannel, redact_secrets
+from sniper.notifications.base import BaseNotificationChannel, BaseNotifier, redact_secrets
 from sniper.notifications.models import AlertPayload, DeliveryStatus, NotificationResult
 
 logger = logging.getLogger(__name__)
 
 
-class TelegramBotChannel(BaseNotificationChannel):
+class TelegramNotifier(BaseNotifier):
     """Dispatches formatted alerts to a Telegram chat using official Bot API sendMessage."""
 
     def __init__(
         self,
         bot_token: str | None = None,
         chat_id: str | None = None,
+        enabled: bool | None = None,
     ) -> None:
-        self._bot_token = bot_token or os.getenv("TELEGRAM_BOT_TOKEN", "")
-        self._chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID", "")
+        self._bot_token = bot_token if bot_token is not None else os.getenv("TELEGRAM_BOT_TOKEN", "")
+        self._chat_id = chat_id if chat_id is not None else os.getenv("TELEGRAM_CHAT_ID", "")
+        if enabled is not None:
+            self._enabled = bool(enabled)
+        else:
+            env_val = os.getenv("TELEGRAM_ENABLED", "true").strip().lower()
+            self._enabled = env_val not in ("0", "false", "no", "off")
 
     @property
     def channel_name(self) -> str:
         return "telegram"
+
+    @property
+    def is_enabled(self) -> bool:
+        return self._enabled
 
     @property
     def is_configured(self) -> bool:
@@ -85,6 +95,14 @@ class TelegramBotChannel(BaseNotificationChannel):
 
     async def send(self, alert: AlertPayload) -> NotificationResult:
         """Deliver alert to configured Telegram chat."""
+        if not self.is_enabled:
+            return NotificationResult(
+                channel=self.channel_name,
+                status=DeliveryStatus.SKIPPED,
+                attempts=0,
+                last_error="Telegram channel is disabled.",
+            )
+
         if not self.is_configured:
             return NotificationResult(
                 channel=self.channel_name,
@@ -163,3 +181,7 @@ class TelegramBotChannel(BaseNotificationChannel):
             attempts=attempts,
             last_error="Telegram delivery exhausted retry attempts.",
         )
+
+
+# Backwards compatibility alias
+TelegramBotChannel = TelegramNotifier

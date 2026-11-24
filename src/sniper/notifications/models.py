@@ -8,11 +8,9 @@ from pydantic import BaseModel, Field
 
 
 class ChannelType(str, Enum):
-    """Supported notification transport channels."""
+    """Supported notification transport channels (Discord + Telegram only)."""
     DISCORD = "discord"
     TELEGRAM = "telegram"
-    EMAIL = "email"
-    MESSENGER = "messenger"
 
 
 class DeliveryStatus(str, Enum):
@@ -20,7 +18,6 @@ class DeliveryStatus(str, Enum):
     DELIVERED = "delivered"
     FAILED = "failed"
     SKIPPED = "skipped"
-    UNAVAILABLE = "unavailable"
 
 
 class AlertPayload(BaseModel):

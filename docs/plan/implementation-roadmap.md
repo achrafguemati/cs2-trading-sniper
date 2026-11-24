@@ -137,15 +137,13 @@
     - Top-level quantity anomaly filters distinguishing `top_level_buy_quantity` vs `cumulative_buy_quantity` and tagging `Single-Item Top Bid` and `Unverified High Bid`.
     - Modeled seller proceeds calculated via exact M4 fee functions (`calculate_seller_receives(bid, currency, validate_market_listing=False)`).
     - Quantitative Opportunity Scoring (0–100) and Confidence Scoring (0–100) based on explainable sub-score formulas.
-  - `src/sniper/notifications/`: Zero-cost, multi-channel notification infrastructure:
-    - `DiscordWebhookChannel`: Incoming webhooks with rich embeds, color coding, and character limit protection.
-    - `TelegramBotChannel`: Official Bot API `sendMessage` with safely escaped HTML formatting and retry-after handling.
-    - `EmailSmtpChannel`: Free standard-library SMTP with STARTTLS/SSL, dual MIME text/html parts, and personal Gmail App Password support.
-    - `MessengerChannel`: Documented compliance with Meta Platform Terms (`UNAVAILABLE — requires official Meta messaging setup and an active permitted messaging window`).
+  - `src/sniper/notifications/`: Zero-cost notification infrastructure (Discord + Telegram ONLY):
+    - `DiscordNotifier` / `DiscordWebhookChannel`: Incoming webhooks with rich embeds, color coding, and character limit protection.
+    - `TelegramNotifier` / `TelegramBotChannel`: Official Bot API `sendMessage` with safely escaped HTML formatting and retry-after handling.
     - Central secret redaction engine (`redact_secrets()`) preventing credential leakage across logs and databases.
     - `NotificationDispatcher`: Isolated delivery pipeline with per-channel failure tolerance and SQLite audit logging.
   - SQLite Migration 4 (`src/sniper/storage/migrations.py`): Adding `alert_events` and `notification_deliveries` tables with SHA256 fingerprint deduplication and configurable cooldown (default 30 min) with meaningful bid increase overrides.
-  - CLI Entry Point (`src/sniper/cli.py`): Subcommands `import-inventory`, `import-csv`, `import-json`, `scan-sell`, `test-notifications`, and `status`.
+  - CLI Entry Point (`src/sniper/cli.py`): Subcommands `import-inventory`, `import-csv`, `import-json`, `scan-sell`, `test-notification`, and `channel-status`.
 * **Acceptance Criteria:** Verified: High-bid alert generation with exact net proceeds, ghost order warnings, crossed-book suppression, and cooldown deduplication across 100% free notification transports.
 
 ### Milestone 6: BUY Engine + Listing Evaluator

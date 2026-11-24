@@ -20,11 +20,11 @@ from sniper.engine.sell_engine import SellEvaluationConfig, SellSniperEngine
 from sniper.notifications import (
     AlertPayload,
     DeliveryStatus,
+    DiscordNotifier,
     DiscordWebhookChannel,
-    EmailSmtpChannel,
-    MessengerChannel,
     NotificationDispatcher,
     TelegramBotChannel,
+    TelegramNotifier,
 )
 from sniper.storage.database import Database
 from sniper.storage.models import ItemRecord
@@ -252,13 +252,9 @@ async def cmd_test_notifications(args: argparse.Namespace) -> int:
     ch_filter = args.channel.lower() if args.channel else "all"
 
     if ch_filter in ("all", "discord"):
-        channels.append(DiscordWebhookChannel())
+        channels.append(DiscordNotifier())
     if ch_filter in ("all", "telegram"):
-        channels.append(TelegramBotChannel())
-    if ch_filter in ("all", "email"):
-        channels.append(EmailSmtpChannel())
-    if ch_filter in ("all", "messenger"):
-        channels.append(MessengerChannel())
+        channels.append(TelegramNotifier())
 
     dispatcher = NotificationDispatcher(channels=channels)
     print(f"Dispatching test alert across channel(s): {[c.channel_name for c in channels]}...\n")
@@ -266,11 +262,43 @@ async def cmd_test_notifications(args: argparse.Namespace) -> int:
     results = await dispatcher.dispatch(test_alert, only_configured=False)
 
     for ch_name, res in results.items():
-        symbol = "✅" if res.status == DeliveryStatus.DELIVERED else ("⚠️" if res.status in (DeliveryStatus.SKIPPED, DeliveryStatus.UNAVAILABLE) else "❌")
+        symbol = "✅" if res.status == DeliveryStatus.DELIVERED else ("⚠️" if res.status == DeliveryStatus.SKIPPED else "❌")
         print(f"{symbol} Channel: {ch_name:<12} Status: {res.status.value.upper()}")
         if res.last_error:
             print(f"   Details: {res.last_error}")
 
+    return 0
+
+
+def _print_channel_status() -> None:
+    """Print configured and enabled status for Discord and Telegram channels."""
+    print("\nNotification Transports Status (Discord + Telegram only):")
+    discord = DiscordNotifier()
+    telegram = TelegramNotifier()
+
+    if not discord.is_enabled:
+        disc_str = "Disabled (set DISCORD_ENABLED=true to enable)"
+    elif discord.is_configured:
+        disc_str = "Configured & Enabled"
+    else:
+        disc_str = "Not configured (set DISCORD_WEBHOOK_URL)"
+
+    if not telegram.is_enabled:
+        tg_str = "Disabled (set TELEGRAM_ENABLED=true to enable)"
+    elif telegram.is_configured:
+        tg_str = "Configured & Enabled"
+    else:
+        tg_str = "Not configured (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)"
+
+    print(f"  • Discord Webhook:     {disc_str}")
+    print(f"  • Telegram Bot:        {tg_str}")
+    print("\nNote: Telegram requires that you start the bot (@BotFather) or add it to your group before alerts can be delivered.")
+
+
+def cmd_channel_status(args: argparse.Namespace) -> int:
+    """Display notification channels configuration status without revealing secrets."""
+    print("=== CS2 Trading Sniper Notification Channels Status ===")
+    _print_channel_status()
     return 0
 
 
@@ -301,17 +329,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         finally:
             db.close()
 
-    print("\nNotification Transports Status:")
-    discord = DiscordWebhookChannel()
-    telegram = TelegramBotChannel()
-    email = EmailSmtpChannel()
-    messenger = MessengerChannel()
-
-    print(f"  • Discord Webhook:     {'Configured' if discord.is_configured else 'Not configured (set DISCORD_WEBHOOK_URL)'}")
-    print(f"  • Telegram Bot:        {'Configured' if telegram.is_configured else 'Not configured (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)'}")
-    print(f"  • Email SMTP:          {'Configured' if email.is_configured else 'Not configured (set SMTP_HOST and SMTP_TO_EMAIL)'}")
-    print(f"  • Facebook Messenger:  UNAVAILABLE (Meta 24h messaging window policy)")
-
+    _print_channel_status()
     return 0
 
 
@@ -352,12 +370,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--min-multiple", type=float, default=1.0, help="Minimum bid multiple over baseline")
     p_scan.add_argument("--no-notifications", action="store_true", help="Do not dispatch notifications")
 
-    # test-notifications
-    p_test = subparsers.add_parser("test-notifications", help="Send a test notification alert")
-    p_test.add_argument("--channel", choices=["all", "discord", "telegram", "email", "messenger"], default="all")
+    # test-notifications / test-notification
+    p_test = subparsers.add_parser(
+        "test-notifications",
+        aliases=["test-notification"],
+        help="Send a test notification alert to verify Discord or Telegram",
+    )
+    p_test.add_argument("--channel", choices=["all", "discord", "telegram"], default="all")
 
-    # status
-    p_stat = subparsers.add_parser("status", help="Show system and database status")
+    # status / channel-status
+    p_stat = subparsers.add_parser(
+        "status",
+        aliases=["channel-status"],
+        help="Show system, database, and notification channel status",
+    )
     p_stat.add_argument("--db", default=get_default_db_path(), help="Database path")
 
     return parser
@@ -380,9 +406,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_import_json(args)
     elif args.subcommand == "scan-sell":
         return asyncio.run(cmd_scan_sell(args))
-    elif args.subcommand == "test-notifications":
+    elif args.subcommand in ("test-notifications", "test-notification"):
         return asyncio.run(cmd_test_notifications(args))
-    elif args.subcommand == "status":
+    elif args.subcommand in ("status", "channel-status"):
         return cmd_status(args)
     else:
         parser.print_help()

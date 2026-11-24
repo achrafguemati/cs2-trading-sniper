@@ -55,11 +55,21 @@ class TestCli(unittest.TestCase):
             self.assertIn("Schema Version:        v4", output)
             self.assertIn("Discord Webhook", output)
             self.assertIn("Telegram Bot", output)
-            self.assertIn("Email SMTP", output)
-            self.assertIn("Facebook Messenger:  UNAVAILABLE", output)
+            self.assertNotIn("Email SMTP", output)
+            self.assertNotIn("Messenger", output)
+
+    def test_cli_channel_status(self) -> None:
+        """Verify channel-status alias displays notification channels status."""
+        with patch("sys.stdout", new_callable=io.StringIO) as mock_out:
+            code = main(["channel-status", "--db", self.db_path])
+            self.assertEqual(code, 0)
+            output = mock_out.getvalue()
+            self.assertIn("Discord Webhook", output)
+            self.assertIn("Telegram Bot", output)
+            self.assertNotIn("Email SMTP", output)
 
     def test_cli_test_notifications(self) -> None:
-        """Verify test-notifications runs across all channels."""
+        """Verify test-notifications runs across discord and telegram channels."""
         with patch("sys.stdout", new_callable=io.StringIO) as mock_out:
             code = main(["test-notifications", "--channel", "all"])
             self.assertEqual(code, 0)
@@ -67,8 +77,17 @@ class TestCli(unittest.TestCase):
             self.assertIn("Dispatching test alert", output)
             self.assertIn("Channel: discord", output)
             self.assertIn("Channel: telegram", output)
-            self.assertIn("Channel: email", output)
-            self.assertIn("Channel: messenger", output)
+            self.assertNotIn("Channel: email", output)
+            self.assertNotIn("Channel: messenger", output)
+
+    def test_cli_test_notification_singular(self) -> None:
+        """Verify test-notification singular alias works for specific channel."""
+        with patch("sys.stdout", new_callable=io.StringIO) as mock_out:
+            code = main(["test-notification", "--channel", "discord"])
+            self.assertEqual(code, 0)
+            output = mock_out.getvalue()
+            self.assertIn("Channel: discord", output)
+            self.assertNotIn("Channel: telegram", output)
 
     def test_cli_import_csv(self) -> None:
         """Verify import-csv command parses local CSV file."""

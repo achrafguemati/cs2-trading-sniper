@@ -1,29 +1,27 @@
-"""Multi-channel notification infrastructure for CS2 Trading Sniper."""
+"""Multi-channel notification infrastructure for CS2 Trading Sniper (Discord + Telegram only)."""
 
-from sniper.notifications.base import BaseNotificationChannel, redact_secrets
-from sniper.notifications.discord import DiscordWebhookChannel
+from sniper.notifications.base import BaseNotificationChannel, BaseNotifier, redact_secrets
+from sniper.notifications.discord import DiscordNotifier, DiscordWebhookChannel
 from sniper.notifications.dispatcher import NotificationDispatcher
-from sniper.notifications.email import EmailConfig, EmailSmtpChannel
-from sniper.notifications.messenger import MessengerChannel
 from sniper.notifications.models import (
     AlertPayload,
     ChannelType,
     DeliveryStatus,
     NotificationResult,
 )
-from sniper.notifications.telegram import TelegramBotChannel
+from sniper.notifications.telegram import TelegramBotChannel, TelegramNotifier
 
 __all__ = [
     "AlertPayload",
     "BaseNotificationChannel",
+    "BaseNotifier",
     "ChannelType",
     "DeliveryStatus",
+    "DiscordNotifier",
     "DiscordWebhookChannel",
-    "EmailConfig",
-    "EmailSmtpChannel",
-    "MessengerChannel",
     "NotificationDispatcher",
     "NotificationResult",
     "TelegramBotChannel",
+    "TelegramNotifier",
     "redact_secrets",
 ]

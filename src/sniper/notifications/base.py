@@ -60,13 +60,13 @@ def redact_secrets(text: str, custom_secrets: Sequence[str] | None = None) -> st
     return redacted
 
 
-class BaseNotificationChannel(ABC):
-    """Abstract base class for notification channels."""
+class BaseNotifier(ABC):
+    """Abstract base interface for notification channels (Discord and Telegram)."""
 
     @property
     @abstractmethod
     def channel_name(self) -> str:
-        """Channel identifier string (e.g. 'discord', 'telegram', 'email', 'messenger')."""
+        """Channel identifier string (e.g. 'discord', 'telegram')."""
         ...
 
     @property
@@ -75,6 +75,11 @@ class BaseNotificationChannel(ABC):
         """Return True if this channel has valid configuration credentials."""
         ...
 
+    @property
+    def is_enabled(self) -> bool:
+        """Return True if this channel is enabled for alert delivery."""
+        return True
+
     @abstractmethod
     async def send(self, alert: AlertPayload) -> NotificationResult:
         """Format and dispatch an alert to this notification channel.
@@ -82,3 +87,7 @@ class BaseNotificationChannel(ABC):
         Must never raise unhandled network exceptions; return NotificationResult with status and error.
         """
         ...
+
+
+# Backwards compatibility alias
+BaseNotificationChannel = BaseNotifier

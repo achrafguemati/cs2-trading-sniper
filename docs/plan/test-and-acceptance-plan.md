@@ -20,7 +20,7 @@ Every module must achieve high test coverage before milestone completion:
 | **`test_ratelimit.py`** | Token bucket & circuit breaker | Max requests per minute pacing, jitter delay distribution, 300s sleep trigger on HTTP 429/403, canary recovery test. |
 | **`test_inventory.py`** | Public & manual inventory | Marketable flag filtering (`marketable == 1`), 7-day restriction parsing, SteamID64 format validation, pagination bounds, CSV/JSON manual inventory import with row-level error reporting. |
 | **`test_sell_engine.py`** | SELL opportunity scoring & baseline | Strict identity provenance gate, historical buy-order median baseline, crossed-book suppression, single-item top bid tagging, opportunity/confidence scoring algorithms, cooldown overrides on >=5% bid increase. |
-| **`test_notifications.py`** | Free multi-channel notifications | Discord rich embed formatting & limits, Telegram safe HTML escaping, standard-library SMTP dual MIME text/html, Messenger unavailable status, channel failure isolation, 429 rate limit backoff, secret redaction. |
+| **`test_notifications.py`** | Free notifications (Discord & Telegram) | Discord rich embed formatting & limits, Telegram safe HTML escaping, channel failure isolation, 429 rate limit backoff, secret redaction, independent channel enable/disable. |
 | **`test_storage_m5.py`** | Migration 4 & Alert Persistence | Migration 4 upgrade from V3, rollback to V3, alert deduplication, cooldown query logic, delivery tracking. |
 
 ---
