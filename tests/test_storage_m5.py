@@ -144,7 +144,7 @@ class TestStorageM5(unittest.TestCase):
     def test_is_in_cooldown_semantics(self) -> None:
         """Verify cooldown suppression and meaningful bid increase override."""
         base_time = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)
-        self.alert_repo.record_alert(AlertEventRecord(
+        alert = self.alert_repo.record_alert(AlertEventRecord(
             item_id=self.item.item_id,
             currency_id=1,
             alert_type="sell_target_bid",
@@ -160,6 +160,14 @@ class TestStorageM5(unittest.TestCase):
             confidence_score=70.0,
             warning_tags="[]",
             status="Candidate",
+            created_at=base_time.isoformat(),
+        ))
+        self.alert_repo.record_delivery(NotificationDeliveryRecord(
+            alert_id=alert.alert_id,
+            channel="discord",
+            status="delivered",
+            attempts=1,
+            delivered_at=base_time.isoformat(),
             created_at=base_time.isoformat(),
         ))
 

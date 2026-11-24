@@ -12,6 +12,11 @@ from pathlib import Path
 import sys
 from typing import Sequence
 
+from dotenv import load_dotenv
+
+# Load local .env early without overriding existing process environment variables
+load_dotenv(override=False)
+
 from sniper.core.http_client import ReadOnlyHttpClient
 from sniper.adapters.inventory import ManualInventoryImporter, PublicInventoryClient, validate_steamid64
 from sniper.adapters.steam_market import SteamMarketAdapter
@@ -65,27 +70,26 @@ async def cmd_import_inventory(args: argparse.Namespace) -> int:
         return 1
 
     db = init_database(args.db)
-    http_client = ReadOnlyHttpClient()
-    client = PublicInventoryClient(http_client=http_client, db=db)
-
-    print(f"Fetching public inventory for SteamID64: {steamid64}...")
     try:
-        snapshot, items = await client.fetch_and_import(
-            steamid64=steamid64,
-            count=args.count,
-            max_pages=args.max_pages,
-        )
-        marketable_count = sum(1 for i in items if i.is_marketable)
-        restricted_count = len(items) - marketable_count
+        async with ReadOnlyHttpClient() as http_client:
+            client = PublicInventoryClient(http_client=http_client, db=db)
+            print(f"Fetching public inventory for SteamID64: {steamid64}...")
+            snapshot, items = await client.fetch_and_import(
+                steamid64=steamid64,
+                count=args.count,
+                max_pages=args.max_pages,
+            )
+            marketable_count = sum(1 for i in items if i.is_marketable)
+            restricted_count = len(items) - marketable_count
 
-        print("\n=== Public Inventory Import Succeeded ===")
-        print(f"Snapshot ID:       {snapshot.snapshot_id}")
-        print(f"Owner ID:          {snapshot.owner_id}")
-        print(f"Total Items:       {len(items)}")
-        print(f"Marketable:        {marketable_count}")
-        print(f"Restricted:        {restricted_count}")
-        print(f"Observed At:       {snapshot.observed_at}")
-        return 0
+            print("\n=== Public Inventory Import Succeeded ===")
+            print(f"Snapshot ID:       {snapshot.snapshot_id}")
+            print(f"Owner ID:          {snapshot.owner_id}")
+            print(f"Total Items:       {len(items)}")
+            print(f"Marketable:        {marketable_count}")
+            print(f"Restricted:        {restricted_count}")
+            print(f"Observed At:       {snapshot.observed_at}")
+            return 0
     except Exception as exc:
         print(f"Failed to fetch public inventory: {exc}", file=sys.stderr)
         return 1
@@ -164,62 +168,62 @@ def cmd_import_json(args: argparse.Namespace) -> int:
 async def cmd_scan_sell(args: argparse.Namespace) -> int:
     """Scan marketable inventory items for profitable SELL opportunities."""
     db = init_database(args.db)
-    http_client = ReadOnlyHttpClient()
-    market_adapter = SteamMarketAdapter(http_client=http_client)
-    identity_service = ItemIdentityService(db)
-    dispatcher = NotificationDispatcher.from_database(db)
-
-    config = SellEvaluationConfig(
-        currency_id=args.currency_id,
-        min_bid_minor=args.min_bid_cents,
-        min_bid_multiple=args.min_multiple,
-    )
-
-    engine = SellSniperEngine(
-        db=db,
-        market_adapter=market_adapter,
-        identity_service=identity_service,
-        dispatcher=dispatcher,
-        config=config,
-    )
-
-    print("Running SELL opportunity scan across marketable inventory items...")
     try:
-        evaluations = await engine.scan_inventory(
-            snapshot_id=args.snapshot_id,
-            owner_id=args.owner_id,
-            dispatch_notifications=not args.no_notifications,
-        )
+        async with ReadOnlyHttpClient() as http_client:
+            market_adapter = SteamMarketAdapter(http_client=http_client)
+            identity_service = ItemIdentityService(db)
+            dispatcher = NotificationDispatcher.from_database(db)
 
-        print(f"\nEvaluated {len(evaluations)} unique items:\n")
-        print(f"{'Item Name':<40} {'Gross Bid':<12} {'Seller Net':<12} {'Mult':<8} {'Score':<8} {'Conf':<8} {'Status':<25}")
-        print("-" * 115)
+            config = SellEvaluationConfig(
+                currency_id=args.currency_id,
+                min_bid_minor=args.min_bid_cents,
+                min_bid_multiple=args.min_multiple,
+            )
 
-        actionable_count = 0
-        for ev in evaluations:
-            gross_str = f"{ev.currency_symbol}{ev.highest_buy_order_minor / 100:.2f}" if ev.highest_buy_order_minor else "N/A"
-            net_str = f"{ev.currency_symbol}{ev.modeled_seller_receives_minor / 100:.2f}" if ev.modeled_seller_receives_minor else "N/A"
-            mult_str = f"{ev.bid_multiple:.2f}x" if ev.bid_multiple else "N/A"
-            score_str = f"{ev.opportunity_score:.1f}"
-            conf_str = f"{ev.confidence_score:.1f}"
+            engine = SellSniperEngine(
+                db=db,
+                market_adapter=market_adapter,
+                identity_service=identity_service,
+                dispatcher=dispatcher,
+                config=config,
+            )
 
-            name_trunc = ev.market_hash_name[:38]
-            status_trunc = ev.status[:24]
+            print("Running SELL opportunity scan across marketable inventory items...")
+            evaluations = await engine.scan_inventory(
+                snapshot_id=args.snapshot_id,
+                owner_id=args.owner_id,
+                dispatch_notifications=not args.no_notifications,
+            )
 
-            print(f"{name_trunc:<40} {gross_str:<12} {net_str:<12} {mult_str:<8} {score_str:<8} {conf_str:<8} {status_trunc:<25}")
+            print(f"\nEvaluated {len(evaluations)} unique items:\n")
+            print(f"{'Item Name':<40} {'Gross Bid':<12} {'Seller Net':<12} {'Mult':<8} {'Score':<8} {'Conf':<8} {'Status':<25}")
+            print("-" * 115)
 
-            if ev.warning_tags:
-                print(f"    Tags: {', '.join(ev.warning_tags)}")
-            if ev.delivery_results:
-                deliveries = [f"{ch}: {r.status.value}" for ch, r in ev.delivery_results.items()]
-                print(f"    Notifications: {', '.join(deliveries)}")
+            actionable_count = 0
+            for ev in evaluations:
+                gross_str = f"{ev.currency_symbol}{ev.highest_buy_order_minor / 100:.2f}" if ev.highest_buy_order_minor else "N/A"
+                net_str = f"{ev.currency_symbol}{ev.modeled_seller_receives_minor / 100:.2f}" if ev.modeled_seller_receives_minor else "N/A"
+                mult_str = f"{ev.bid_multiple:.2f}x" if ev.bid_multiple else "N/A"
+                score_str = f"{ev.opportunity_score:.1f}"
+                conf_str = f"{ev.confidence_score:.1f}"
 
-            if ev.is_actionable:
-                actionable_count += 1
+                name_trunc = ev.market_hash_name[:38]
+                status_trunc = ev.status[:24]
 
-        print("-" * 115)
-        print(f"Total Evaluated: {len(evaluations)} | Actionable Signals: {actionable_count}")
-        return 0
+                print(f"{name_trunc:<40} {gross_str:<12} {net_str:<12} {mult_str:<8} {score_str:<8} {conf_str:<8} {status_trunc:<25}")
+
+                if ev.warning_tags:
+                    print(f"    Tags: {', '.join(ev.warning_tags)}")
+                if ev.delivery_results:
+                    deliveries = [f"{ch}: {r.status.value}" for ch, r in ev.delivery_results.items()]
+                    print(f"    Notifications: {', '.join(deliveries)}")
+
+                if ev.is_actionable:
+                    actionable_count += 1
+
+            print("-" * 115)
+            print(f"Total Evaluated: {len(evaluations)} | Actionable Signals: {actionable_count}")
+            return 0
     finally:
         db.close()
 

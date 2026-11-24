@@ -74,6 +74,14 @@ See the complete rules in [AGENTS.md](AGENTS.md).
   - Complete credential redaction (`redact_secrets()`) preventing secret leakage into database records, logs, or exception traces.
   - Database schema Migration 4 adding `alert_events` and `notification_deliveries` tables with fingerprint deduplication and cooldown controls.
   - CLI command-line interface (`src/sniper/cli.py`) supporting `import-inventory`, `import-csv`, `import-json`, `scan-sell`, `test-notification`, and `channel-status`.
+- **Milestone 5.1 (Critical Hardening & Reliability Fixes):**
+  - Strict Steam inventory description matching: matched exclusively by `(classid, instanceid)` tuple, removing all ambiguous classid-only fallbacks, and marking unmatched assets as unknown, non-marketable, and non-tradable.
+  - Fail-closed public inventory pagination: raises `PublicInventoryError` and rolls back transactions on page failures, private inventories, missing cursors, or repeated cursors; validates pagination limits (`count` 1..5000, `max_pages` 1..50, `max_items` 1..50000); legitimately empty inventories produce empty snapshots cleanly.
+  - Hardened manual CSV/JSON marketability validation: strict boolean parsing with fail-closed `False` defaults on missing values, rejecting ambiguous strings (`'maybe'`, `'unknown'`, `'2'`) and invalid restriction days with row-level errors.
+  - Un-fabricated buy depth: removed artificial fallback defaults (`or 1`); missing or zero orderbook depth tags `BUY DEPTH UNAVAILABLE` and suppresses actionable notifications; opportunity scoring assigns 0.0 to depth when missing.
+  - Per-channel delivery-aware cooldown: cooldown references actual successful deliveries (`status = 'delivered'`) per channel in `notification_deliveries`; intervening non-actionable or suppressed observations do not alter the cooldown reference timestamp or reference bid; supports short failure retry backoff (default 60s, max 3 retries) with channel independence.
+  - Actionable status alignment: `High-confidence signal` and `Candidate` are notification-eligible; `Needs verification` is suppressed by default unless explicitly configured.
+  - Local environment loading: integrates `python-dotenv` with `override=False` to preserve existing process environment variables while loading `.env` on Windows and Linux; ensures clean HTTP client lifecycle management via `ReadOnlyHttpClient.aclose()`.
 
 ---
 

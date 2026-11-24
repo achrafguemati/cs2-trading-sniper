@@ -146,6 +146,25 @@
   - CLI Entry Point (`src/sniper/cli.py`): Subcommands `import-inventory`, `import-csv`, `import-json`, `scan-sell`, `test-notification`, and `channel-status`.
 * **Acceptance Criteria:** Verified: High-bid alert generation with exact net proceeds, ghost order warnings, crossed-book suppression, and cooldown deduplication across 100% free notification transports.
 
+### Milestone 5.1: Critical Hardening & Reliability Fixes (COMPLETED)
+* **Status:** Complete & Verified.
+* **Deliverables:**
+  - `src/sniper/adapters/inventory.py`:
+    - Strict `(classid, instanceid)` matching for public Steam inventory descriptions, eliminating ambiguous `classid`-only fallbacks.
+    - Fail-closed error handling: raises `PublicInventoryError` and rolls back database transactions on partial pagination failures, missing/repeated cursors, or non-success Steam responses.
+    - Strict manual CSV/JSON validation: fail-closed boolean parsing (`False` on missing), rejection of ambiguous strings (`'maybe'`, `'unknown'`, `'2'`) and negative/non-integer restriction days.
+  - `src/sniper/engine/sell_engine.py`:
+    - Removal of fabricated depth fallbacks (`or 1` removed); tagging `BUY DEPTH UNAVAILABLE` and suppressing actionable alerts when depth is missing or $\le 0$.
+    - Actionable status alignment: `High-confidence signal` and `Candidate` are notification-eligible; `Needs verification` is non-actionable by default unless configured.
+  - `src/sniper/storage/repositories.py` & `src/sniper/notifications/dispatcher.py`:
+    - Per-channel delivery-aware cooldown anchored to `notification_deliveries` (`status = 'delivered'`).
+    - Reference bid and timestamp derived exclusively from successful deliveries, preventing intervening non-actionable evaluations from resetting cooldown.
+    - Independent failure retry backoff (default 60s, max 3 retries) and credential redaction across error logs.
+  - `src/sniper/cli.py` & `src/sniper/core/http_client.py`:
+    - Local `.env` loading via `python-dotenv` with `override=False`.
+    - Explicit asynchronous resource closing via `ReadOnlyHttpClient.aclose()`.
+* **Acceptance Criteria:** Verified: All edge cases covered by deterministic offline regression tests; 100% test pass without live network dependencies.
+
 ### Milestone 6: BUY Engine + Listing Evaluator
 * **Deliverables:**
   - Listing-level parser extracting listing ID, asset ID, price, and stickers.

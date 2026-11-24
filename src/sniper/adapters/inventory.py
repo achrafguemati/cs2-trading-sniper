@@ -37,6 +37,10 @@ def validate_steamid64(steamid64: str) -> str:
     return clean_id
 
 
+class PublicInventoryError(RuntimeError):
+    """Raised when public Steam inventory fetching fails or returns incomplete data."""
+
+
 class PublicInventoryClient:
     """Fetches public CS2 inventories via Steam's read-only inventory endpoint."""
 
@@ -54,21 +58,28 @@ class PublicInventoryClient:
     ) -> tuple[InventorySnapshotRecord, list[InventoryItemRecord]]:
         """Fetch a public CS2 inventory and import the snapshot into the local database.
 
-        Handles pagination via more_items and last_assetid bounds.
-        Correlates assets and descriptions via exact (classid, instanceid) key.
+        Fails closed on unsuccessful, partial, or truncated pagination sequences.
+        Correlates assets and descriptions strictly via exact (classid, instanceid) key.
         Distinguishes marketable (marketable == 1) vs restricted (marketable == 0) items.
         """
         valid_steamid = validate_steamid64(steamid64)
+        if count <= 0 or count > 5000:
+            raise ValueError(f"Invalid count {count}; must be between 1 and 5000.")
+        if max_pages <= 0 or max_pages > 50:
+            raise ValueError(f"Invalid max_pages {max_pages}; must be between 1 and 50.")
+        if max_items <= 0 or max_items > 50000:
+            raise ValueError(f"Invalid max_items {max_items}; must be between 1 and 50000.")
+
         repo = InventoryRepository(self._db)
 
         all_assets: list[Any] = []
         desc_map: dict[tuple[str, str], Any] = {}
-        desc_by_classid: dict[str, Any] = {}
 
         start_assetid: str | None = None
         pages_fetched = 0
+        pagination_completed = False
 
-        while pages_fetched < max_pages and len(all_assets) < max_items:
+        while pages_fetched < max_pages:
             pages_fetched += 1
             url = f"https://steamcommunity.com/inventory/{valid_steamid}/730/2?l={language}&count={count}"
             if start_assetid:
@@ -76,30 +87,68 @@ class PublicInventoryClient:
 
             logger.info("Fetching public inventory page %d for %s", pages_fetched, valid_steamid)
             resp = await self._http.get_json(url, schema=PublicInventoryResponse)
-            if not resp or not resp.success:
-                logger.warning("Steam returned unsuccessful response for inventory %s", valid_steamid)
-                break
+            if resp is None or not resp.success:
+                if pages_fetched == 1:
+                    logger.warning("Steam returned unsuccessful response for inventory %s", valid_steamid)
+                    raise PublicInventoryError(
+                        f"Steam returned unsuccessful response for inventory {valid_steamid}. "
+                        "Profile may be private, rate limited, or inventory unavailable."
+                    )
+                raise PublicInventoryError(
+                    f"Steam returned unsuccessful response on page {pages_fetched} for {valid_steamid}. "
+                    "Incomplete inventory import aborted."
+                )
 
-            # Index descriptions
+            # Index descriptions strictly by exact (classid, instanceid) tuple:
             for desc in resp.descriptions:
                 key = (str(desc.classid), str(desc.instanceid))
                 desc_map[key] = desc
-                desc_by_classid[str(desc.classid)] = desc
 
             all_assets.extend(resp.assets)
 
-            # Check pagination
+            # Check pagination completion:
             has_more = bool(resp.more_items)
-            if not has_more or not resp.last_assetid or resp.last_assetid == start_assetid:
+            if not has_more:
+                pagination_completed = True
                 break
+
+            # If Steam reports more items, validate pagination bounds and cursor:
+            if not resp.last_assetid:
+                raise PublicInventoryError(
+                    f"Missing last_assetid pagination cursor from Steam while more_items=True on page {pages_fetched}. "
+                    "Incomplete inventory import aborted."
+                )
+            if resp.last_assetid == start_assetid:
+                raise PublicInventoryError(
+                    f"Repeated last_assetid pagination cursor ('{resp.last_assetid}') detected from Steam on page {pages_fetched}. "
+                    "Incomplete inventory import aborted."
+                )
+            if len(all_assets) >= max_items:
+                raise PublicInventoryError(
+                    f"Inventory item limit reached ({len(all_assets)} >= max_items={max_items}) while Steam reports more items. "
+                    "Incomplete inventory import aborted."
+                )
+            if pages_fetched >= max_pages:
+                raise PublicInventoryError(
+                    f"Pagination page limit reached ({pages_fetched} >= max_pages={max_pages}) while Steam reports more items. "
+                    "Incomplete inventory import aborted."
+                )
+
             start_assetid = str(resp.last_assetid)
+
+        if not pagination_completed:
+            raise PublicInventoryError(
+                f"Public inventory pagination did not complete successfully for {valid_steamid}. "
+                "Incomplete inventory import aborted."
+            )
 
         # Build inventory item records
         item_records: list[InventoryItemRecord] = []
         for asset in all_assets[:max_items]:
             cid = str(asset.classid)
             iid = str(asset.instanceid)
-            desc = desc_map.get((cid, iid)) or desc_by_classid.get(cid)
+            # Match descriptions exclusively by exact (classid, instanceid) key:
+            desc = desc_map.get((cid, iid))
 
             if desc is not None:
                 market_hash_name = desc.market_hash_name
@@ -107,7 +156,8 @@ class PublicInventoryClient:
                 is_tradable = bool(desc.tradable == 1 or desc.tradable is True)
                 restriction_days = desc.market_marketable_restriction
             else:
-                market_hash_name = f"Unknown Item (classid={cid})"
+                # Missing exact description: preserve asset as unknown, mark non-marketable & non-tradable
+                market_hash_name = f"Unknown Item (classid={cid}, instanceid={iid})"
                 is_marketable = False
                 is_tradable = False
                 restriction_days = None
@@ -146,20 +196,79 @@ class PublicInventoryClient:
 
 
 class ManualInventoryImporter:
-    """Parses and imports manual CSV and JSON inventories for private Steam profiles."""
+    """Parses and imports manual CSV and JSON inventories for private Steam profiles.
 
-    @staticmethod
-    def _parse_bool(val: Any, default: bool = True) -> bool:
+    Accepted boolean representations for marketable / tradable flags:
+      - True values:  True (bool), 'true', '1', 'yes', 'y' (case-insensitive)
+      - False values: False (bool), 'false', '0', 'no', 'n' (case-insensitive)
+
+    Fail-closed semantics:
+      - Missing or empty marketable / tradable fields fail closed to False (non-marketable / non-tradable).
+      - Invalid explicit values (e.g. 'maybe', 'unknown', '2') produce row-level validation errors.
+      - Negative or non-integer restriction days produce row-level validation errors.
+    """
+
+    ACCEPTED_BOOLEAN_TRUE = frozenset({"true", "1", "yes", "y"})
+    ACCEPTED_BOOLEAN_FALSE = frozenset({"false", "0", "no", "n"})
+
+    @classmethod
+    def _parse_strict_bool(
+        cls,
+        val: Any,
+        field_name: str,
+        row_label: str,
+    ) -> tuple[bool, str | None]:
+        """Parse boolean flag strictly with fail-closed semantics."""
         if val is None or val == "":
-            return default
+            return False, None
         if isinstance(val, bool):
-            return val
+            return val, None
+        if isinstance(val, (int, float)):
+            if val == 1:
+                return True, None
+            if val == 0:
+                return False, None
+            return False, (
+                f"{row_label}: Invalid {field_name} value '{val}'. "
+                "Accepted boolean values are: true, false, 1, 0, yes, no, y, n."
+            )
         s = str(val).strip().lower()
-        if s in ("1", "true", "yes", "y"):
-            return True
-        if s in ("0", "false", "no", "n"):
-            return False
-        return default
+        if s in cls.ACCEPTED_BOOLEAN_TRUE:
+            return True, None
+        if s in cls.ACCEPTED_BOOLEAN_FALSE:
+            return False, None
+        return False, (
+            f"{row_label}: Invalid {field_name} value '{val}'. "
+            "Accepted boolean values are: true, false, 1, 0, yes, no, y, n."
+        )
+
+    @classmethod
+    def _parse_restriction_days(
+        cls,
+        raw_restr: Any,
+        row_label: str,
+    ) -> tuple[int | None, str | None]:
+        """Parse market restriction days, requiring non-negative integer or None."""
+        if raw_restr is None or raw_restr == "":
+            return None, None
+        if isinstance(raw_restr, bool):
+            return None, (
+                f"{row_label}: Invalid market_restriction_days '{raw_restr}'. "
+                "Must be a non-negative integer."
+            )
+        try:
+            days = int(raw_restr)
+            if days < 0:
+                return None, (
+                    f"{row_label}: Invalid negative market_restriction_days '{raw_restr}'. "
+                    "Must be a non-negative integer."
+                )
+            return days, None
+        except (ValueError, TypeError):
+            return None, (
+                f"{row_label}: Invalid non-integer market_restriction_days '{raw_restr}'. "
+                "Must be a non-negative integer."
+            )
 
     @classmethod
     def import_csv(
@@ -215,9 +324,10 @@ class ManualInventoryImporter:
         row_num = 1  # 1 is header row
         for row in reader:
             row_num += 1
+            row_label = f"Row {row_num}"
             raw_name = get_val(row, "market_hash_name", "name", "item", "item_name")
             if not raw_name:
-                errors.append(f"Row {row_num}: Missing or empty market_hash_name.")
+                errors.append(f"{row_label}: Missing or empty market_hash_name.")
                 continue
 
             raw_amount = get_val(row, "amount", "quantity", "count", "qty")
@@ -226,28 +336,32 @@ class ManualInventoryImporter:
                 try:
                     amount = int(raw_amount)
                     if amount <= 0:
-                        errors.append(f"Row {row_num}: Amount must be a positive integer, got {amount}.")
+                        errors.append(f"{row_label}: Amount must be a positive integer, got {amount}.")
                         continue
                 except ValueError:
-                    errors.append(f"Row {row_num}: Invalid non-integer amount '{raw_amount}'.")
+                    errors.append(f"{row_label}: Invalid non-integer amount '{raw_amount}'.")
                     continue
 
             raw_asset_id = get_val(row, "asset_id", "id", "assetid")
             asset_id = raw_asset_id if raw_asset_id else f"manual_{uuid.uuid4().hex[:12]}"
 
             raw_marketable = get_val(row, "is_marketable", "marketable")
-            is_marketable = cls._parse_bool(raw_marketable, default=True)
+            is_marketable, m_err = cls._parse_strict_bool(raw_marketable, "marketable", row_label)
+            if m_err is not None:
+                errors.append(m_err)
+                continue
 
             raw_tradable = get_val(row, "is_tradable", "tradable")
-            is_tradable = cls._parse_bool(raw_tradable, default=True)
+            is_tradable, t_err = cls._parse_strict_bool(raw_tradable, "tradable", row_label)
+            if t_err is not None:
+                errors.append(t_err)
+                continue
 
             raw_restr = get_val(row, "market_restriction_days", "restriction_days")
-            restr_days = None
-            if raw_restr is not None:
-                try:
-                    restr_days = int(raw_restr)
-                except ValueError:
-                    restr_days = None
+            restr_days, r_err = cls._parse_restriction_days(raw_restr, row_label)
+            if r_err is not None:
+                errors.append(r_err)
+                continue
 
             record = InventoryItemRecord(
                 snapshot_id=0,
@@ -317,13 +431,14 @@ class ManualInventoryImporter:
         errors: list[str] = []
 
         for idx, item in enumerate(raw_items, start=1):
+            row_label = f"Item #{idx}"
             if not isinstance(item, dict):
-                errors.append(f"Item #{idx}: Expected a JSON object, got {type(item).__name__}.")
+                errors.append(f"{row_label}: Expected a JSON object, got {type(item).__name__}.")
                 continue
 
             name = item.get("market_hash_name") or item.get("name") or item.get("item")
             if not name or not str(name).strip():
-                errors.append(f"Item #{idx}: Missing or empty market_hash_name.")
+                errors.append(f"{row_label}: Missing or empty market_hash_name.")
                 continue
 
             raw_amount = item.get("amount")
@@ -336,23 +451,37 @@ class ManualInventoryImporter:
             try:
                 amount = int(raw_amount)
                 if amount <= 0:
-                    errors.append(f"Item #{idx}: Amount must be a positive integer, got {amount}.")
+                    errors.append(f"{row_label}: Amount must be a positive integer, got {amount}.")
                     continue
             except (ValueError, TypeError):
-                errors.append(f"Item #{idx}: Invalid non-integer amount '{raw_amount}'.")
+                errors.append(f"{row_label}: Invalid non-integer amount '{raw_amount}'.")
                 continue
 
             asset_id = str(item.get("asset_id") or item.get("id") or f"manual_{uuid.uuid4().hex[:12]}")
-            is_marketable = cls._parse_bool(item.get("is_marketable", item.get("marketable")), default=True)
-            is_tradable = cls._parse_bool(item.get("is_tradable", item.get("tradable")), default=True)
 
-            raw_restr = item.get("market_restriction_days", item.get("restriction_days"))
-            restr_days = None
-            if raw_restr is not None:
-                try:
-                    restr_days = int(raw_restr)
-                except (ValueError, TypeError):
-                    restr_days = None
+            raw_marketable = item.get("is_marketable")
+            if raw_marketable is None:
+                raw_marketable = item.get("marketable")
+            is_marketable, m_err = cls._parse_strict_bool(raw_marketable, "marketable", row_label)
+            if m_err is not None:
+                errors.append(m_err)
+                continue
+
+            raw_tradable = item.get("is_tradable")
+            if raw_tradable is None:
+                raw_tradable = item.get("tradable")
+            is_tradable, t_err = cls._parse_strict_bool(raw_tradable, "tradable", row_label)
+            if t_err is not None:
+                errors.append(t_err)
+                continue
+
+            raw_restr = item.get("market_restriction_days")
+            if raw_restr is None:
+                raw_restr = item.get("restriction_days")
+            restr_days, r_err = cls._parse_restriction_days(raw_restr, row_label)
+            if r_err is not None:
+                errors.append(r_err)
+                continue
 
             record = InventoryItemRecord(
                 snapshot_id=0,

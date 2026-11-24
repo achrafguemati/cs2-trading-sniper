@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 def calculate_sell_opportunity_score(
     bid_multiple: float | None,
-    top_level_buy_quantity: int,
+    top_level_buy_quantity: int | None = None,
     data_age_seconds: float = 0.0,
     is_crossed_book: bool = False,
 ) -> float:
@@ -60,11 +60,13 @@ def calculate_sell_opportunity_score(
     else:
         s_gain = max(0.0, min(100.0, math.floor((bid_multiple - 1.0) * 100.0)))
 
-    if top_level_buy_quantity >= 5:
+    qty = top_level_buy_quantity if (top_level_buy_quantity is not None and top_level_buy_quantity > 0) else 0
+
+    if qty >= 5:
         s_depth = 100.0
-    elif top_level_buy_quantity >= 2:
+    elif qty >= 2:
         s_depth = 70.0
-    elif top_level_buy_quantity == 1:
+    elif qty == 1:
         s_depth = 35.0
     else:
         s_depth = 0.0
@@ -76,7 +78,7 @@ def calculate_sell_opportunity_score(
     if is_crossed_book:
         penalties += 50.0
 
-    if bid_multiple is not None and bid_multiple > 2.5 and top_level_buy_quantity == 1:
+    if bid_multiple is not None and bid_multiple > 2.5 and qty == 1:
         penalties += 35.0
 
     final_score = max(0.0, min(100.0, raw_score - penalties))
@@ -126,6 +128,13 @@ class SellEvaluationConfig:
     max_data_age_seconds: int = 86400 * 30
     cooldown_seconds: int = 1800
     meaningful_bid_increase_pct: float = 0.05
+    failed_retry_backoff_seconds: int = 60
+    max_delivery_retries: int = 3
+    min_candidate_opp_score: float = 50.0
+    min_candidate_conf_score: float = 60.0
+    min_high_confidence_opp_score: float = 75.0
+    min_high_confidence_conf_score: float = 80.0
+    allow_needs_verification_dispatch: bool = False
     currency_id: int = 1
 
 
@@ -289,8 +298,8 @@ class SellSniperEngine:
 
         highest_bid = histogram.highest_buy_order_minor
         lowest_ask = histogram.lowest_sell_order_minor
-        top_qty = histogram.top_level_buy_quantity or 1
-        cum_qty = histogram.cumulative_buy_quantity or top_qty
+        top_qty = histogram.top_level_buy_quantity
+        cum_qty = histogram.cumulative_buy_quantity
 
         if highest_bid is None:
             return SellCandidateEvaluation(
@@ -317,11 +326,13 @@ class SellSniperEngine:
         is_actionable = True
         baseline: int | None = None
         bid_multiple: float | None = None
+        suppression_reason: str | None = None
 
         if len(historical_bids) < self._config.min_historical_samples:
             warning_tags.append("DATA INSUFFICIENT")
             status = "Data insufficient"
             is_actionable = False
+            suppression_reason = "Insufficient historical orderbook observations for baseline."
         else:
             baseline = int(statistics.median_low(historical_bids))
             if baseline > 0:
@@ -336,9 +347,16 @@ class SellSniperEngine:
             warning_tags.append("INCONSISTENT SNAPSHOT / CROSSED BOOK")
             status = "Crossed book"
             is_actionable = False
+            suppression_reason = "Orderbook book is crossed (highest bid >= lowest ask)."
 
-        # 7. Single-Item Top Bid
-        if top_qty == 1:
+        # 7. Buy Depth Verification (no fabrication)
+        if top_qty is None or top_qty <= 0:
+            warning_tags.append("BUY DEPTH UNAVAILABLE")
+            if is_actionable:
+                status = "Buy depth unavailable"
+                is_actionable = False
+                suppression_reason = "Orderbook buy depth is zero or unavailable."
+        elif top_qty == 1:
             warning_tags.append("Single-Item Top Bid")
 
         # 8. Unverified High Bid
@@ -370,44 +388,79 @@ class SellSniperEngine:
             is_crossed_book=is_crossed,
         )
 
-        # 11. Status Label assignment
+        # 11. Status Label assignment and notification eligibility gating
         if is_actionable:
             if highest_bid < self._config.min_bid_minor:
                 status = "Below minimum bid"
                 is_actionable = False
+                suppression_reason = "Highest buy order is below minimum configured bid."
             elif bid_multiple is not None and bid_multiple < self._config.min_bid_multiple:
                 status = "Below target multiple"
                 is_actionable = False
-            elif opp_score >= 75.0 and conf_score >= 80.0:
+                suppression_reason = "Bid multiple is below target multiple over baseline."
+            elif (
+                opp_score >= self._config.min_high_confidence_opp_score
+                and conf_score >= self._config.min_high_confidence_conf_score
+            ):
                 status = "High-confidence signal"
-            elif opp_score >= 50.0 and conf_score >= 60.0:
+            elif (
+                opp_score >= self._config.min_candidate_opp_score
+                and conf_score >= self._config.min_candidate_conf_score
+            ):
                 status = "Candidate"
             else:
                 status = "Needs verification"
+                if not self._config.allow_needs_verification_dispatch:
+                    is_actionable = False
+                    suppression_reason = (
+                        f"Opportunity score ({opp_score:.1f}) or confidence score ({conf_score:.1f}) "
+                        "below candidate thresholds; requires manual verification."
+                    )
 
         # 12. Alert Fingerprinting & Cooldown Check
         fingerprint = hashlib.sha256(
             f"{item_id}:{self._config.currency_id}:sell_target_bid:{highest_bid}".encode()
         ).hexdigest()
 
-        suppression_reason: str | None = None
         delivery_results: dict[str, NotificationResult] = {}
         alert_id: int | None = None
 
-        if is_actionable:
-            in_cooldown = self._alert_repo.is_in_cooldown(
-                item_id=item_id if item_id is not None else 0,
-                currency_id=self._config.currency_id,
-                alert_type="sell_target_bid",
-                cooldown_seconds=self._config.cooldown_seconds,
-                new_bid_minor=highest_bid,
-                meaningful_increase_pct=self._config.meaningful_bid_increase_pct,
-            )
+        if is_actionable and self._dispatcher is not None and self._alert_repo is not None and item_id is not None:
+            configured_enabled = [
+                ch for ch in self._dispatcher.channels
+                if ch.is_configured and getattr(ch, "is_enabled", True)
+            ]
+            if configured_enabled:
+                all_in_cooldown = True
+                for ch in configured_enabled:
+                    ch_cd = self._alert_repo.is_channel_in_cooldown(
+                        item_id=item_id,
+                        currency_id=self._config.currency_id,
+                        alert_type="sell_target_bid",
+                        channel=ch.channel_name,
+                        cooldown_seconds=self._config.cooldown_seconds,
+                        new_bid_minor=highest_bid,
+                        meaningful_increase_pct=self._config.meaningful_bid_increase_pct,
+                    )
+                    ch_backoff = self._alert_repo.is_channel_in_retry_backoff(
+                        item_id=item_id,
+                        currency_id=self._config.currency_id,
+                        alert_type="sell_target_bid",
+                        channel=ch.channel_name,
+                        backoff_seconds=self._config.failed_retry_backoff_seconds,
+                        max_retries=self._config.max_delivery_retries,
+                    )
+                    if not ch_cd and not ch_backoff:
+                        all_in_cooldown = False
+                        break
 
-            if in_cooldown:
-                status = "Suppressed (Cooldown)"
-                is_actionable = False
-                suppression_reason = "Recent alert exists within cooldown without meaningful bid increase."
+                if all_in_cooldown:
+                    status = "Suppressed (Cooldown)"
+                    is_actionable = False
+                    suppression_reason = (
+                        "All configured notification channels are within cooldown "
+                        "or retry backoff without meaningful bid increase."
+                    )
 
         # Record alert event in SQLite
         recorded_alert = self._alert_repo.record_alert(
@@ -418,8 +471,8 @@ class SellSniperEngine:
                 alert_fingerprint=fingerprint,
                 highest_buy_order_minor=highest_bid,
                 lowest_sell_order_minor=lowest_ask,
-                top_level_buy_quantity=top_qty,
-                cumulative_buy_quantity=cum_qty,
+                top_level_buy_quantity=top_qty or 0,
+                cumulative_buy_quantity=cum_qty or 0,
                 modeled_steam_fee_minor=steam_fee,
                 modeled_publisher_fee_minor=pub_fee,
                 modeled_seller_receives_minor=seller_receives,
@@ -440,14 +493,15 @@ class SellSniperEngine:
             payload = AlertPayload(
                 alert_id=alert_id,
                 item_id=item_id,
+                currency_id=self._config.currency_id,
                 market_hash_name=name,
                 exterior=item_record.exterior,
                 currency_code=curr_rec.code,
                 currency_symbol=curr_rec.symbol,
                 highest_buy_order_minor=highest_bid,
                 lowest_sell_order_minor=lowest_ask,
-                top_level_buy_quantity=top_qty,
-                cumulative_buy_quantity=cum_qty,
+                top_level_buy_quantity=top_qty or 0,
+                cumulative_buy_quantity=cum_qty or 0,
                 modeled_steam_fee_minor=steam_fee,
                 modeled_publisher_fee_minor=pub_fee,
                 modeled_seller_receives_minor=seller_receives,
@@ -460,7 +514,15 @@ class SellSniperEngine:
                 created_at=now_iso,
                 steam_listing_url=listing_url,
             )
-            delivery_results = await self._dispatcher.dispatch(payload, alert_id=alert_id)
+            delivery_results = await self._dispatcher.dispatch(
+                payload,
+                alert_id=alert_id,
+                check_cooldown=True,
+                cooldown_seconds=self._config.cooldown_seconds,
+                meaningful_increase_pct=self._config.meaningful_bid_increase_pct,
+                failed_retry_backoff_seconds=self._config.failed_retry_backoff_seconds,
+                max_delivery_retries=self._config.max_delivery_retries,
+            )
 
         return SellCandidateEvaluation(
             item_id=item_id,

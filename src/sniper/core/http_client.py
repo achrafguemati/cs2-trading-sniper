@@ -113,6 +113,10 @@ class ReadOnlyHttpClient:
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """Close underlying HTTP client resources cleanly."""
         if self._client:
             await self._client.aclose()
             self._client = None

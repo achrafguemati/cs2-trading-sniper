@@ -20,8 +20,9 @@ from sniper.engine.sell_engine import (
 )
 from sniper.models.schemas import OrderbookHistogramResponse
 from sniper.notifications import DeliveryStatus, NotificationDispatcher, NotificationResult
+from sniper.notifications.base import BaseNotifier
 from sniper.storage.database import Database
-from sniper.storage.models import InventoryItemRecord, ItemRecord, OrderbookSnapshotRecord
+from sniper.storage.models import InventoryItemRecord, ItemRecord, NotificationDeliveryRecord, OrderbookSnapshotRecord
 from sniper.storage.repositories import (
     AlertRepository,
     CurrencyRepository,
@@ -290,8 +291,8 @@ class TestSellEngine(unittest.IsolatedAsyncioTestCase):
 
     async def test_cooldown_deduplication_and_meaningful_increase_bypass(self) -> None:
         """Verify cooldown suppresses repeated alerts unless bid increases by >= 5%."""
-        # Seed historical snapshots
-        for i in range(5):
+        # Seed 8 historical snapshots (>= 7 required to avoid low sample penalty)
+        for i in range(8):
             self.ob_repo.insert_snapshot(OrderbookSnapshotRecord(
                 item_id=self.item.item_id,
                 currency_id=1,
@@ -300,8 +301,13 @@ class TestSellEngine(unittest.IsolatedAsyncioTestCase):
                 observed_at=(datetime.now(timezone.utc) - timedelta(days=i + 1)).isoformat(),
             ))
 
-        mock_dispatcher = MagicMock(spec=NotificationDispatcher)
-        mock_dispatcher.dispatch = AsyncMock(return_value={"discord": NotificationResult(channel="discord", status=DeliveryStatus.DELIVERED)})
+        mock_ch = MagicMock(spec=BaseNotifier)
+        mock_ch.channel_name = "discord"
+        mock_ch.is_configured = True
+        mock_ch.is_enabled = True
+        mock_ch.send = AsyncMock(return_value=NotificationResult(channel="discord", status=DeliveryStatus.DELIVERED))
+
+        dispatcher = NotificationDispatcher(channels=[mock_ch], alert_repo=self.alert_repo)
 
         mock_adapter = MagicMock(spec=SteamMarketAdapter)
         mock_adapter.get_orderbook_histogram = AsyncMock(return_value=make_histogram(
@@ -314,20 +320,20 @@ class TestSellEngine(unittest.IsolatedAsyncioTestCase):
         engine = SellSniperEngine(
             db=self.db,
             market_adapter=mock_adapter,
-            dispatcher=mock_dispatcher,
+            dispatcher=dispatcher,
             config=SellEvaluationConfig(cooldown_seconds=1800, meaningful_bid_increase_pct=0.05),
         )
 
         # 1. First evaluation: actionable, dispatches alert
         eval1 = await engine.evaluate_item(self.item)
         self.assertTrue(eval1.is_actionable)
-        self.assertEqual(mock_dispatcher.dispatch.call_count, 1)
+        self.assertEqual(mock_ch.send.call_count, 1)
 
         # 2. Second evaluation with identical bid: in cooldown, suppressed, does not dispatch
         eval2 = await engine.evaluate_item(self.item)
         self.assertFalse(eval2.is_actionable)
         self.assertEqual(eval2.status, "Suppressed (Cooldown)")
-        self.assertEqual(mock_dispatcher.dispatch.call_count, 1)  # not called again
+        self.assertEqual(mock_ch.send.call_count, 1)  # not called again
 
         # 3. Third evaluation with slight 2% increase ($25.50 vs $25.00): still in cooldown
         mock_adapter.get_orderbook_histogram = AsyncMock(return_value=make_histogram(
@@ -339,7 +345,7 @@ class TestSellEngine(unittest.IsolatedAsyncioTestCase):
         eval3 = await engine.evaluate_item(self.item)
         self.assertFalse(eval3.is_actionable)
         self.assertEqual(eval3.status, "Suppressed (Cooldown)")
-        self.assertEqual(mock_dispatcher.dispatch.call_count, 1)
+        self.assertEqual(mock_ch.send.call_count, 1)
 
         # 4. Fourth evaluation with meaningful 8% increase ($27.00 vs $25.00): bypasses cooldown!
         mock_adapter.get_orderbook_histogram = AsyncMock(return_value=make_histogram(
@@ -350,7 +356,7 @@ class TestSellEngine(unittest.IsolatedAsyncioTestCase):
         ))
         eval4 = await engine.evaluate_item(self.item)
         self.assertTrue(eval4.is_actionable)
-        self.assertEqual(mock_dispatcher.dispatch.call_count, 2)  # Dispatched!
+        self.assertEqual(mock_ch.send.call_count, 2)  # Dispatched!
 
     async def test_scan_inventory_full_pipeline(self) -> None:
         """Verify scan_inventory full workflow end-to-end."""
@@ -388,8 +394,8 @@ class TestSellEngine(unittest.IsolatedAsyncioTestCase):
             owner_id="76561198000000000",
         )
 
-        # Seed historical baseline
-        for i in range(5):
+        # Seed historical baseline (8 samples)
+        for i in range(8):
             self.ob_repo.insert_snapshot(OrderbookSnapshotRecord(
                 item_id=self.item.item_id,
                 currency_id=1,
@@ -406,13 +412,18 @@ class TestSellEngine(unittest.IsolatedAsyncioTestCase):
             cumulative_buy_quantity=20,
         ))
 
-        mock_dispatcher = MagicMock(spec=NotificationDispatcher)
-        mock_dispatcher.dispatch = AsyncMock(return_value={"discord": NotificationResult(channel="discord", status=DeliveryStatus.DELIVERED)})
+        mock_ch = MagicMock(spec=BaseNotifier)
+        mock_ch.channel_name = "discord"
+        mock_ch.is_configured = True
+        mock_ch.is_enabled = True
+        mock_ch.send = AsyncMock(return_value=NotificationResult(channel="discord", status=DeliveryStatus.DELIVERED))
+
+        dispatcher = NotificationDispatcher(channels=[mock_ch], alert_repo=self.alert_repo)
 
         engine = SellSniperEngine(
             db=self.db,
             market_adapter=mock_adapter,
-            dispatcher=mock_dispatcher,
+            dispatcher=dispatcher,
         )
 
         evaluations = await engine.scan_inventory(snapshot_id=snapshot.snapshot_id)
@@ -420,6 +431,288 @@ class TestSellEngine(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(evaluations), 1)
         self.assertEqual(evaluations[0].market_hash_name, "AK-47 | Redline (Field-Tested)")
         self.assertTrue(evaluations[0].is_actionable)
+
+    async def test_depth_missing_or_zero_adds_warning_and_suppresses_actionability(self) -> None:
+        """Verify missing or zero buy depth adds warning tag and suppresses actionable notification."""
+        # 1. Formula score check: top_level_buy_quantity=None and 0 yield s_depth = 0.0
+        score_none = calculate_sell_opportunity_score(bid_multiple=1.5, top_level_buy_quantity=None, data_age_seconds=0.0)
+        score_zero = calculate_sell_opportunity_score(bid_multiple=1.5, top_level_buy_quantity=0, data_age_seconds=0.0)
+        score_pos = calculate_sell_opportunity_score(bid_multiple=1.5, top_level_buy_quantity=5, data_age_seconds=0.0)
+        self.assertEqual(score_none, 45.0)
+        self.assertEqual(score_zero, 45.0)
+        self.assertEqual(score_pos, 75.0)
+
+        # 2. Engine evaluation check: histogram with missing/zero depth
+        for i in range(8):
+            self.ob_repo.insert_snapshot(OrderbookSnapshotRecord(
+                item_id=self.item.item_id,
+                currency_id=1,
+                highest_buy_order_minor=2000,
+                lowest_sell_order_minor=2500,
+                observed_at=(datetime.now(timezone.utc) - timedelta(days=i + 1)).isoformat(),
+            ))
+
+        mock_adapter = MagicMock(spec=SteamMarketAdapter)
+        mock_adapter.get_orderbook_histogram = AsyncMock(return_value=make_histogram(
+            highest_buy_order_minor=2500,
+            lowest_sell_order_minor=3000,
+            top_level_buy_quantity=0,
+            cumulative_buy_quantity=0,
+        ))
+
+        engine = SellSniperEngine(
+            db=self.db,
+            market_adapter=mock_adapter,
+        )
+
+        evaluation = await engine.evaluate_item(self.item)
+        self.assertFalse(evaluation.is_actionable)
+        self.assertEqual(evaluation.status, "Buy depth unavailable")
+        self.assertIn("BUY DEPTH UNAVAILABLE", evaluation.warning_tags)
+
+    async def test_needs_verification_suppressed_by_default_and_allowed_when_configured(self) -> None:
+        """Verify Needs verification suppresses actionability by default, allowed when configured."""
+        # Seed only 4 snapshots (< 7 gives -50 penalty to confidence score -> Needs verification)
+        for i in range(4):
+            self.ob_repo.insert_snapshot(OrderbookSnapshotRecord(
+                item_id=self.item.item_id,
+                currency_id=1,
+                highest_buy_order_minor=2000,
+                lowest_sell_order_minor=2500,
+                observed_at=(datetime.now(timezone.utc) - timedelta(days=i + 1)).isoformat(),
+            ))
+
+        mock_adapter = MagicMock(spec=SteamMarketAdapter)
+        mock_adapter.get_orderbook_histogram = AsyncMock(return_value=make_histogram(
+            highest_buy_order_minor=2500,
+            lowest_sell_order_minor=3000,
+            top_level_buy_quantity=5,
+            cumulative_buy_quantity=20,
+        ))
+
+        # Default config: allow_needs_verification_dispatch=False
+        engine_default = SellSniperEngine(
+            db=self.db,
+            market_adapter=mock_adapter,
+        )
+        eval_default = await engine_default.evaluate_item(self.item)
+        self.assertEqual(eval_default.status, "Needs verification")
+        self.assertFalse(eval_default.is_actionable)
+
+        # Config allowing needs_verification dispatch:
+        engine_allowed = SellSniperEngine(
+            db=self.db,
+            market_adapter=mock_adapter,
+            config=SellEvaluationConfig(allow_needs_verification_dispatch=True),
+        )
+        eval_allowed = await engine_allowed.evaluate_item(self.item)
+        self.assertEqual(eval_allowed.status, "Needs verification")
+        self.assertTrue(eval_allowed.is_actionable)
+
+    async def test_intervening_data_insufficient_does_not_reset_cooldown(self) -> None:
+        """Verify intervening non-actionable or suppressed observations do not alter cooldown reference."""
+        for i in range(8):
+            self.ob_repo.insert_snapshot(OrderbookSnapshotRecord(
+                item_id=self.item.item_id,
+                currency_id=1,
+                highest_buy_order_minor=2000,
+                lowest_sell_order_minor=2500,
+                observed_at=(datetime.now(timezone.utc) - timedelta(days=i + 1)).isoformat(),
+            ))
+
+        mock_ch = MagicMock(spec=BaseNotifier)
+        mock_ch.channel_name = "discord"
+        mock_ch.is_configured = True
+        mock_ch.is_enabled = True
+        mock_ch.send = AsyncMock(return_value=NotificationResult(channel="discord", status=DeliveryStatus.DELIVERED))
+        dispatcher = NotificationDispatcher(channels=[mock_ch], alert_repo=self.alert_repo)
+
+        mock_adapter = MagicMock(spec=SteamMarketAdapter)
+        # 1. Actionable bid delivered at 2500
+        mock_adapter.get_orderbook_histogram = AsyncMock(return_value=make_histogram(
+            highest_buy_order_minor=2500,
+            lowest_sell_order_minor=3000,
+            top_level_buy_quantity=5,
+            cumulative_buy_quantity=20,
+        ))
+        engine = SellSniperEngine(
+            db=self.db,
+            market_adapter=mock_adapter,
+            dispatcher=dispatcher,
+            config=SellEvaluationConfig(cooldown_seconds=1800, meaningful_bid_increase_pct=0.05),
+        )
+
+        eval1 = await engine.evaluate_item(self.item)
+        self.assertTrue(eval1.is_actionable)
+        self.assertEqual(mock_ch.send.call_count, 1)
+
+        # 2. Intervening observation with depth 0 (Buy depth unavailable)
+        mock_adapter.get_orderbook_histogram = AsyncMock(return_value=make_histogram(
+            highest_buy_order_minor=2500,
+            lowest_sell_order_minor=3000,
+            top_level_buy_quantity=0,
+            cumulative_buy_quantity=0,
+        ))
+        eval2 = await engine.evaluate_item(self.item)
+        self.assertFalse(eval2.is_actionable)
+        self.assertEqual(eval2.status, "Buy depth unavailable")
+
+        # 3. Third observation: valid depth, bid 2500 again.
+        # Must still be in cooldown referencing the delivered bid at eval1!
+        mock_adapter.get_orderbook_histogram = AsyncMock(return_value=make_histogram(
+            highest_buy_order_minor=2500,
+            lowest_sell_order_minor=3000,
+            top_level_buy_quantity=5,
+            cumulative_buy_quantity=20,
+        ))
+        eval3 = await engine.evaluate_item(self.item)
+        self.assertFalse(eval3.is_actionable)
+        self.assertEqual(eval3.status, "Suppressed (Cooldown)")
+        self.assertEqual(mock_ch.send.call_count, 1)
+
+    async def test_bid_delivered_at_1000_compares_future_bids_against_1000_not_intervening(self) -> None:
+        """Verify cooldown compares against delivered bid amount (1000), not intervening suppressed amounts."""
+        for i in range(8):
+            self.ob_repo.insert_snapshot(OrderbookSnapshotRecord(
+                item_id=self.item.item_id,
+                currency_id=1,
+                highest_buy_order_minor=800,
+                lowest_sell_order_minor=1200,
+                observed_at=(datetime.now(timezone.utc) - timedelta(days=i + 1)).isoformat(),
+            ))
+
+        mock_ch = MagicMock(spec=BaseNotifier)
+        mock_ch.channel_name = "discord"
+        mock_ch.is_configured = True
+        mock_ch.is_enabled = True
+        mock_ch.send = AsyncMock(return_value=NotificationResult(channel="discord", status=DeliveryStatus.DELIVERED))
+        dispatcher = NotificationDispatcher(channels=[mock_ch], alert_repo=self.alert_repo)
+
+        mock_adapter = MagicMock(spec=SteamMarketAdapter)
+        engine = SellSniperEngine(
+            db=self.db,
+            market_adapter=mock_adapter,
+            dispatcher=dispatcher,
+            config=SellEvaluationConfig(cooldown_seconds=1800, meaningful_bid_increase_pct=0.05),
+        )
+
+        # 1. Deliver at 1000
+        mock_adapter.get_orderbook_histogram = AsyncMock(return_value=make_histogram(1000, 1500, 5, 20))
+        eval1 = await engine.evaluate_item(self.item)
+        self.assertTrue(eval1.is_actionable)
+        self.assertEqual(mock_ch.send.call_count, 1)
+
+        # 2. Intervening bid at 1020 (+2% over 1000, < 5% threshold of 1050) -> Suppressed
+        mock_adapter.get_orderbook_histogram = AsyncMock(return_value=make_histogram(1020, 1500, 5, 20))
+        eval2 = await engine.evaluate_item(self.item)
+        self.assertFalse(eval2.is_actionable)
+        self.assertEqual(eval2.status, "Suppressed (Cooldown)")
+
+        # 3. Third bid at 1040 (+4% over delivered 1000, but +1.96% over intervening 1020).
+        # Compared against delivered 1000, threshold is 1050 -> still suppressed!
+        mock_adapter.get_orderbook_histogram = AsyncMock(return_value=make_histogram(1040, 1500, 5, 20))
+        eval3 = await engine.evaluate_item(self.item)
+        self.assertFalse(eval3.is_actionable)
+        self.assertEqual(eval3.status, "Suppressed (Cooldown)")
+        self.assertEqual(mock_ch.send.call_count, 1)
+
+        # 4. Fourth bid at 1060 (+6% over delivered 1000, >= 1050) -> bypasses cooldown!
+        mock_adapter.get_orderbook_histogram = AsyncMock(return_value=make_histogram(1060, 1500, 5, 20))
+        eval4 = await engine.evaluate_item(self.item)
+        self.assertTrue(eval4.is_actionable)
+        self.assertEqual(mock_ch.send.call_count, 2)
+
+    async def test_per_channel_independent_delivery_and_retry_backoff(self) -> None:
+        """Verify Discord success + Telegram failure delivers independently and handles retry backoff."""
+        for i in range(8):
+            self.ob_repo.insert_snapshot(OrderbookSnapshotRecord(
+                item_id=self.item.item_id,
+                currency_id=1,
+                highest_buy_order_minor=2000,
+                lowest_sell_order_minor=2500,
+                observed_at=(datetime.now(timezone.utc) - timedelta(days=i + 1)).isoformat(),
+            ))
+
+        mock_discord = MagicMock(spec=BaseNotifier)
+        mock_discord.channel_name = "discord"
+        mock_discord.is_configured = True
+        mock_discord.is_enabled = True
+        mock_discord.send = AsyncMock(return_value=NotificationResult(channel="discord", status=DeliveryStatus.DELIVERED))
+
+        mock_tg = MagicMock(spec=BaseNotifier)
+        mock_tg.channel_name = "telegram"
+        mock_tg.is_configured = True
+        mock_tg.is_enabled = True
+        mock_tg.send = AsyncMock(return_value=NotificationResult(channel="telegram", status=DeliveryStatus.FAILED, error_message="Network error"))
+
+        dispatcher = NotificationDispatcher(channels=[mock_discord, mock_tg], alert_repo=self.alert_repo)
+
+        mock_adapter = MagicMock(spec=SteamMarketAdapter)
+        mock_adapter.get_orderbook_histogram = AsyncMock(return_value=make_histogram(2500, 3000, 5, 20))
+
+        engine = SellSniperEngine(
+            db=self.db,
+            market_adapter=mock_adapter,
+            dispatcher=dispatcher,
+            config=SellEvaluationConfig(cooldown_seconds=1800, failed_retry_backoff_seconds=60, max_delivery_retries=3),
+        )
+
+        # 1. First run: Discord delivers, Telegram fails
+        eval1 = await engine.evaluate_item(self.item)
+        self.assertTrue(eval1.is_actionable)
+        self.assertEqual(mock_discord.send.call_count, 1)
+        self.assertEqual(mock_tg.send.call_count, 1)
+
+        # 2. Immediate second run (within 60s failure backoff):
+        # Discord is in cooldown, Telegram is in retry backoff -> all channels in cooldown/backoff
+        eval2 = await engine.evaluate_item(self.item)
+        self.assertFalse(eval2.is_actionable)
+        self.assertEqual(eval2.status, "Suppressed (Cooldown)")
+        self.assertEqual(mock_discord.send.call_count, 1)
+        self.assertEqual(mock_tg.send.call_count, 1)
+
+        # 3. Simulate retry backoff expiry by updating Telegram's delivery attempt created_at to 70s ago
+        self.db.execute("UPDATE notification_deliveries SET created_at = datetime('now', '-70 seconds') WHERE channel = 'telegram'")
+
+        # Now Telegram retry backoff has expired, while Discord cooldown (1800s) is still active.
+        # Now Telegram succeeds on retry:
+        mock_tg.send = AsyncMock(return_value=NotificationResult(channel="telegram", status=DeliveryStatus.DELIVERED))
+
+        eval3 = await engine.evaluate_item(self.item)
+        self.assertTrue(eval3.is_actionable)
+        # Discord was in cooldown, so NOT called again
+        self.assertEqual(mock_discord.send.call_count, 1)
+        # Telegram was retried and called!
+        self.assertEqual(mock_tg.send.call_count, 1)
+
+    async def test_unconfigured_channels_do_not_start_cooldown(self) -> None:
+        """Verify unconfigured or disabled channels do not trigger cooldown."""
+        unconfigured_ch = MagicMock(spec=BaseNotifier)
+        unconfigured_ch.channel_name = "telegram"
+        unconfigured_ch.is_configured = False
+        unconfigured_ch.is_enabled = True
+
+        dispatcher = NotificationDispatcher(channels=[unconfigured_ch], alert_repo=self.alert_repo)
+
+        mock_adapter = MagicMock(spec=SteamMarketAdapter)
+        mock_adapter.get_orderbook_histogram = AsyncMock(return_value=make_histogram(2500, 3000, 5, 20))
+
+        engine = SellSniperEngine(
+            db=self.db,
+            market_adapter=mock_adapter,
+            dispatcher=dispatcher,
+        )
+
+        # Neither cooldown nor delivered records should exist
+        is_cd = self.alert_repo.is_channel_in_cooldown(
+            item_id=self.item.item_id,
+            currency_id=1,
+            alert_type="sell_target_bid",
+            channel="telegram",
+            cooldown_seconds=1800,
+            new_bid_minor=2500,
+        )
+        self.assertFalse(is_cd)
 
 
 if __name__ == "__main__":

@@ -1066,6 +1066,215 @@ class AlertRepository:
         )
         return [self._row_to_alert(r) for r in rows]
 
+    def get_alert_by_fingerprint(self, fingerprint: str) -> AlertEventRecord | None:
+        """Fetch alert event by SHA256 fingerprint."""
+        row = self._db.fetch_one(
+            "SELECT * FROM alert_events WHERE alert_fingerprint = ? ORDER BY alert_id DESC LIMIT 1",
+            (fingerprint,),
+        )
+        if row is None:
+            return None
+        return self._row_to_alert(row)
+
+    def get_last_successful_delivery_for_channel(
+        self,
+        item_id: int,
+        currency_id: int,
+        alert_type: str,
+        channel: str,
+    ) -> tuple[NotificationDeliveryRecord, AlertEventRecord] | None:
+        """Fetch the latest successful ('delivered') delivery and its parent alert event for a channel."""
+        row = self._db.fetch_one("""
+            SELECT
+                d.delivery_id, d.alert_id, d.channel, d.status, d.attempts, d.last_error, d.delivered_at, d.created_at AS deliv_created_at,
+                a.item_id, a.currency_id, a.alert_type, a.alert_fingerprint, a.highest_buy_order_minor,
+                a.lowest_sell_order_minor, a.top_level_buy_quantity, a.cumulative_buy_quantity,
+                a.modeled_steam_fee_minor, a.modeled_publisher_fee_minor, a.modeled_seller_receives_minor,
+                a.historical_baseline_minor, a.bid_multiple, a.opportunity_score, a.confidence_score,
+                a.warning_tags, a.status AS alert_status, a.created_at AS alert_created_at
+            FROM notification_deliveries d
+            JOIN alert_events a ON d.alert_id = a.alert_id
+            WHERE a.item_id = ? AND a.currency_id = ? AND a.alert_type = ?
+              AND d.channel = ? AND d.status = 'delivered'
+            ORDER BY d.delivery_id DESC
+            LIMIT 1
+        """, (item_id, currency_id, alert_type, channel))
+        if row is None:
+            return None
+
+        delivery = NotificationDeliveryRecord(
+            delivery_id=row["delivery_id"],
+            alert_id=row["alert_id"],
+            channel=row["channel"],
+            status=row["status"],
+            attempts=row["attempts"],
+            last_error=row["last_error"],
+            delivered_at=row["delivered_at"],
+            created_at=row["deliv_created_at"],
+        )
+        alert = AlertEventRecord(
+            alert_id=row["alert_id"],
+            item_id=row["item_id"],
+            currency_id=row["currency_id"],
+            alert_type=row["alert_type"],
+            alert_fingerprint=row["alert_fingerprint"],
+            highest_buy_order_minor=row["highest_buy_order_minor"],
+            lowest_sell_order_minor=row["lowest_sell_order_minor"],
+            top_level_buy_quantity=row["top_level_buy_quantity"],
+            cumulative_buy_quantity=row["cumulative_buy_quantity"],
+            modeled_steam_fee_minor=row["modeled_steam_fee_minor"],
+            modeled_publisher_fee_minor=row["modeled_publisher_fee_minor"],
+            modeled_seller_receives_minor=row["modeled_seller_receives_minor"],
+            historical_baseline_minor=row["historical_baseline_minor"],
+            bid_multiple=row["bid_multiple"],
+            opportunity_score=row["opportunity_score"],
+            confidence_score=row["confidence_score"],
+            warning_tags=row["warning_tags"],
+            status=row["alert_status"],
+            created_at=row["alert_created_at"],
+        )
+        return delivery, alert
+
+    def get_latest_delivery_attempt(
+        self,
+        item_id: int,
+        currency_id: int,
+        alert_type: str,
+        channel: str,
+    ) -> tuple[NotificationDeliveryRecord, AlertEventRecord] | None:
+        """Fetch the latest delivery attempt (any status) for a channel and item."""
+        row = self._db.fetch_one("""
+            SELECT
+                d.delivery_id, d.alert_id, d.channel, d.status, d.attempts, d.last_error, d.delivered_at, d.created_at AS deliv_created_at,
+                a.item_id, a.currency_id, a.alert_type, a.alert_fingerprint, a.highest_buy_order_minor,
+                a.lowest_sell_order_minor, a.top_level_buy_quantity, a.cumulative_buy_quantity,
+                a.modeled_steam_fee_minor, a.modeled_publisher_fee_minor, a.modeled_seller_receives_minor,
+                a.historical_baseline_minor, a.bid_multiple, a.opportunity_score, a.confidence_score,
+                a.warning_tags, a.status AS alert_status, a.created_at AS alert_created_at
+            FROM notification_deliveries d
+            JOIN alert_events a ON d.alert_id = a.alert_id
+            WHERE a.item_id = ? AND a.currency_id = ? AND a.alert_type = ?
+              AND d.channel = ?
+            ORDER BY d.delivery_id DESC
+            LIMIT 1
+        """, (item_id, currency_id, alert_type, channel))
+        if row is None:
+            return None
+
+        delivery = NotificationDeliveryRecord(
+            delivery_id=row["delivery_id"],
+            alert_id=row["alert_id"],
+            channel=row["channel"],
+            status=row["status"],
+            attempts=row["attempts"],
+            last_error=row["last_error"],
+            delivered_at=row["delivered_at"],
+            created_at=row["deliv_created_at"],
+        )
+        alert = AlertEventRecord(
+            alert_id=row["alert_id"],
+            item_id=row["item_id"],
+            currency_id=row["currency_id"],
+            alert_type=row["alert_type"],
+            alert_fingerprint=row["alert_fingerprint"],
+            highest_buy_order_minor=row["highest_buy_order_minor"],
+            lowest_sell_order_minor=row["lowest_sell_order_minor"],
+            top_level_buy_quantity=row["top_level_buy_quantity"],
+            cumulative_buy_quantity=row["cumulative_buy_quantity"],
+            modeled_steam_fee_minor=row["modeled_steam_fee_minor"],
+            modeled_publisher_fee_minor=row["modeled_publisher_fee_minor"],
+            modeled_seller_receives_minor=row["modeled_seller_receives_minor"],
+            historical_baseline_minor=row["historical_baseline_minor"],
+            bid_multiple=row["bid_multiple"],
+            opportunity_score=row["opportunity_score"],
+            confidence_score=row["confidence_score"],
+            warning_tags=row["warning_tags"],
+            status=row["alert_status"],
+            created_at=row["alert_created_at"],
+        )
+        return delivery, alert
+
+    def is_channel_in_cooldown(
+        self,
+        item_id: int,
+        currency_id: int,
+        alert_type: str,
+        channel: str,
+        cooldown_seconds: int,
+        new_bid_minor: int,
+        meaningful_increase_pct: float = 0.05,
+        now_dt: datetime | None = None,
+    ) -> bool:
+        """Check whether a specific channel is in cooldown based on its last successful delivery."""
+        res = self.get_last_successful_delivery_for_channel(item_id, currency_id, alert_type, channel)
+        if res is None:
+            return False
+        delivery, alert = res
+
+        if now_dt is None:
+            now_dt = datetime.now(timezone.utc)
+
+        try:
+            ref_str = delivery.delivered_at or delivery.created_at
+            if ref_str.endswith("Z"):
+                ref_str = ref_str[:-1] + "+00:00"
+            ref_dt = datetime.fromisoformat(ref_str)
+            if ref_dt.tzinfo is None:
+                ref_dt = ref_dt.replace(tzinfo=timezone.utc)
+            elapsed = (now_dt - ref_dt).total_seconds()
+        except Exception:
+            return False
+
+        if elapsed >= cooldown_seconds:
+            return False
+
+        # Within cooldown window. Compare new bid against the last successfully delivered bid:
+        increase_threshold = int(math.ceil(alert.highest_buy_order_minor * (1.0 + meaningful_increase_pct)))
+        if new_bid_minor >= increase_threshold:
+            # Meaningful increase: allow delivery
+            return False
+
+        # In cooldown and not a meaningful increase: suppress!
+        return True
+
+    def is_channel_in_retry_backoff(
+        self,
+        item_id: int,
+        currency_id: int,
+        alert_type: str,
+        channel: str,
+        backoff_seconds: int = 60,
+        max_retries: int = 3,
+        now_dt: datetime | None = None,
+    ) -> bool:
+        """Check whether a channel is currently in retry backoff after a failed delivery."""
+        res = self.get_latest_delivery_attempt(item_id, currency_id, alert_type, channel)
+        if res is None:
+            return False
+        delivery, _ = res
+
+        if delivery.status != "failed":
+            return False
+
+        if delivery.attempts >= max_retries:
+            return True
+
+        if now_dt is None:
+            now_dt = datetime.now(timezone.utc)
+
+        try:
+            ref_str = delivery.created_at
+            if ref_str.endswith("Z"):
+                ref_str = ref_str[:-1] + "+00:00"
+            ref_dt = datetime.fromisoformat(ref_str)
+            if ref_dt.tzinfo is None:
+                ref_dt = ref_dt.replace(tzinfo=timezone.utc)
+            elapsed = (now_dt - ref_dt).total_seconds()
+        except Exception:
+            return False
+
+        return elapsed < backoff_seconds
+
     def is_in_cooldown(
         self,
         item_id: int,
@@ -1076,40 +1285,43 @@ class AlertRepository:
         meaningful_increase_pct: float = 0.05,
         now_dt: datetime | None = None,
     ) -> bool:
-        """Check whether an alert for (item_id, currency_id, alert_type) is in cooldown.
+        """Check whether an alert is in cooldown based on the latest successful delivery.
 
-        Returns True (suppress alert) if a prior alert was emitted within cooldown_seconds,
-        UNLESS the new bid represents a meaningful increase (>= meaningful_increase_pct)
-        over the prior alert's highest buy order bid.
+        Non-actionable observations (e.g. 'DATA INSUFFICIENT') and suppressed events do not
+        reset or alter the cooldown reference.
         """
-        last_alert = self.get_latest_alert_for_item(item_id, currency_id, alert_type)
-        if last_alert is None:
+        row = self._db.fetch_one("""
+            SELECT d.delivered_at, d.created_at AS deliv_created_at, a.highest_buy_order_minor
+            FROM notification_deliveries d
+            JOIN alert_events a ON d.alert_id = a.alert_id
+            WHERE a.item_id = ? AND a.currency_id = ? AND a.alert_type = ? AND d.status = 'delivered'
+            ORDER BY d.delivery_id DESC
+            LIMIT 1
+        """, (item_id, currency_id, alert_type))
+        if row is None:
             return False
 
         if now_dt is None:
             now_dt = datetime.now(timezone.utc)
 
         try:
-            created_str = last_alert.created_at
-            if created_str.endswith("Z"):
-                created_str = created_str[:-1] + "+00:00"
-            created_dt = datetime.fromisoformat(created_str)
-            if created_dt.tzinfo is None:
-                created_dt = created_dt.replace(tzinfo=timezone.utc)
-            elapsed = (now_dt - created_dt).total_seconds()
+            ref_str = row["delivered_at"] or row["deliv_created_at"]
+            if ref_str.endswith("Z"):
+                ref_str = ref_str[:-1] + "+00:00"
+            ref_dt = datetime.fromisoformat(ref_str)
+            if ref_dt.tzinfo is None:
+                ref_dt = ref_dt.replace(tzinfo=timezone.utc)
+            elapsed = (now_dt - ref_dt).total_seconds()
         except Exception:
             return False
 
         if elapsed >= cooldown_seconds:
             return False
 
-        # Within cooldown window. Check for meaningful bid increase:
-        increase_threshold = int(math.ceil(last_alert.highest_buy_order_minor * (1.0 + meaningful_increase_pct)))
+        increase_threshold = int(math.ceil(row["highest_buy_order_minor"] * (1.0 + meaningful_increase_pct)))
         if new_bid_minor >= increase_threshold:
-            # Meaningful increase: allow re-alerting!
             return False
 
-        # In cooldown and not a meaningful increase: suppress!
         return True
 
     def record_delivery(self, delivery: NotificationDeliveryRecord) -> NotificationDeliveryRecord:

@@ -24,6 +24,7 @@ class AlertPayload(BaseModel):
     """Payload representing an actionable SELL alert for notification formatting."""
     alert_id: int | None = None
     item_id: int | None = None
+    currency_id: int = 1
     market_hash_name: str
     exterior: str | None = None
     currency_code: str = "USD"

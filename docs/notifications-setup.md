@@ -20,7 +20,32 @@ Supported notification channels (Discord + Telegram ONLY):
 
 ---
 
-## 2. Discord Webhook Setup (Recommended — Fastest)
+## 2. Environment Configuration (.env on Windows & Linux)
+
+The application automatically loads local configuration from a `.env` file via `python-dotenv`. Existing system or process environment variables take precedence (`override=False`).
+
+### Creating Your `.env` File
+
+On Windows PowerShell:
+```powershell
+Copy-Item .env.example .env
+```
+
+On Windows Command Prompt (cmd.exe):
+```cmd
+copy .env.example .env
+```
+
+On Linux / macOS:
+```bash
+cp .env.example .env
+```
+
+Edit the `.env` file to add your Discord webhook URL and/or Telegram bot credentials.
+
+---
+
+## 3. Discord Webhook Setup (Recommended — Fastest)
 
 Discord provides free, instantaneous incoming webhooks that render formatted rich embeds on both desktop and mobile.
 
@@ -45,7 +70,7 @@ python -m sniper.cli test-notification --channel discord
 
 ---
 
-## 3. Telegram Bot Setup (Recommended — Mobile Push)
+## 4. Telegram Bot Setup (Recommended — Mobile Push)
 
 Telegram provides a free, highly reliable Bot API (`sendMessage`) with real-time push notifications.
 
@@ -77,7 +102,7 @@ python -m sniper.cli test-notification --channel telegram
 
 ---
 
-## 4. Channel Status & Verification Commands
+## 5. Channel Status & Verification Commands
 
 Inspect configured channels and delivery readiness without exposing credentials:
 
@@ -99,7 +124,21 @@ python -m sniper.cli test-notification --channel telegram
 
 ---
 
-## 5. Secret Redaction & Security Assurance
+## 6. Delivery-Aware Cooldown & Channel Independence
+
+To prevent notification spam while ensuring critical price movements are immediately delivered:
+
+* **Anchored to Successful Deliveries:** Cooldown is tracked per-channel and referenced exclusively against rows in the `notification_deliveries` table where `status = 'delivered'`.
+* **Zero Cooldown Resets from Suppressed Events:** Intervening non-actionable observations (such as `DATA INSUFFICIENT`, missing buy depth, or crossed books) or evaluations suppressed by cooldown (`Suppressed (Cooldown)`) **NEVER** update or reset the cooldown reference timestamp or reference bid amount.
+* **Meaningful Increase Bypass:** An alert is suppressed only if the elapsed time is within `cooldown_seconds` (default 1800s / 30m) **AND** the new bid is less than the last delivered bid plus `meaningful_bid_increase_pct` (default 5%). A $\ge 5\%$ bid spike immediately bypasses cooldown.
+* **Channel Independence & Failure Retry Backoff:**
+  - If delivery to Discord succeeds but Telegram fails (e.g. temporary network glitch), Discord enters normal cooldown while Telegram enters a short failure retry backoff (default 60s, max 3 retries).
+  - On the next cycle after backoff expires, Telegram is retried without sending a duplicate notification to Discord.
+* **Unconfigured Channels:** Disabled or unconfigured channels never enter cooldown or block other channels.
+
+---
+
+## 7. Secret Redaction & Security Assurance
 
 All notification credentials (bot tokens and webhook URLs) are automatically scrubbed by a centralized sanitization engine (`redact_secrets()`):
 * Bot tokens (`\d{8,12}:[A-Za-z0-9_-]{30,45}`) and webhook URLs are **NEVER** written to SQLite database logs or `notification_deliveries` audit records.
