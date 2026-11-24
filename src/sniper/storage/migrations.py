@@ -322,6 +322,144 @@ def _migration_4_down(conn: sqlite3.Connection) -> None:
     cur.execute("DROP TABLE IF EXISTS alert_events")
 
 
+def _migration_5_up(conn: sqlite3.Connection) -> None:
+    """Migration 5: Watchlists, daily price history baselines, BUY listing evaluations, and strategy alerts."""
+    cur = conn.cursor()
+
+    # 1. Watchlist entries (BUY / SELL / BOTH)
+    cur.execute("""
+        CREATE TABLE watchlist_entries (
+            watchlist_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER NOT NULL REFERENCES items(item_id) ON DELETE RESTRICT,
+            input_url TEXT NOT NULL,
+            strategy TEXT NOT NULL CHECK (strategy IN ('BUY', 'SELL', 'BOTH')),
+            currency_id INTEGER NOT NULL REFERENCES currency_configs(currency_id) ON DELETE RESTRICT,
+            max_buy_price_minor INTEGER CHECK (max_buy_price_minor IS NULL OR max_buy_price_minor > 0),
+            min_discount_pct REAL CHECK (min_discount_pct IS NULL OR (min_discount_pct >= 0.0 AND min_discount_pct <= 100.0)),
+            min_net_profit_minor INTEGER CHECK (min_net_profit_minor IS NULL OR min_net_profit_minor >= 0),
+            min_roi_pct REAL NOT NULL DEFAULT 5.0 CHECK (min_roi_pct >= 0.0),
+            min_sell_multiplier REAL NOT NULL DEFAULT 1.5 CHECK (min_sell_multiplier >= 1.0),
+            min_bid_minor INTEGER NOT NULL DEFAULT 100 CHECK (min_bid_minor > 0),
+            target_exit_venue TEXT NOT NULL DEFAULT 'steam_market',
+            poll_interval_seconds INTEGER NOT NULL DEFAULT 300 CHECK (poll_interval_seconds >= 30),
+            is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+            last_scanned_at TEXT,
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (item_id, strategy, currency_id)
+        )
+    """)
+    cur.execute("CREATE INDEX idx_watchlist_active_strategy ON watchlist_entries(is_active, strategy)")
+    cur.execute("CREATE INDEX idx_watchlist_item_id ON watchlist_entries(item_id)")
+
+    # 2. Historical daily price & volume baseline points (cookie-free sources)
+    cur.execute("""
+        CREATE TABLE price_history_points (
+            point_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER NOT NULL REFERENCES items(item_id) ON DELETE CASCADE,
+            currency_id INTEGER NOT NULL REFERENCES currency_configs(currency_id) ON DELETE RESTRICT,
+            bucket_date TEXT NOT NULL,
+            median_price_minor INTEGER NOT NULL CHECK (median_price_minor > 0),
+            volume INTEGER NOT NULL DEFAULT 1 CHECK (volume >= 0),
+            source TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            UNIQUE (item_id, currency_id, bucket_date, source)
+        )
+    """)
+    cur.execute("CREATE INDEX idx_price_history_lookup ON price_history_points(item_id, currency_id, bucket_date)")
+
+    # 3. BUY listing evaluations (immutable audit per scan, preserves Migration 3 listings immutability)
+    cur.execute("""
+        CREATE TABLE buy_listing_evaluations (
+            evaluation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER NOT NULL REFERENCES items(item_id) ON DELETE RESTRICT,
+            currency_id INTEGER NOT NULL REFERENCES currency_configs(currency_id) ON DELETE RESTRICT,
+            steam_listing_id TEXT NOT NULL,
+            asset_id TEXT,
+            listing_seller_receives_minor INTEGER NOT NULL CHECK (listing_seller_receives_minor > 0),
+            listing_fee_minor INTEGER NOT NULL CHECK (listing_fee_minor >= 0),
+            purchase_buyer_pays_minor INTEGER NOT NULL CHECK (purchase_buyer_pays_minor > 0),
+            reference_price_minor INTEGER,
+            baseline_vwm_minor INTEGER,
+            floor_median_minor INTEGER,
+            discount_pct REAL,
+            conservative_exit_gross_minor INTEGER,
+            conservative_exit_net_minor INTEGER,
+            conservative_net_profit_minor INTEGER,
+            conservative_roi_pct REAL,
+            base_net_profit_minor INTEGER,
+            optimistic_net_profit_minor INTEGER,
+            opportunity_score REAL NOT NULL,
+            confidence_score REAL NOT NULL,
+            float_value REAL,
+            paint_seed INTEGER,
+            paint_index INTEGER,
+            stickers_json TEXT NOT NULL DEFAULT '[]',
+            inspect_link TEXT,
+            warning_tags TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL,
+            is_actionable INTEGER NOT NULL DEFAULT 0 CHECK (is_actionable IN (0, 1)),
+            suppression_reason TEXT,
+            alert_fingerprint TEXT NOT NULL,
+            listing_status TEXT NOT NULL DEFAULT 'active' CHECK (listing_status IN ('active', 'sold', 'expired')),
+            evaluated_at TEXT NOT NULL
+        )
+    """)
+    cur.execute("CREATE INDEX idx_buy_evals_item_curr ON buy_listing_evaluations(item_id, currency_id, evaluated_at)")
+    cur.execute("CREATE INDEX idx_buy_evals_listing ON buy_listing_evaluations(steam_listing_id, currency_id)")
+    cur.execute("CREATE INDEX idx_buy_evals_fp ON buy_listing_evaluations(alert_fingerprint)")
+
+    # 4. Generalized strategy alerts & delivery log (for BUY and Portfolio alerts without altering M4 SELL table)
+    cur.execute("""
+        CREATE TABLE strategy_alerts (
+            strategy_alert_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy TEXT NOT NULL CHECK (strategy IN ('BUY', 'PORTFOLIO')),
+            item_id INTEGER NOT NULL REFERENCES items(item_id) ON DELETE RESTRICT,
+            currency_id INTEGER NOT NULL REFERENCES currency_configs(currency_id) ON DELETE RESTRICT,
+            alert_type TEXT NOT NULL,
+            alert_fingerprint TEXT NOT NULL,
+            reference_key TEXT NOT NULL,
+            reference_price_minor INTEGER NOT NULL,
+            net_impact_minor INTEGER,
+            roi_pct REAL,
+            opportunity_score REAL NOT NULL,
+            confidence_score REAL NOT NULL,
+            warning_tags TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        )
+    """)
+    cur.execute("CREATE INDEX idx_strategy_alerts_lookup ON strategy_alerts(strategy, item_id, currency_id, alert_type, created_at)")
+    cur.execute("CREATE INDEX idx_strategy_alerts_fp ON strategy_alerts(alert_fingerprint)")
+
+    cur.execute("""
+        CREATE TABLE strategy_alert_deliveries (
+            delivery_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy_alert_id INTEGER NOT NULL REFERENCES strategy_alerts(strategy_alert_id) ON DELETE CASCADE,
+            channel TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 1,
+            last_error TEXT,
+            delivered_at TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    cur.execute("CREATE INDEX idx_strategy_deliveries_alert ON strategy_alert_deliveries(strategy_alert_id)")
+    cur.execute("CREATE INDEX idx_strategy_deliveries_ch_status ON strategy_alert_deliveries(channel, status)")
+
+
+def _migration_5_down(conn: sqlite3.Connection) -> None:
+    """Migration 5 Down."""
+    cur = conn.cursor()
+    cur.execute("DROP TABLE IF EXISTS strategy_alert_deliveries")
+    cur.execute("DROP TABLE IF EXISTS strategy_alerts")
+    cur.execute("DROP TABLE IF EXISTS buy_listing_evaluations")
+    cur.execute("DROP TABLE IF EXISTS price_history_points")
+    cur.execute("DROP TABLE IF EXISTS watchlist_entries")
+
+
 MIGRATIONS: list[Migration] = [
     Migration(
         version=1,
@@ -357,6 +495,19 @@ MIGRATIONS: list[Migration] = [
         up=_migration_4_up,
         down=_migration_4_down,
         affected_tables=("notification_deliveries", "alert_events"),
+    ),
+    Migration(
+        version=5,
+        description="Watchlist entries, daily price history baselines, BUY evaluations, and strategy alerts",
+        up=_migration_5_up,
+        down=_migration_5_down,
+        affected_tables=(
+            "strategy_alert_deliveries",
+            "strategy_alerts",
+            "buy_listing_evaluations",
+            "price_history_points",
+            "watchlist_entries",
+        ),
     ),
 ]
 

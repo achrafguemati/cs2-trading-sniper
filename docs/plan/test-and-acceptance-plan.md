@@ -22,7 +22,9 @@ Every module must achieve high test coverage before milestone completion:
 | **`test_sell_engine.py`** | SELL opportunity scoring & retry limits (M5, M5.1, M5.2) | Strict identity provenance gate, historical buy-order median baseline, crossed-book suppression, un-fabricated buy depth (`BUY DEPTH UNAVAILABLE`), per-channel delivery-aware cooldown, cumulative retry exhaustion capping, fresh retry budget on new bids. |
 | **`test_notifications.py`** | Free notifications (Discord & Telegram) | Discord rich embed formatting & limits, Telegram safe HTML escaping, channel failure isolation, 429 rate limit backoff, secret redaction, independent channel enable/disable. |
 | **`test_storage_m5.py`** | Migration 4, Retries & Timestamps (M5, M5.1, M5.2) | Migration 4 upgrade/rollback, persistent cumulative retry backoff accounting per fingerprint and channel, fail-closed timestamp validation (missing, malformed, future, clock skew). |
-| **`test_cli.py`** | CLI interface & lifecycle | CLI commands parsing, status and channel testing, `python-dotenv` non-overriding `.env` loading, explicit `ReadOnlyHttpClient.aclose()` resource closing. |
+| **`test_listing_parser.py`** | Individual listing parsing & metadata (M6) | Extraction of `steam_listing_id`, `asset_id`, `converted_price + converted_fee`, inspect links, sticker/charm extraction, float/seed extraction, sold listing rejection, currency & variant mismatch rejection, cookie-free `var line1` HTML extraction. |
+| **`test_buy_engine.py`** | BUY Sniper engine, scenarios & Migration 5 (M6) | Volume-weighted median baselines, Conservative 7-day 5% risk buffer + exact M4 fee inversion, `DATA INSUFFICIENT` & illiquidity suppression, 7d/30d spike guard, Discord/Telegram BUY notifications, multi-listing cooldown independence, cumulative retry cap, Migration 5 upgrade/rollback. |
+| **`test_cli.py`** | CLI interface & lifecycle | CLI commands parsing (`import-inventory`, `import-csv`, `import-json`, `watchlist`, `import-history`, `scan-buy`, `scan-sell`, `status`), `python-dotenv` `.env` loading, explicit `ReadOnlyHttpClient.aclose()`. |
 
 ---
 

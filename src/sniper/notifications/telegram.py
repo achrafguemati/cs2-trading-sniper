@@ -12,7 +12,12 @@ from typing import Any
 import httpx
 
 from sniper.notifications.base import BaseNotificationChannel, BaseNotifier, redact_secrets
-from sniper.notifications.models import AlertPayload, DeliveryStatus, NotificationResult
+from sniper.notifications.models import (
+    AlertPayload,
+    BuyAlertPayload,
+    DeliveryStatus,
+    NotificationResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +56,61 @@ class TelegramNotifier(BaseNotifier):
             and self._chat_id.strip()
         )
 
-    def format_html_message(self, alert: AlertPayload) -> str:
+    def format_buy_html_message(self, alert: BuyAlertPayload) -> str:
+        """Render a clean, safely escaped Telegram HTML message for a BUY CANDIDATE."""
+        clean_name = html.escape(alert.market_hash_name)
+        status_tag = html.escape(alert.status)
+        buy_price = html.escape(alert.formatted_buy_price())
+        ref_price = html.escape(alert.formatted_reference())
+        cons_profit = html.escape(alert.formatted_conservative_profit())
+        exit_gross = html.escape(alert.formatted_conservative_exit_gross())
+        exit_net = html.escape(alert.formatted_conservative_exit_net())
+        listing_id = html.escape(alert.steam_listing_id)
+
+        lines = [
+            "🟢 <b>CS2 BUY SNIPER CANDIDATE</b>",
+            f"<b>Item:</b> <code>{clean_name}</code>",
+            f"<b>Status:</b> <i>{status_tag}</i> • Listing: <code>{listing_id}</code>",
+            "",
+            f"💳 <b>Buyer Pays (Acq):</b> {buy_price}",
+            f"📊 <b>Reference Baseline:</b> {ref_price} (-{alert.discount_pct:.1f}%)",
+            f"🛡️ <b>7d Conservative Profit:</b> {cons_profit} ({alert.conservative_roi_pct:.1f}% ROI) [{html.escape(alert.currency_code)} Wallet]",
+            f"📉 <b>Conservative Exit:</b> {exit_gross} → {exit_net} net",
+            f"🎯 <b>Opportunity:</b> {alert.opportunity_score:.1f}/100 • <b>Confidence:</b> {alert.confidence_score:.1f}/100",
+        ]
+
+        if alert.float_value is not None or alert.paint_seed is not None:
+            parts = []
+            if alert.float_value is not None:
+                parts.append(f"Float <code>{alert.float_value:.6f}</code>")
+            if alert.paint_seed is not None:
+                parts.append(f"Seed <code>{alert.paint_seed}</code>")
+            lines.append("🔬 " + " • ".join(parts))
+
+        if alert.stickers:
+            escaped_stickers = ", ".join(html.escape(s) for s in alert.stickers)
+            lines.append(f"🏷️ <b>Stickers:</b> {escaped_stickers}")
+
+        lines.append("⏳ <i>7-day SCM re-market restriction applies. Steam Wallet ≠ cash.</i>")
+
+        if alert.warning_tags:
+            lines.append("")
+            lines.append("⚠️ <b>Warnings:</b>")
+            for tag in alert.warning_tags:
+                lines.append(f"• <code>{html.escape(tag)}</code>")
+
+        if alert.steam_listing_url:
+            lines.append("")
+            lines.append(f'<a href="{html.escape(alert.steam_listing_url)}">🔗 Open on Steam Community Market</a>')
+
+        lines.append("")
+        lines.append("<i>Open on Steam, manually verify sticker/float, and confirm purchase.</i>")
+        return "\n".join(lines)
+
+    def format_html_message(self, alert: AlertPayload | BuyAlertPayload) -> str:
         """Render a clean, safely escaped Telegram HTML message."""
+        if isinstance(alert, BuyAlertPayload):
+            return self.format_buy_html_message(alert)
         clean_name = html.escape(alert.market_hash_name)
         status_tag = html.escape(alert.status)
         bid_gross = html.escape(alert.formatted_bid_gross())

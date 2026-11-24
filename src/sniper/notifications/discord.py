@@ -11,7 +11,12 @@ from typing import Any
 import httpx
 
 from sniper.notifications.base import BaseNotificationChannel, BaseNotifier, redact_secrets
-from sniper.notifications.models import AlertPayload, DeliveryStatus, NotificationResult
+from sniper.notifications.models import (
+    AlertPayload,
+    BuyAlertPayload,
+    DeliveryStatus,
+    NotificationResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +48,102 @@ class DiscordNotifier(BaseNotifier):
     def is_configured(self) -> bool:
         return bool(self._webhook_url and self._webhook_url.strip().startswith("https://"))
 
-    def build_embed(self, alert: AlertPayload) -> dict[str, Any]:
+    def build_buy_embed(self, alert: BuyAlertPayload) -> dict[str, Any]:
+        """Construct a validated Discord rich embed for a BUY CANDIDATE listing alert."""
+        color = 0x10B981  # Emerald green
+        if alert.warning_tags:
+            color = 0xF59E0B  # Amber warning highlight
+
+        title = f"🟢 BUY CANDIDATE: {alert.market_hash_name}"[:256]
+        desc = (
+            f"**Underpriced Individual Listing Detected (`BUY CANDIDATE`)**\n"
+            f"Manual human verification required before buying on Steam.\n"
+            f"Status: `{alert.status}` • Listing ID: `{alert.steam_listing_id}`"
+        )[:4096]
+
+        fields: list[dict[str, Any]] = [
+            {
+                "name": "💳 Acquisition Price (Buyer Pays)",
+                "value": alert.formatted_buy_price(),
+                "inline": True,
+            },
+            {
+                "name": "📊 Reference Baseline",
+                "value": f"{alert.formatted_reference()} (-{alert.discount_pct:.1f}%)",
+                "inline": True,
+            },
+            {
+                "name": "🛡️ 7-Day Conservative Wallet Profit",
+                "value": f"{alert.formatted_conservative_profit()} ({alert.conservative_roi_pct:.1f}% ROI) [{alert.currency_code} Steam Wallet]",
+                "inline": True,
+            },
+            {
+                "name": "📉 Expected Exit (Gross → Net)",
+                "value": f"{alert.formatted_conservative_exit_gross()} → {alert.formatted_conservative_exit_net()}",
+                "inline": True,
+            },
+            {
+                "name": "🎯 Opportunity Score",
+                "value": f"{alert.opportunity_score:.1f} / 100",
+                "inline": True,
+            },
+            {
+                "name": "🔍 Confidence Score",
+                "value": f"{alert.confidence_score:.1f} / 100",
+                "inline": True,
+            },
+        ]
+
+        if alert.float_value is not None or alert.paint_seed is not None:
+            meta_parts = []
+            if alert.float_value is not None:
+                meta_parts.append(f"Float: `{alert.float_value:.6f}`")
+            if alert.paint_seed is not None:
+                meta_parts.append(f"Pattern Seed: `{alert.paint_seed}`")
+            fields.append({
+                "name": "🔬 Wear & Pattern",
+                "value": " • ".join(meta_parts),
+                "inline": True,
+            })
+
+        if alert.stickers:
+            fields.append({
+                "name": "🏷️ Applied Stickers",
+                "value": ", ".join(alert.stickers)[:1024],
+                "inline": False,
+            })
+
+        fields.append({
+            "name": "⏳ Holding Notice",
+            "value": "CS2 7-day re-market & re-trade lock applies after SCM purchase. Steam Wallet ≠ withdrawable cash.",
+            "inline": False,
+        })
+
+        if alert.warning_tags:
+            fields.append({
+                "name": "⚠️ Risk & Anomaly Warnings",
+                "value": "\n".join(f"• `{t}`" for t in alert.warning_tags)[:1024],
+                "inline": False,
+            })
+
+        embed: dict[str, Any] = {
+            "title": title,
+            "description": desc,
+            "color": color,
+            "fields": fields[:25],
+            "footer": {
+                "text": "CS2 Trading Sniper • Open on Steam & confirm manually • Read-Only",
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        if alert.steam_listing_url:
+            embed["url"] = alert.steam_listing_url
+        return embed
+
+    def build_embed(self, alert: AlertPayload | BuyAlertPayload) -> dict[str, Any]:
         """Construct a validated Discord rich embed conforming to API field limits."""
+        if isinstance(alert, BuyAlertPayload):
+            return self.build_buy_embed(alert)
         color = 0x2ECC71  # Green
         if alert.warning_tags:
             color = 0xE67E22  # Orange/Warning

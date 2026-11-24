@@ -64,7 +64,7 @@ class TestStorageM5(unittest.TestCase):
     def test_migration_4_rollback_data_loss_protection(self) -> None:
         """Verify rolling back V4 to V3 is blocked when alerts exist, unless allow_data_loss=True."""
         raw_db = Database(":memory:")
-        raw_db.initialize()
+        raw_db.initialize(target_version=4)
         curr_repo = CurrencyRepository(raw_db)
         curr_repo.seed_default_currencies()
         item_repo = ItemRepository(raw_db)

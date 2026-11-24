@@ -16,6 +16,7 @@ from sniper.core.identity import (
 from sniper.storage.database import Database
 from sniper.storage.models import (
     AlertEventRecord,
+    BuyListingEvaluationRecord,
     CurrencyRecord,
     InventoryItemRecord,
     InventorySnapshotRecord,
@@ -25,10 +26,30 @@ from sniper.storage.models import (
     OrderbookSnapshotRecord,
     PortfolioSummary,
     PortfolioTransactionRecord,
+    PriceHistoryPointRecord,
+    StrategyAlertDeliveryRecord,
+    StrategyAlertRecord,
+    WatchlistEntryRecord,
     current_utc_iso,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_utc_iso_safe(raw: str | None) -> datetime | None:
+    """Parse an ISO-8601 timestamp string into timezone-aware UTC datetime, or None if invalid."""
+    if not raw or not isinstance(raw, str) or not raw.strip():
+        return None
+    cleaned = raw.strip()
+    if cleaned.endswith("Z"):
+        cleaned = cleaned[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(cleaned)
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def normalize_item_nameid_provenance(
@@ -1482,4 +1503,650 @@ class AlertRepository:
             last_error=row["last_error"],
             delivered_at=row["delivered_at"],
             created_at=row["created_at"],
+        )
+
+
+class WatchlistRepository:
+    """Repository for BUY/SELL watchlist entries."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def save(self, entry: WatchlistEntryRecord) -> WatchlistEntryRecord:
+        """Create or update a watchlist entry keyed by (item_id, strategy, currency_id)."""
+        now = current_utc_iso()
+        created = entry.created_at or now
+        updated = entry.updated_at or now
+
+        with self._db.transaction() as cur:
+            cur.execute("""
+                INSERT INTO watchlist_entries (
+                    item_id, input_url, strategy, currency_id,
+                    max_buy_price_minor, min_discount_pct, min_net_profit_minor,
+                    min_roi_pct, min_sell_multiplier, min_bid_minor,
+                    target_exit_venue, poll_interval_seconds, is_active,
+                    last_scanned_at, notes, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(item_id, strategy, currency_id) DO UPDATE SET
+                    input_url = excluded.input_url,
+                    max_buy_price_minor = excluded.max_buy_price_minor,
+                    min_discount_pct = excluded.min_discount_pct,
+                    min_net_profit_minor = excluded.min_net_profit_minor,
+                    min_roi_pct = excluded.min_roi_pct,
+                    min_sell_multiplier = excluded.min_sell_multiplier,
+                    min_bid_minor = excluded.min_bid_minor,
+                    target_exit_venue = excluded.target_exit_venue,
+                    poll_interval_seconds = excluded.poll_interval_seconds,
+                    is_active = excluded.is_active,
+                    notes = coalesce(excluded.notes, watchlist_entries.notes),
+                    updated_at = excluded.updated_at
+            """, (
+                entry.item_id,
+                entry.input_url,
+                entry.strategy,
+                entry.currency_id,
+                entry.max_buy_price_minor,
+                entry.min_discount_pct,
+                entry.min_net_profit_minor,
+                entry.min_roi_pct,
+                entry.min_sell_multiplier,
+                entry.min_bid_minor,
+                entry.target_exit_venue,
+                entry.poll_interval_seconds,
+                1 if entry.is_active else 0,
+                entry.last_scanned_at,
+                entry.notes,
+                created,
+                updated,
+            ))
+            cur.execute(
+                "SELECT * FROM watchlist_entries WHERE item_id = ? AND strategy = ? AND currency_id = ?",
+                (entry.item_id, entry.strategy, entry.currency_id),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise RuntimeError("Failed to retrieve saved watchlist entry.")
+            return self._row_to_record(row)
+
+    def get_by_id(self, watchlist_id: int) -> WatchlistEntryRecord | None:
+        row = self._db.fetch_one("SELECT * FROM watchlist_entries WHERE watchlist_id = ?", (watchlist_id,))
+        return self._row_to_record(row) if row is not None else None
+
+    def list_entries(
+        self,
+        strategy: str | None = None,
+        active_only: bool = False,
+        currency_id: int | None = None,
+    ) -> list[WatchlistEntryRecord]:
+        query = "SELECT * FROM watchlist_entries WHERE 1=1"
+        params: list[Any] = []
+        if strategy is not None:
+            if strategy in ("BUY", "SELL"):
+                query += " AND (strategy = ? OR strategy = 'BOTH')"
+                params.append(strategy)
+            else:
+                query += " AND strategy = ?"
+                params.append(strategy)
+        if active_only:
+            query += " AND is_active = 1"
+        if currency_id is not None:
+            query += " AND currency_id = ?"
+            params.append(currency_id)
+        query += " ORDER BY watchlist_id ASC"
+        rows = self._db.fetch_all(query, params)
+        return [self._row_to_record(r) for r in rows]
+
+    def update_last_scanned(self, watchlist_id: int, scanned_at: str | None = None) -> None:
+        ts = scanned_at or current_utc_iso()
+        self._db.execute(
+            "UPDATE watchlist_entries SET last_scanned_at = ?, updated_at = ? WHERE watchlist_id = ?",
+            (ts, ts, watchlist_id),
+        )
+
+    def set_active(self, watchlist_id: int, is_active: bool) -> bool:
+        now = current_utc_iso()
+        res = self._db.execute(
+            "UPDATE watchlist_entries SET is_active = ?, updated_at = ? WHERE watchlist_id = ?",
+            (1 if is_active else 0, now, watchlist_id),
+        )
+        return res.rowcount > 0
+
+    def delete(self, watchlist_id: int) -> bool:
+        res = self._db.execute("DELETE FROM watchlist_entries WHERE watchlist_id = ?", (watchlist_id,))
+        return res.rowcount > 0
+
+    @staticmethod
+    def _row_to_record(row: sqlite3.Row) -> WatchlistEntryRecord:
+        return WatchlistEntryRecord(
+            watchlist_id=row["watchlist_id"],
+            item_id=row["item_id"],
+            input_url=row["input_url"],
+            strategy=row["strategy"],
+            currency_id=row["currency_id"],
+            max_buy_price_minor=row["max_buy_price_minor"],
+            min_discount_pct=row["min_discount_pct"],
+            min_net_profit_minor=row["min_net_profit_minor"],
+            min_roi_pct=row["min_roi_pct"],
+            min_sell_multiplier=row["min_sell_multiplier"],
+            min_bid_minor=row["min_bid_minor"],
+            target_exit_venue=row["target_exit_venue"],
+            poll_interval_seconds=row["poll_interval_seconds"],
+            is_active=bool(row["is_active"]),
+            last_scanned_at=row["last_scanned_at"],
+            notes=row["notes"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+
+class PriceHistoryRepository:
+    """Repository for daily market baseline price & volume history."""
+
+    MAX_CLOCK_SKEW_DAYS: int = 1
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def upsert_point(self, point: PriceHistoryPointRecord) -> PriceHistoryPointRecord:
+        """Insert or update a daily price/volume observation."""
+        obs = point.observed_at or current_utc_iso()
+        with self._db.transaction() as cur:
+            cur.execute("""
+                INSERT INTO price_history_points (
+                    item_id, currency_id, bucket_date, median_price_minor,
+                    volume, source, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(item_id, currency_id, bucket_date, source) DO UPDATE SET
+                    median_price_minor = excluded.median_price_minor,
+                    volume = excluded.volume,
+                    observed_at = excluded.observed_at
+            """, (
+                point.item_id,
+                point.currency_id,
+                point.bucket_date,
+                point.median_price_minor,
+                point.volume,
+                point.source,
+                obs,
+            ))
+            cur.execute(
+                "SELECT * FROM price_history_points WHERE item_id = ? AND currency_id = ? AND bucket_date = ? AND source = ?",
+                (point.item_id, point.currency_id, point.bucket_date, point.source),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise RuntimeError("Failed to retrieve upserted price history point.")
+            return self._row_to_record(row)
+
+    def upsert_batch(self, points: Sequence[PriceHistoryPointRecord]) -> int:
+        if not points:
+            return 0
+        now = current_utc_iso()
+        with self._db.transaction() as cur:
+            for p in points:
+                cur.execute("""
+                    INSERT INTO price_history_points (
+                        item_id, currency_id, bucket_date, median_price_minor,
+                        volume, source, observed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(item_id, currency_id, bucket_date, source) DO UPDATE SET
+                        median_price_minor = excluded.median_price_minor,
+                        volume = excluded.volume,
+                        observed_at = excluded.observed_at
+                """, (
+                    p.item_id,
+                    p.currency_id,
+                    p.bucket_date,
+                    p.median_price_minor,
+                    p.volume,
+                    p.source,
+                    p.observed_at or now,
+                ))
+        return len(points)
+
+    def get_recent_points(
+        self,
+        item_id: int,
+        currency_id: int,
+        days: int = 30,
+        now_dt: datetime | None = None,
+    ) -> list[PriceHistoryPointRecord]:
+        """Return valid daily history points within the trailing `days` window.
+
+        Fails closed on malformed dates or far-future dates (>1 day skew).
+        Deduplicates multiple sources per date by keeping highest priority / most recent.
+        """
+        rows = self._db.fetch_all(
+            """
+            SELECT * FROM price_history_points
+            WHERE item_id = ? AND currency_id = ?
+            ORDER BY bucket_date DESC, point_id DESC
+            LIMIT 365
+            """,
+            (item_id, currency_id),
+        )
+        if not rows:
+            return []
+
+        if now_dt is None:
+            now_dt = datetime.now(timezone.utc)
+        elif now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=timezone.utc)
+
+        by_date: dict[str, PriceHistoryPointRecord] = {}
+        for r in rows:
+            bdate = str(r["bucket_date"] or "").strip()
+            try:
+                dt = datetime.strptime(bdate, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+
+            age_days = (now_dt.date() - dt.date()).days
+            if age_days < -self.MAX_CLOCK_SKEW_DAYS or age_days > days:
+                continue
+
+            obs_dt = _parse_utc_iso_safe(r["observed_at"])
+            if obs_dt is None:
+                continue
+
+            if bdate not in by_date:
+                by_date[bdate] = self._row_to_record(r)
+
+        return sorted(by_date.values(), key=lambda p: p.bucket_date)
+
+    @staticmethod
+    def _row_to_record(row: sqlite3.Row) -> PriceHistoryPointRecord:
+        return PriceHistoryPointRecord(
+            point_id=row["point_id"],
+            item_id=row["item_id"],
+            currency_id=row["currency_id"],
+            bucket_date=row["bucket_date"],
+            median_price_minor=row["median_price_minor"],
+            volume=row["volume"],
+            source=row["source"],
+            observed_at=row["observed_at"],
+        )
+
+
+class BuyEvaluationRepository:
+    """Repository for BUY sniper listing evaluations and active/sold status transitions."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def record_evaluation(self, rec: BuyListingEvaluationRecord) -> BuyListingEvaluationRecord:
+        now = rec.evaluated_at or current_utc_iso()
+        with self._db.transaction() as cur:
+            cur.execute("""
+                INSERT INTO buy_listing_evaluations (
+                    item_id, currency_id, steam_listing_id, asset_id,
+                    listing_seller_receives_minor, listing_fee_minor, purchase_buyer_pays_minor,
+                    reference_price_minor, baseline_vwm_minor, floor_median_minor, discount_pct,
+                    conservative_exit_gross_minor, conservative_exit_net_minor,
+                    conservative_net_profit_minor, conservative_roi_pct,
+                    base_net_profit_minor, optimistic_net_profit_minor,
+                    opportunity_score, confidence_score, float_value, paint_seed, paint_index,
+                    stickers_json, inspect_link, warning_tags, status, is_actionable,
+                    suppression_reason, alert_fingerprint, listing_status, evaluated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                rec.item_id,
+                rec.currency_id,
+                rec.steam_listing_id,
+                rec.asset_id,
+                rec.listing_seller_receives_minor,
+                rec.listing_fee_minor,
+                rec.purchase_buyer_pays_minor,
+                rec.reference_price_minor,
+                rec.baseline_vwm_minor,
+                rec.floor_median_minor,
+                rec.discount_pct,
+                rec.conservative_exit_gross_minor,
+                rec.conservative_exit_net_minor,
+                rec.conservative_net_profit_minor,
+                rec.conservative_roi_pct,
+                rec.base_net_profit_minor,
+                rec.optimistic_net_profit_minor,
+                rec.opportunity_score,
+                rec.confidence_score,
+                rec.float_value,
+                rec.paint_seed,
+                rec.paint_index,
+                rec.stickers_json,
+                rec.inspect_link,
+                rec.warning_tags,
+                rec.status,
+                1 if rec.is_actionable else 0,
+                rec.suppression_reason,
+                rec.alert_fingerprint,
+                rec.listing_status,
+                now,
+            ))
+            eval_id = cur.lastrowid
+            if eval_id is None:
+                raise RuntimeError("Failed to obtain lastrowid for buy evaluation.")
+        return rec.model_copy(update={"evaluation_id": eval_id, "evaluated_at": now})
+
+    def list_recent(
+        self,
+        item_id: int | None = None,
+        currency_id: int | None = None,
+        actionable_only: bool = False,
+        limit: int = 100,
+    ) -> list[BuyListingEvaluationRecord]:
+        query = "SELECT * FROM buy_listing_evaluations WHERE 1=1"
+        params: list[Any] = []
+        if item_id is not None:
+            query += " AND item_id = ?"
+            params.append(item_id)
+        if currency_id is not None:
+            query += " AND currency_id = ?"
+            params.append(currency_id)
+        if actionable_only:
+            query += " AND is_actionable = 1"
+        query += " ORDER BY evaluated_at DESC, evaluation_id DESC LIMIT ?"
+        params.append(limit)
+        rows = self._db.fetch_all(query, params)
+        return [self._row_to_record(r) for r in rows]
+
+    def mark_missing_listings_expired(
+        self,
+        item_id: int,
+        currency_id: int,
+        active_steam_listing_ids: Sequence[str],
+    ) -> int:
+        """Mark previously active evaluations not present in fresh render snapshot as expired."""
+        active_set = [str(x) for x in active_steam_listing_ids]
+        if not active_set:
+            res = self._db.execute(
+                "UPDATE buy_listing_evaluations SET listing_status = 'expired' "
+                "WHERE item_id = ? AND currency_id = ? AND listing_status = 'active'",
+                (item_id, currency_id),
+            )
+            return res.rowcount
+
+        placeholders = ", ".join("?" for _ in active_set)
+        res = self._db.execute(
+            f"UPDATE buy_listing_evaluations SET listing_status = 'expired' "
+            f"WHERE item_id = ? AND currency_id = ? AND listing_status = 'active' "
+            f"AND steam_listing_id NOT IN ({placeholders})",
+            (item_id, currency_id, *active_set),
+        )
+        return res.rowcount
+
+    @staticmethod
+    def _row_to_record(row: sqlite3.Row) -> BuyListingEvaluationRecord:
+        return BuyListingEvaluationRecord(
+            evaluation_id=row["evaluation_id"],
+            item_id=row["item_id"],
+            currency_id=row["currency_id"],
+            steam_listing_id=row["steam_listing_id"],
+            asset_id=row["asset_id"],
+            listing_seller_receives_minor=row["listing_seller_receives_minor"],
+            listing_fee_minor=row["listing_fee_minor"],
+            purchase_buyer_pays_minor=row["purchase_buyer_pays_minor"],
+            reference_price_minor=row["reference_price_minor"],
+            baseline_vwm_minor=row["baseline_vwm_minor"],
+            floor_median_minor=row["floor_median_minor"],
+            discount_pct=row["discount_pct"],
+            conservative_exit_gross_minor=row["conservative_exit_gross_minor"],
+            conservative_exit_net_minor=row["conservative_exit_net_minor"],
+            conservative_net_profit_minor=row["conservative_net_profit_minor"],
+            conservative_roi_pct=row["conservative_roi_pct"],
+            base_net_profit_minor=row["base_net_profit_minor"],
+            optimistic_net_profit_minor=row["optimistic_net_profit_minor"],
+            opportunity_score=row["opportunity_score"],
+            confidence_score=row["confidence_score"],
+            float_value=row["float_value"],
+            paint_seed=row["paint_seed"],
+            paint_index=row["paint_index"],
+            stickers_json=row["stickers_json"],
+            inspect_link=row["inspect_link"],
+            warning_tags=row["warning_tags"],
+            status=row["status"],
+            is_actionable=bool(row["is_actionable"]),
+            suppression_reason=row["suppression_reason"],
+            alert_fingerprint=row["alert_fingerprint"],
+            listing_status=row["listing_status"],
+            evaluated_at=row["evaluated_at"],
+        )
+
+
+class StrategyAlertRepository:
+    """Repository for BUY and PORTFOLIO alerts with delivery-aware cooldown & bounded retries."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def record_alert(self, alert: StrategyAlertRecord) -> StrategyAlertRecord:
+        now = alert.created_at or current_utc_iso()
+        with self._db.transaction() as cur:
+            cur.execute("""
+                INSERT INTO strategy_alerts (
+                    strategy, item_id, currency_id, alert_type, alert_fingerprint,
+                    reference_key, reference_price_minor, net_impact_minor, roi_pct,
+                    opportunity_score, confidence_score, warning_tags, status,
+                    payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                alert.strategy,
+                alert.item_id,
+                alert.currency_id,
+                alert.alert_type,
+                alert.alert_fingerprint,
+                alert.reference_key,
+                alert.reference_price_minor,
+                alert.net_impact_minor,
+                alert.roi_pct,
+                alert.opportunity_score,
+                alert.confidence_score,
+                alert.warning_tags,
+                alert.status,
+                alert.payload_json,
+                now,
+            ))
+            alert_id = cur.lastrowid
+            if alert_id is None:
+                raise RuntimeError("Failed to obtain lastrowid for strategy alert.")
+        return alert.model_copy(update={"strategy_alert_id": alert_id, "created_at": now})
+
+    def record_delivery(self, delivery: StrategyAlertDeliveryRecord) -> StrategyAlertDeliveryRecord:
+        now = delivery.created_at or current_utc_iso()
+        with self._db.transaction() as cur:
+            cur.execute("""
+                INSERT INTO strategy_alert_deliveries (
+                    strategy_alert_id, channel, status, attempts, last_error, delivered_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                delivery.strategy_alert_id,
+                delivery.channel,
+                delivery.status,
+                delivery.attempts,
+                delivery.last_error,
+                delivery.delivered_at,
+                now,
+            ))
+            did = cur.lastrowid
+            if did is None:
+                raise RuntimeError("Failed to obtain lastrowid for strategy delivery.")
+        return delivery.model_copy(update={"delivery_id": did, "created_at": now})
+
+    def get_last_successful_delivery_for_channel(
+        self,
+        strategy: str,
+        item_id: int,
+        currency_id: int,
+        alert_type: str,
+        reference_key: str,
+        channel: str,
+    ) -> tuple[StrategyAlertDeliveryRecord, StrategyAlertRecord] | None:
+        row = self._db.fetch_one("""
+            SELECT
+                d.delivery_id, d.strategy_alert_id, d.channel, d.status, d.attempts,
+                d.last_error, d.delivered_at, d.created_at AS deliv_created_at,
+                a.strategy, a.item_id, a.currency_id, a.alert_type, a.alert_fingerprint,
+                a.reference_key, a.reference_price_minor, a.net_impact_minor, a.roi_pct,
+                a.opportunity_score, a.confidence_score, a.warning_tags,
+                a.status AS alert_status, a.payload_json, a.created_at AS alert_created_at
+            FROM strategy_alert_deliveries d
+            JOIN strategy_alerts a ON d.strategy_alert_id = a.strategy_alert_id
+            WHERE a.strategy = ? AND a.item_id = ? AND a.currency_id = ?
+              AND a.alert_type = ? AND a.reference_key = ?
+              AND d.channel = ? AND d.status = 'delivered'
+            ORDER BY d.delivery_id DESC
+            LIMIT 1
+        """, (strategy, item_id, currency_id, alert_type, reference_key, channel))
+        if row is None:
+            return None
+        return self._row_to_delivery(row), self._row_to_alert(row, status_key="alert_status", created_key="alert_created_at")
+
+    def is_channel_in_cooldown(
+        self,
+        strategy: str,
+        item_id: int,
+        currency_id: int,
+        alert_type: str,
+        reference_key: str,
+        channel: str,
+        cooldown_seconds: int,
+        new_price_minor: int,
+        price_direction: str = "drop",  # 'drop' for BUY deals, 'rise' for SELL/resale
+        meaningful_change_pct: float = 0.05,
+        now_dt: datetime | None = None,
+    ) -> bool:
+        """Check whether a channel is in cooldown for a specific strategy alert reference key."""
+        res = self.get_last_successful_delivery_for_channel(
+            strategy=strategy,
+            item_id=item_id,
+            currency_id=currency_id,
+            alert_type=alert_type,
+            reference_key=reference_key,
+            channel=channel,
+        )
+        if res is None:
+            return False
+        delivery, alert = res
+
+        if now_dt is None:
+            now_dt = datetime.now(timezone.utc)
+        elif now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=timezone.utc)
+
+        ref_dt = _parse_utc_iso_safe(delivery.delivered_at or delivery.created_at)
+        if ref_dt is None:
+            return False
+
+        elapsed = (now_dt - ref_dt).total_seconds()
+        if elapsed >= cooldown_seconds:
+            return False
+
+        if price_direction == "drop":
+            drop_threshold = int(math.floor(alert.reference_price_minor * (1.0 - meaningful_change_pct)))
+            if new_price_minor <= drop_threshold:
+                return False
+        else:
+            rise_threshold = int(math.ceil(alert.reference_price_minor * (1.0 + meaningful_change_pct)))
+            if new_price_minor >= rise_threshold:
+                return False
+
+        return True
+
+    def is_channel_in_retry_backoff(
+        self,
+        strategy: str,
+        item_id: int,
+        currency_id: int,
+        alert_type: str,
+        channel: str,
+        alert_fingerprint: str,
+        backoff_seconds: int = 60,
+        max_retries: int = 3,
+        now_dt: datetime | None = None,
+    ) -> bool:
+        """Persistent cumulative retry accounting per (strategy, item, currency, alert_type, channel, fingerprint)."""
+        if not alert_fingerprint:
+            return False
+
+        rows = self._db.fetch_all("""
+            SELECT d.delivery_id, d.strategy_alert_id, d.channel, d.status, d.attempts,
+                   d.last_error, d.delivered_at, d.created_at
+            FROM strategy_alert_deliveries d
+            JOIN strategy_alerts a ON d.strategy_alert_id = a.strategy_alert_id
+            WHERE a.strategy = ? AND a.item_id = ? AND a.currency_id = ?
+              AND a.alert_type = ? AND d.channel = ? AND a.alert_fingerprint = ?
+            ORDER BY d.delivery_id DESC
+        """, (strategy, item_id, currency_id, alert_type, channel, alert_fingerprint))
+
+        if not rows:
+            return False
+        deliveries = [self._row_to_delivery(r) for r in rows]
+
+        if any(d.status == "delivered" for d in deliveries):
+            return False
+
+        failed_deliveries = [d for d in deliveries if d.status == "failed"]
+        if not failed_deliveries:
+            return False
+
+        if len(failed_deliveries) >= (1 + max_retries):
+            return True
+
+        if now_dt is None:
+            now_dt = datetime.now(timezone.utc)
+        elif now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=timezone.utc)
+
+        ref_dt = _parse_utc_iso_safe(failed_deliveries[0].created_at)
+        if ref_dt is None:
+            return False
+        return (now_dt - ref_dt).total_seconds() < backoff_seconds
+
+    def list_recent_alerts(self, strategy: str | None = None, limit: int = 100) -> list[StrategyAlertRecord]:
+        query = "SELECT * FROM strategy_alerts"
+        params: list[Any] = []
+        if strategy is not None:
+            query += " WHERE strategy = ?"
+            params.append(strategy)
+        query += " ORDER BY created_at DESC, strategy_alert_id DESC LIMIT ?"
+        params.append(limit)
+        rows = self._db.fetch_all(query, params)
+        return [self._row_to_alert(r) for r in rows]
+
+    @staticmethod
+    def _row_to_alert(
+        row: sqlite3.Row,
+        status_key: str = "status",
+        created_key: str = "created_at",
+    ) -> StrategyAlertRecord:
+        return StrategyAlertRecord(
+            strategy_alert_id=row["strategy_alert_id"],
+            strategy=row["strategy"],
+            item_id=row["item_id"],
+            currency_id=row["currency_id"],
+            alert_type=row["alert_type"],
+            alert_fingerprint=row["alert_fingerprint"],
+            reference_key=row["reference_key"],
+            reference_price_minor=row["reference_price_minor"],
+            net_impact_minor=row["net_impact_minor"],
+            roi_pct=row["roi_pct"],
+            opportunity_score=row["opportunity_score"],
+            confidence_score=row["confidence_score"],
+            warning_tags=row["warning_tags"],
+            status=row[status_key],
+            payload_json=row["payload_json"],
+            created_at=row[created_key],
+        )
+
+    @staticmethod
+    def _row_to_delivery(row: sqlite3.Row) -> StrategyAlertDeliveryRecord:
+        created = row["deliv_created_at"] if "deliv_created_at" in row.keys() else row["created_at"]
+        return StrategyAlertDeliveryRecord(
+            delivery_id=row["delivery_id"],
+            strategy_alert_id=row["strategy_alert_id"],
+            channel=row["channel"],
+            status=row["status"],
+            attempts=row["attempts"],
+            last_error=row["last_error"],
+            delivered_at=row["delivered_at"],
+            created_at=created,
         )

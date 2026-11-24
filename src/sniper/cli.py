@@ -21,9 +21,15 @@ from sniper.core.http_client import ReadOnlyHttpClient
 from sniper.adapters.inventory import ManualInventoryImporter, PublicInventoryClient, validate_steamid64
 from sniper.adapters.steam_market import SteamMarketAdapter
 from sniper.core.rate_limiter import SequentialRateLimiter
+from sniper.engine.buy_engine import (
+    BuyEvaluationConfig,
+    BuySniperEngine,
+    import_manual_price_history_json,
+)
 from sniper.engine.sell_engine import SellEvaluationConfig, SellSniperEngine
 from sniper.notifications import (
     AlertPayload,
+    BuyAlertPayload,
     DeliveryStatus,
     DiscordNotifier,
     DiscordWebhookChannel,
@@ -32,12 +38,14 @@ from sniper.notifications import (
     TelegramNotifier,
 )
 from sniper.storage.database import Database
-from sniper.storage.models import ItemRecord
+from sniper.storage.models import ItemRecord, WatchlistEntryRecord
 from sniper.storage.repositories import (
     AlertRepository,
+    BuyEvaluationRepository,
     CurrencyRepository,
     InventoryRepository,
     ItemRepository,
+    WatchlistRepository,
 )
 from sniper.storage.service import ItemIdentityService
 
@@ -324,17 +332,149 @@ def cmd_status(args: argparse.Namespace) -> int:
             inv_count = db.fetch_one("SELECT COUNT(*) FROM inventory_items")[0]
             ob_count = db.fetch_one("SELECT COUNT(*) FROM orderbook_snapshots")[0]
             alert_count = db.fetch_one("SELECT COUNT(*) FROM alert_events")[0]
+            wl_count = db.fetch_one("SELECT COUNT(*) FROM watchlist_entries")[0] if ver >= 5 else 0
+            buy_count = db.fetch_one("SELECT COUNT(*) FROM buy_listing_evaluations")[0] if ver >= 5 else 0
 
             print(f"Catalog Items:         {item_count}")
+            print(f"Watchlist Entries:     {wl_count}")
             print(f"Inventory Snapshots:   {snap_count}")
             print(f"Inventory Items:       {inv_count}")
             print(f"Orderbook Snapshots:   {ob_count}")
+            print(f"BUY Evaluations:       {buy_count}")
             print(f"Alert Events Recorded: {alert_count}")
         finally:
             db.close()
 
     _print_channel_status()
     return 0
+
+
+async def cmd_watchlist_add(args: argparse.Namespace) -> int:
+    """Resolve URL (canonical or grouped G...) and save to watchlist."""
+    db = init_database(args.db)
+    try:
+        async with ReadOnlyHttpClient() as http_client:
+            adapter = SteamMarketAdapter(http_client=http_client)
+            svc = ItemIdentityService(db)
+            url = args.url.strip()
+            try:
+                res = svc.resolve_and_persist(url)
+            except Exception:
+                # Try SSR hydration for grouped G... URLs
+                ssr_ctx = await adapter.get_ssr_listing_context(url)
+                res = svc.resolve_and_persist(url, ssr_data=ssr_ctx)
+
+            repo = WatchlistRepository(db)
+            saved = repo.save(
+                WatchlistEntryRecord(
+                    item_id=res.record.item_id,
+                    input_url=url,
+                    strategy=args.strategy,
+                    currency_id=args.currency_id,
+                    max_buy_price_minor=args.max_buy_cents,
+                    min_discount_pct=args.min_discount,
+                    min_net_profit_minor=args.min_profit_cents,
+                    min_roi_pct=args.min_roi,
+                    notes=args.notes,
+                )
+            )
+            print(f"Added watchlist #{saved.watchlist_id}: {res.record.market_hash_name} ({saved.strategy})")
+            return 0
+    except Exception as exc:
+        print(f"Failed to add watchlist entry: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        db.close()
+
+
+def cmd_watchlist_list(args: argparse.Namespace) -> int:
+    """List configured watchlist entries."""
+    db = init_database(args.db)
+    try:
+        entries = WatchlistRepository(db).list_entries()
+        item_repo = ItemRepository(db)
+        print(f"Watchlist entries ({len(entries)}):")
+        for e in entries:
+            item = item_repo.get_by_id(e.item_id)
+            name = item.market_hash_name if item else f"item#{e.item_id}"
+            max_str = f"${e.max_buy_price_minor / 100:.2f}" if e.max_buy_price_minor else "Auto"
+            print(f"  #{e.watchlist_id:<4} [{e.strategy:<4}] {'ON ' if e.is_active else 'OFF'} {name:<42} Max:{max_str} MinROI:{e.min_roi_pct:.1f}%")
+        return 0
+    finally:
+        db.close()
+
+
+def cmd_watchlist_remove(args: argparse.Namespace) -> int:
+    """Remove a watchlist entry by ID."""
+    db = init_database(args.db)
+    try:
+        deleted = WatchlistRepository(db).delete(args.watchlist_id)
+        if not deleted:
+            print(f"Watchlist entry #{args.watchlist_id} not found.", file=sys.stderr)
+            return 1
+        print(f"Removed watchlist entry #{args.watchlist_id}.")
+        return 0
+    finally:
+        db.close()
+
+
+def cmd_import_history(args: argparse.Namespace) -> int:
+    """Import daily price history JSON file for cookie-free BUY baseline calculations."""
+    path = Path(args.file)
+    if not path.is_file():
+        print(f"Error: History JSON file not found at '{path}'.", file=sys.stderr)
+        return 1
+    db = init_database(args.db)
+    try:
+        content = path.read_text(encoding="utf-8")
+        count = import_manual_price_history_json(
+            json_content=content,
+            market_hash_name=args.market_hash_name,
+            db=db,
+            currency_id=args.currency_id,
+        )
+        print(f"Imported {count} daily price history points for '{args.market_hash_name}'.")
+        return 0
+    except Exception as exc:
+        print(f"Failed to import price history: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        db.close()
+
+
+async def cmd_scan_buy(args: argparse.Namespace) -> int:
+    """Scan active BUY watchlist entries for underpriced individual listings."""
+    db = init_database(args.db)
+    try:
+        async with ReadOnlyHttpClient() as http_client:
+            adapter = SteamMarketAdapter(http_client=http_client)
+            identity_service = ItemIdentityService(db)
+            dispatcher = NotificationDispatcher.from_database(db)
+            config = BuyEvaluationConfig(
+                currency_id=args.currency_id,
+                min_roi_pct=args.min_roi,
+                max_buy_price_minor=args.max_buy_cents,
+            )
+            engine = BuySniperEngine(
+                db=db,
+                market_adapter=adapter,
+                identity_service=identity_service,
+                dispatcher=dispatcher,
+                config=config,
+            )
+            evals = await engine.scan_watchlist(
+                currency_id=args.currency_id,
+                dispatch_notifications=not args.no_notifications,
+            )
+            actionable = sum(1 for e in evals if e.is_actionable)
+            print(f"Evaluated {len(evals)} individual BUY listings | Actionable Signals: {actionable}")
+            for ev in evals[:25]:
+                p_str = f"{ev.currency_symbol}{ev.purchase_buyer_pays_minor / 100:.2f}" if ev.purchase_buyer_pays_minor else "N/A"
+                net_str = f"{ev.currency_symbol}{ev.conservative_net_profit_minor / 100:.2f}"
+                print(f"  [{ev.status:<22}] {ev.market_hash_name:<35} #{ev.steam_listing_id:<14} Cost:{p_str} ConsNet:{net_str} ({ev.conservative_roi_pct:.1f}%)")
+            return 0
+    finally:
+        db.close()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -374,6 +514,43 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--min-multiple", type=float, default=1.0, help="Minimum bid multiple over baseline")
     p_scan.add_argument("--no-notifications", action="store_true", help="Do not dispatch notifications")
 
+    # watchlist management (M6)
+    p_wl = subparsers.add_parser("watchlist", help="Manage BUY/SELL item watchlists")
+    wl_sub = p_wl.add_subparsers(dest="watchlist_action", help="Watchlist actions")
+
+    p_wl_add = wl_sub.add_parser("add", help="Add a Steam URL (standard or grouped G...) to watchlist")
+    p_wl_add.add_argument("url", help="Steam Market listing URL")
+    p_wl_add.add_argument("--db", default=get_default_db_path(), help="Database path")
+    p_wl_add.add_argument("--strategy", choices=["BUY", "SELL", "BOTH"], default="BUY")
+    p_wl_add.add_argument("--currency-id", type=int, default=1)
+    p_wl_add.add_argument("--max-buy-cents", type=int, default=None)
+    p_wl_add.add_argument("--min-discount", type=float, default=None)
+    p_wl_add.add_argument("--min-profit-cents", type=int, default=None)
+    p_wl_add.add_argument("--min-roi", type=float, default=5.0)
+    p_wl_add.add_argument("--notes", default=None)
+
+    p_wl_list = wl_sub.add_parser("list", help="List configured watchlist entries")
+    p_wl_list.add_argument("--db", default=get_default_db_path(), help="Database path")
+
+    p_wl_rm = wl_sub.add_parser("remove", help="Remove a watchlist entry")
+    p_wl_rm.add_argument("watchlist_id", type=int, help="Watchlist ID")
+    p_wl_rm.add_argument("--db", default=get_default_db_path(), help="Database path")
+
+    # import-history (M6)
+    p_hist = subparsers.add_parser("import-history", help="Import daily price history JSON baseline points")
+    p_hist.add_argument("market_hash_name", help="Exact CS2 market_hash_name")
+    p_hist.add_argument("file", help="Path to daily history JSON file")
+    p_hist.add_argument("--db", default=get_default_db_path(), help="Database path")
+    p_hist.add_argument("--currency-id", type=int, default=1)
+
+    # scan-buy (M6)
+    p_buy = subparsers.add_parser("scan-buy", help="Scan active BUY watchlist entries for underpriced listings")
+    p_buy.add_argument("--db", default=get_default_db_path(), help="Database path")
+    p_buy.add_argument("--currency-id", type=int, default=1)
+    p_buy.add_argument("--min-roi", type=float, default=5.0)
+    p_buy.add_argument("--max-buy-cents", type=int, default=None)
+    p_buy.add_argument("--no-notifications", action="store_true")
+
     # test-notifications / test-notification
     p_test = subparsers.add_parser(
         "test-notifications",
@@ -410,6 +587,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_import_json(args)
     elif args.subcommand == "scan-sell":
         return asyncio.run(cmd_scan_sell(args))
+    elif args.subcommand == "watchlist":
+        action = getattr(args, "watchlist_action", None)
+        if action == "add":
+            return asyncio.run(cmd_watchlist_add(args))
+        elif action == "list":
+            return cmd_watchlist_list(args)
+        elif action == "remove":
+            return cmd_watchlist_remove(args)
+        parser.print_help()
+        return 1
+    elif args.subcommand == "import-history":
+        return cmd_import_history(args)
+    elif args.subcommand == "scan-buy":
+        return asyncio.run(cmd_scan_buy(args))
     elif args.subcommand in ("test-notifications", "test-notification"):
         return asyncio.run(cmd_test_notifications(args))
     elif args.subcommand in ("status", "channel-status"):

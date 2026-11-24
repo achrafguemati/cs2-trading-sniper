@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import logging
 from typing import Sequence
 
 from sniper.notifications.base import BaseNotificationChannel, BaseNotifier, redact_secrets
 from sniper.notifications.discord import DiscordNotifier
-from sniper.notifications.models import AlertPayload, DeliveryStatus, NotificationResult
+from sniper.notifications.models import (
+    AlertPayload,
+    BuyAlertPayload,
+    DeliveryStatus,
+    NotificationResult,
+)
 from sniper.notifications.telegram import TelegramNotifier
 from sniper.storage.database import Database
-from sniper.storage.models import NotificationDeliveryRecord
-from sniper.storage.repositories import AlertRepository
+from sniper.storage.models import NotificationDeliveryRecord, StrategyAlertDeliveryRecord
+from sniper.storage.repositories import AlertRepository, StrategyAlertRepository
 
 logger = logging.getLogger(__name__)
 
@@ -23,12 +29,14 @@ class NotificationDispatcher:
         self,
         channels: Sequence[BaseNotifier] | None = None,
         alert_repo: AlertRepository | None = None,
+        strategy_alert_repo: StrategyAlertRepository | None = None,
     ) -> None:
         self._channels = list(channels) if channels is not None else [
             DiscordNotifier(),
             TelegramNotifier(),
         ]
         self._alert_repo = alert_repo
+        self._strategy_alert_repo = strategy_alert_repo
 
     @property
     def channels(self) -> list[BaseNotifier]:
@@ -38,12 +46,14 @@ class NotificationDispatcher:
     @classmethod
     def from_database(cls, db: Database) -> NotificationDispatcher:
         """Create a default dispatcher with SQLite delivery tracking."""
-        repo = AlertRepository(db)
-        return cls(alert_repo=repo)
+        return cls(
+            alert_repo=AlertRepository(db),
+            strategy_alert_repo=StrategyAlertRepository(db),
+        )
 
     async def dispatch(
         self,
-        alert: AlertPayload,
+        alert: AlertPayload | BuyAlertPayload,
         alert_id: int | None = None,
         only_configured: bool = True,
         check_cooldown: bool = True,
@@ -51,15 +61,17 @@ class NotificationDispatcher:
         meaningful_increase_pct: float = 0.05,
         failed_retry_backoff_seconds: int = 60,
         max_delivery_retries: int = 3,
+        now_dt: datetime | None = None,
     ) -> dict[str, NotificationResult]:
         """Dispatch alert across notification channels.
 
-        Failure in one channel never prevents or blocks delivery to other channels.
-        Checks per-channel cooldown and retry backoff against prior delivery records.
-        Records delivery attempts, skips, and outcomes to SQLite database when alert_id is provided.
+        Supports SELL (`AlertPayload`) and BUY (`BuyAlertPayload`) payloads with channel isolation,
+        delivery-aware per-channel cooldown, cumulative retry limits, and SQLite audit logging.
         """
         results: dict[str, NotificationResult] = {}
         target_alert_id = alert_id or alert.alert_id
+        is_buy = isinstance(alert, BuyAlertPayload)
+        persisted_created_at = now_dt.isoformat() if now_dt is not None else None
 
         for ch in self._channels:
             ch_name = ch.channel_name
@@ -77,53 +89,121 @@ class NotificationDispatcher:
                     attempts=0,
                     last_error=reason,
                 )
-                self._persist_result(target_alert_id, results[ch_name])
+                self._persist_result(
+                    target_alert_id,
+                    results[ch_name],
+                    is_buy=is_buy,
+                    created_at=persisted_created_at,
+                )
                 continue
 
-            # 2. Per-channel successful delivery cooldown gate:
-            if (
-                check_cooldown
-                and self._alert_repo is not None
-                and alert.item_id is not None
-            ):
-                in_cd = self._alert_repo.is_channel_in_cooldown(
-                    item_id=alert.item_id,
-                    currency_id=getattr(alert, "currency_id", 1),
-                    alert_type="sell_target_bid",
-                    channel=ch_name,
-                    cooldown_seconds=cooldown_seconds,
-                    new_bid_minor=alert.highest_buy_order_minor,
-                    meaningful_increase_pct=meaningful_increase_pct,
-                )
-                if in_cd:
-                    results[ch_name] = NotificationResult(
+            # 2. Per-channel cooldown & retry backoff gate:
+            if check_cooldown and alert.item_id is not None:
+                if is_buy and self._strategy_alert_repo is not None:
+                    in_cd = self._strategy_alert_repo.is_channel_in_cooldown(
+                        strategy="BUY",
+                        item_id=alert.item_id,
+                        currency_id=alert.currency_id,
+                        alert_type="buy_listing_candidate",
+                        reference_key=alert.steam_listing_id,
                         channel=ch_name,
-                        status=DeliveryStatus.SKIPPED,
-                        attempts=0,
-                        last_error=f"Channel '{ch_name}' in cooldown from previous successful delivery.",
+                        cooldown_seconds=cooldown_seconds,
+                        new_price_minor=alert.purchase_buyer_pays_minor,
+                        price_direction="drop",
+                        meaningful_change_pct=meaningful_increase_pct,
+                        now_dt=now_dt,
                     )
-                    self._persist_result(target_alert_id, results[ch_name])
-                    continue
+                    if in_cd:
+                        results[ch_name] = NotificationResult(
+                            channel=ch_name,
+                            status=DeliveryStatus.SKIPPED,
+                            attempts=0,
+                            last_error=f"Channel '{ch_name}' in cooldown from previous BUY delivery.",
+                        )
+                        self._persist_result(
+                            target_alert_id,
+                            results[ch_name],
+                            is_buy=True,
+                            created_at=persisted_created_at,
+                        )
+                        continue
 
-                # 3. Per-channel failed delivery retry backoff gate:
-                in_backoff = self._alert_repo.is_channel_in_retry_backoff(
-                    item_id=alert.item_id,
-                    currency_id=getattr(alert, "currency_id", 1),
-                    alert_type="sell_target_bid",
-                    channel=ch_name,
-                    alert_fingerprint=getattr(alert, "alert_fingerprint", None),
-                    backoff_seconds=failed_retry_backoff_seconds,
-                    max_retries=max_delivery_retries,
-                )
-                if in_backoff:
-                    results[ch_name] = NotificationResult(
+                    in_backoff = self._strategy_alert_repo.is_channel_in_retry_backoff(
+                        strategy="BUY",
+                        item_id=alert.item_id,
+                        currency_id=alert.currency_id,
+                        alert_type="buy_listing_candidate",
                         channel=ch_name,
-                        status=DeliveryStatus.SKIPPED,
-                        attempts=0,
-                        last_error=f"Channel '{ch_name}' in retry backoff after previous failed delivery.",
+                        alert_fingerprint=alert.alert_fingerprint or "",
+                        backoff_seconds=failed_retry_backoff_seconds,
+                        max_retries=max_delivery_retries,
+                        now_dt=now_dt,
                     )
-                    self._persist_result(target_alert_id, results[ch_name])
-                    continue
+                    if in_backoff:
+                        results[ch_name] = NotificationResult(
+                            channel=ch_name,
+                            status=DeliveryStatus.SKIPPED,
+                            attempts=0,
+                            last_error=f"Channel '{ch_name}' in BUY retry backoff after previous failed delivery.",
+                        )
+                        self._persist_result(
+                            target_alert_id,
+                            results[ch_name],
+                            is_buy=True,
+                            created_at=persisted_created_at,
+                        )
+                        continue
+
+                elif not is_buy and self._alert_repo is not None:
+                    in_cd = self._alert_repo.is_channel_in_cooldown(
+                        item_id=alert.item_id,
+                        currency_id=getattr(alert, "currency_id", 1),
+                        alert_type="sell_target_bid",
+                        channel=ch_name,
+                        cooldown_seconds=cooldown_seconds,
+                        new_bid_minor=alert.highest_buy_order_minor,
+                        meaningful_increase_pct=meaningful_increase_pct,
+                        now_dt=now_dt,
+                    )
+                    if in_cd:
+                        results[ch_name] = NotificationResult(
+                            channel=ch_name,
+                            status=DeliveryStatus.SKIPPED,
+                            attempts=0,
+                            last_error=f"Channel '{ch_name}' in cooldown from previous successful delivery.",
+                        )
+                        self._persist_result(
+                            target_alert_id,
+                            results[ch_name],
+                            is_buy=False,
+                            created_at=persisted_created_at,
+                        )
+                        continue
+
+                    in_backoff = self._alert_repo.is_channel_in_retry_backoff(
+                        item_id=alert.item_id,
+                        currency_id=getattr(alert, "currency_id", 1),
+                        alert_type="sell_target_bid",
+                        channel=ch_name,
+                        alert_fingerprint=getattr(alert, "alert_fingerprint", None),
+                        backoff_seconds=failed_retry_backoff_seconds,
+                        max_retries=max_delivery_retries,
+                        now_dt=now_dt,
+                    )
+                    if in_backoff:
+                        results[ch_name] = NotificationResult(
+                            channel=ch_name,
+                            status=DeliveryStatus.SKIPPED,
+                            attempts=0,
+                            last_error=f"Channel '{ch_name}' in retry backoff after previous failed delivery.",
+                        )
+                        self._persist_result(
+                            target_alert_id,
+                            results[ch_name],
+                            is_buy=False,
+                            created_at=persisted_created_at,
+                        )
+                        continue
 
             # 4. Dispatch alert to channel:
             try:
@@ -140,25 +220,51 @@ class NotificationDispatcher:
                 )
 
             # Persist delivery attempt
-            self._persist_result(target_alert_id, results[ch_name])
+            self._persist_result(
+                target_alert_id,
+                results[ch_name],
+                is_buy=is_buy,
+                created_at=persisted_created_at,
+            )
 
         return results
 
-    def _persist_result(self, target_alert_id: int | None, r: NotificationResult) -> None:
+    def _persist_result(
+        self,
+        target_alert_id: int | None,
+        r: NotificationResult,
+        *,
+        is_buy: bool = False,
+        created_at: str | None = None,
+    ) -> None:
         """Persist delivery outcome or skipped status to SQLite database."""
-        if target_alert_id is None or self._alert_repo is None:
+        if target_alert_id is None:
             return
         try:
-            self._alert_repo.record_delivery(
-                NotificationDeliveryRecord(
-                    alert_id=target_alert_id,
-                    channel=r.channel,
-                    status=r.status.value,
-                    attempts=r.attempts,
-                    last_error=r.last_error,
-                    delivered_at=r.delivered_at,
-                )
-            )
+            if is_buy and self._strategy_alert_repo is not None:
+                kwargs = {
+                    "strategy_alert_id": target_alert_id,
+                    "channel": r.channel,
+                    "status": r.status.value,
+                    "attempts": r.attempts,
+                    "last_error": r.last_error,
+                    "delivered_at": r.delivered_at,
+                }
+                if created_at is not None:
+                    kwargs["created_at"] = created_at
+                self._strategy_alert_repo.record_delivery(StrategyAlertDeliveryRecord(**kwargs))
+            elif not is_buy and self._alert_repo is not None:
+                kwargs = {
+                    "alert_id": target_alert_id,
+                    "channel": r.channel,
+                    "status": r.status.value,
+                    "attempts": r.attempts,
+                    "last_error": r.last_error,
+                    "delivered_at": r.delivered_at,
+                }
+                if created_at is not None:
+                    kwargs["created_at"] = created_at
+                self._alert_repo.record_delivery(NotificationDeliveryRecord(**kwargs))
         except Exception as db_exc:
             sanitized_db_err = redact_secrets(str(db_exc))
             logger.error("Failed to persist delivery record for %s: %s", r.channel, sanitized_db_err)

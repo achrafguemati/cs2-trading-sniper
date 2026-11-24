@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from sniper.cli import main
 from sniper.core.http_client import ReadOnlyHttpClient
 from sniper.storage.database import Database
+from sniper.storage.migrations import MAX_SUPPORTED_VERSION
 from sniper.storage.models import ItemRecord
 from sniper.storage.repositories import CurrencyRepository, ItemRepository
 
@@ -56,7 +57,7 @@ class TestCli(unittest.TestCase):
             self.assertEqual(code, 0)
             output = mock_out.getvalue()
             self.assertIn("CS2 Trading Sniper System Status", output)
-            self.assertIn("Schema Version:        v4", output)
+            self.assertIn(f"Schema Version:        v{MAX_SUPPORTED_VERSION}", output)
             self.assertIn("Discord Webhook", output)
             self.assertIn("Telegram Bot", output)
             self.assertNotIn("Email SMTP", output)

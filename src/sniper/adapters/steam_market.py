@@ -21,6 +21,8 @@ from urllib.parse import quote
 
 import httpx
 
+from sniper.adapters.listing_parser import extract_public_price_history
+from sniper.core.currency import CurrencyConfig
 from sniper.core.http_client import ReadOnlyHttpClient
 from sniper.core.identity import (
     ItemIdentityResult,
@@ -301,6 +303,40 @@ class SteamMarketAdapter:
         def parser_callback(response: httpx.Response) -> SsrListingContext:
             source_url = str(response.url)
             return extract_ssr_hydration_data(response.text, source_url)
+
+        return await self.http_client.get_parsed(
+            target_url,
+            parser_callback=parser_callback,
+            expect_json=False,
+        )
+
+    async def get_public_price_history(
+        self,
+        identity: ItemIdentityResult,
+        currency: CurrencyConfig,
+    ) -> list[tuple[str, int, int]]:
+        """Fetch cookie-free public listing page HTML and extract chart series if available.
+
+        Never sends cookies or calls authenticated /market/pricehistory/.
+        Returns [] cleanly if chart data is omitted on public unauthenticated pages.
+        """
+        if not isinstance(identity, ItemIdentityResult):
+            raise TypeError(f"identity must be an ItemIdentityResult, got {type(identity).__name__}.")
+        if identity.appid != 730:
+            raise ValueError(f"Invalid appid {identity.appid}: only CS2 (appid 730) is supported.")
+        if identity.resolution_status == ResolutionStatus.PARSED_URL_ONLY or not identity.market_hash_name:
+            raise ValueError("Canonical resolution required to fetch public listing history.")
+        if not currency.is_metadata_verified:
+            raise ValueError(f"Verified currency metadata required, got {currency.code}.")
+
+        encoded_name = quote(identity.market_hash_name.strip(), safe="")
+        target_url = f"https://steamcommunity.com/market/listings/730/{encoded_name}"
+
+        def parser_callback(response: httpx.Response) -> list[tuple[str, int, int]]:
+            text = response.text
+            if not isinstance(text, str) or "<html" not in text.lower() and "steamcommunity" not in text.lower():
+                raise ValueError(f"Unexpected non-HTML response from {response.url}")
+            return extract_public_price_history(text, currency)
 
         return await self.http_client.get_parsed(
             target_url,

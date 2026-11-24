@@ -22,6 +22,7 @@ from sniper.core.identity import (
 )
 from sniper.storage.database import Database, ExecutionResult
 from sniper.storage.migrations import (
+    MAX_SUPPORTED_VERSION,
     DestructiveMigrationError,
     IncompatibleSchemaVersionError,
     IntegrityDowngradeError,
@@ -170,10 +171,10 @@ class TestStorage(unittest.TestCase):
     # -------------------------------------------------------------------------
 
     def test_database_initialization(self) -> None:
-        """Verify initial database version matches latest migration version (V4)."""
-        self.assertEqual(self.db.get_version(), 4)
+        """Verify initial database version matches latest migration version."""
+        self.assertEqual(self.db.get_version(), MAX_SUPPORTED_VERSION)
         applied = get_applied_versions(self.db.connection)
-        self.assertEqual(applied, [1, 2, 3, 4])
+        self.assertEqual(applied, list(range(1, MAX_SUPPORTED_VERSION + 1)))
 
     def test_repeated_initialization_idempotent(self) -> None:
         """Verify repeated initialization is a safe no-op that preserves existing data."""
@@ -188,7 +189,7 @@ class TestStorage(unittest.TestCase):
         # Re-initialize database
         applied_again = self.db.initialize()
         self.assertEqual(applied_again, [])
-        self.assertEqual(self.db.get_version(), 4)
+        self.assertEqual(self.db.get_version(), MAX_SUPPORTED_VERSION)
 
         # Existing record remains intact
         retrieved = self.item_repo.get_by_id(saved.item_id)
@@ -652,7 +653,7 @@ class TestStorage(unittest.TestCase):
 
         # Roll back outer transaction cleanly
         conn.execute("ROLLBACK")
-        self.assertEqual(raw_db.get_version(), 4)
+        self.assertEqual(raw_db.get_version(), MAX_SUPPORTED_VERSION)
         raw_db.close()
 
     def test_apply_migrations_inside_active_transaction_rejected(self) -> None:
@@ -691,11 +692,11 @@ class TestStorage(unittest.TestCase):
                 futures = [executor.submit(run_init, i) for i in range(4)]
                 results = [f.result() for f in concurrent.futures.as_completed(futures)]
 
-            self.assertEqual(results, [4, 4, 4, 4])
+            self.assertEqual(results, [MAX_SUPPORTED_VERSION] * 4)
             with Database(db_path) as final_db:
-                self.assertEqual(final_db.get_version(), 4)
+                self.assertEqual(final_db.get_version(), MAX_SUPPORTED_VERSION)
                 applied = get_applied_versions(final_db.connection)
-                self.assertEqual(applied, [1, 2, 3, 4])
+                self.assertEqual(applied, list(range(1, MAX_SUPPORTED_VERSION + 1)))
 
     def test_concurrent_apply_versus_rollback_serialize_cleanly(self) -> None:
         """Verify concurrent apply and rollback across independent connections serialize cleanly without corruption."""
@@ -1616,7 +1617,7 @@ class TestStorage(unittest.TestCase):
                 saved_id = saved_item.item_id
 
             with Database(db_file) as reopened_db:
-                self.assertEqual(reopened_db.get_version(), 4)
+                self.assertEqual(reopened_db.get_version(), MAX_SUPPORTED_VERSION)
 
                 re_i_repo = ItemRepository(reopened_db)
                 re_item = re_i_repo.get_by_id(saved_id)

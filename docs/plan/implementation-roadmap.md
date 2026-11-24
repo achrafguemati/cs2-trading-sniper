@@ -178,12 +178,14 @@
     - `AlertRepository.is_channel_in_retry_backoff()`: cumulative retry accounting per `(item_id, currency_id, alert_type, channel, alert_fingerprint)`, enforcing a maximum of 3 retries (4 total failures) after the initial failure; cleared upon successful delivery or new bid fingerprint.
 * **Acceptance Criteria:** Verified: Cumulative retries cap at 3; new bids receive fresh budget; malformed timestamps excluded from baseline; manual JSON rejects floats and booleans; 342 offline unit tests pass cleanly.
 
-### Milestone 6: BUY Engine + Listing Evaluator
+### Milestone 6: BUY Engine + Listing Evaluator (COMPLETED)
+* **Status:** Complete & Verified.
 * **Deliverables:**
-  - Listing-level parser extracting listing ID, asset ID, price, and stickers.
-  - Volume-weighted median baseline calculator.
-  - Conservative exit scenario model with 7-day risk buffer.
-* **Acceptance Criteria:** Detects underpriced listing; correctly excludes illiquid items; computes net wallet ROI after fees.
+  - `src/sniper/adapters/listing_parser.py` & `src/sniper/models/schemas.py`: Individual listing card parser extracting `steam_listing_id`, `asset_id`, buyer-pays cost (`converted_price + converted_fee`), stickers/charms, optional float/paint seed/pattern metadata, and `steam://` inspect links, while rejecting sold listings (`<= 0`), foreign currency mismatches, and variant mismatches.
+  - Cookie-free historical baseline extraction (`extract_public_price_history`) and manual history importer (`import_manual_price_history_json`), never touching cookie-authenticated Steam endpoints.
+  - `src/sniper/engine/buy_engine.py`: `BuySniperEngine` featuring integer Volume-Weighted Median (VWM) baselines, `DATA INSUFFICIENT` cold-start suppression, 7-day vs 30-day spike guards, thin-liquidity rejection, Conservative/Base/Optimistic exit scenarios with 5% 7-day volatility buffer, and 0–100 BUY opportunity & confidence scoring.
+  - SQLite Migration 5 (`watchlist_entries`, `price_history_points`, `buy_listing_evaluations`, `strategy_alerts`, `strategy_alert_deliveries`), BUY Discord & Telegram alert formatters, and CLI commands (`watchlist`, `import-history`, `scan-buy`).
+* **Acceptance Criteria:** Verified: detects genuinely underpriced listings with conservative net profit and ROI, rejects sold/illiquid/manipulated listings, suppresses missing-baseline alerts, and maintains per-listing cooldown and bounded cumulative retries.
 
 ### Milestone 7: Portfolio & 7-Day Marketability Tracker
 * **Deliverables:**

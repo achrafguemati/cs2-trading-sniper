@@ -5,6 +5,7 @@ from sniper.notifications.discord import DiscordNotifier, DiscordWebhookChannel
 from sniper.notifications.dispatcher import NotificationDispatcher
 from sniper.notifications.models import (
     AlertPayload,
+    BuyAlertPayload,
     ChannelType,
     DeliveryStatus,
     NotificationResult,
@@ -15,6 +16,7 @@ __all__ = [
     "AlertPayload",
     "BaseNotificationChannel",
     "BaseNotifier",
+    "BuyAlertPayload",
     "ChannelType",
     "DeliveryStatus",
     "DiscordNotifier",

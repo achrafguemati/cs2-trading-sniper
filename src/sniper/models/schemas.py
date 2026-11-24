@@ -18,14 +18,18 @@ class ListingAssetPointer(BaseModel):
 
 class ListingInfoItem(BaseModel):
     listingid: str
-    price: int
-    fee: int
-    steam_fee: int
-    publisher_fee: int
+    price: int = 0
+    fee: int = 0
+    steam_fee: int = 0
+    publisher_fee: int = 0
+    currencyid: int | None = None
+    converted_currencyid: int | None = None
     converted_price: int | None = None
     converted_fee: int | None = None
     converted_steam_fee: int | None = None
     converted_publisher_fee: int | None = None
+    converted_price_per_unit: int | None = None
+    converted_fee_per_unit: int | None = None
     asset: ListingAssetPointer
 
 
@@ -40,14 +44,24 @@ class AssetMarketAction(BaseModel):
     name: str
 
 
+class AssetPropertyItem(BaseModel):
+    """May 2026 Steam asset property entry (float rating, paint seed, finish index)."""
+    propertyid: int | None = None
+    name: str | None = None
+    float_value: str | float | None = None
+    int_value: str | int | None = None
+
+
 class AssetInfoItem(BaseModel):
     id: str
     classid: str
     instanceid: str
     name: str
     market_hash_name: str
+    appid: int = 730
     descriptions: list[AssetDescriptionItem] = Field(default_factory=list)
     market_actions: list[AssetMarketAction] = Field(default_factory=list)
+    asset_properties: list[AssetPropertyItem] = Field(default_factory=list)
 
 
 class ListingRenderResponse(BaseModel):
