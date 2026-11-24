@@ -9,6 +9,7 @@ from sniper.notifications.models import (
     ChannelType,
     DeliveryStatus,
     NotificationResult,
+    PortfolioAlertPayload,
 )
 from sniper.notifications.telegram import TelegramBotChannel, TelegramNotifier
 
@@ -23,6 +24,7 @@ __all__ = [
     "DiscordWebhookChannel",
     "NotificationDispatcher",
     "NotificationResult",
+    "PortfolioAlertPayload",
     "TelegramBotChannel",
     "TelegramNotifier",
     "redact_secrets",

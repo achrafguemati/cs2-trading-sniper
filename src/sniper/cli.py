@@ -26,6 +26,7 @@ from sniper.engine.buy_engine import (
     BuySniperEngine,
     import_manual_price_history_json,
 )
+from sniper.engine.portfolio_service import PortfolioService
 from sniper.engine.sell_engine import SellEvaluationConfig, SellSniperEngine
 from sniper.notifications import (
     AlertPayload,
@@ -477,6 +478,100 @@ async def cmd_scan_buy(args: argparse.Namespace) -> int:
         db.close()
 
 
+def cmd_portfolio_add(args: argparse.Namespace) -> int:
+    """Add an acquired holding with cost basis and 7-day restriction tracking."""
+    db = init_database(args.db)
+    try:
+        svc = PortfolioService(db)
+        marketable_dt = None
+        if args.marketable_at:
+            raw_dt = args.marketable_at.strip()
+            if raw_dt.endswith("Z"):
+                raw_dt = raw_dt[:-1] + "+00:00"
+            marketable_dt = datetime.fromisoformat(raw_dt)
+        holding = svc.add_holding(
+            market_hash_name=args.market_hash_name,
+            acquisition_cost_minor=args.cost_cents,
+            currency_id=args.currency_id,
+            quantity=args.quantity,
+            asset_id=args.asset_id,
+            marketable_at=marketable_dt,
+            restriction_days=args.days,
+            notes=args.notes,
+        )
+        print(
+            f"Added holding #{holding.holding_id}: {holding.market_hash_name} "
+            f"[{holding.status}] Cost:{holding.acquisition_cost_minor} BreakEven:{holding.breakeven_buyer_pays_minor} "
+            f"Unlock:{holding.marketable_at}"
+        )
+        return 0
+    except Exception as exc:
+        print(f"Failed to add holding: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        db.close()
+
+
+def cmd_portfolio_list(args: argparse.Namespace) -> int:
+    """Display portfolio holdings, lock countdowns, break-even thresholds, and Wallet P&L."""
+    db = init_database(args.db)
+    try:
+        overview = PortfolioService(db).get_overview(currency_id=args.currency_id)
+        sym = overview.currency_symbol
+        print(
+            f"=== Portfolio Overview ({overview.currency_code} Steam Wallet — non-withdrawable) ===\n"
+            f"Holdings: {overview.total_holdings} (Locked:{overview.locked_count}, Ready:{overview.ready_to_list_count}, Sold:{overview.sold_count}, UnderWater:{overview.under_water_count})\n"
+            f"Capital Deployed: {sym}{overview.capital_deployed_minor / 100:.2f} | "
+            f"Unrealized P&L: {sym}{overview.unrealized_wallet_pnl_minor / 100:.2f} | "
+            f"Realized P&L: {sym}{overview.realized_wallet_pnl_minor / 100:.2f}\n"
+        )
+        for h in overview.holdings:
+            lock_str = f"{h.seconds_until_marketable // 3600}h" if h.is_locked else "Unlocked"
+            uw_str = f" [UNDER WATER -{sym}{h.under_water_gap_minor / 100:.2f}]" if h.is_under_water else ""
+            print(
+                f"  #{h.holding_id:<4} [{h.status:<13}] {h.market_hash_name:<35} "
+                f"Cost:{sym}{h.acquisition_cost_minor / 100:.2f} BE:{sym}{h.breakeven_buyer_pays_minor / 100:.2f} "
+                f"Lock:{lock_str}{uw_str}"
+            )
+        return 0
+    finally:
+        db.close()
+
+
+async def cmd_portfolio_evaluate(args: argparse.Namespace) -> int:
+    """Evaluate active holdings for 7-day unlock transitions and Under Water / RESALE READY alerts."""
+    db = init_database(args.db)
+    try:
+        svc = PortfolioService(db)
+        views = await svc.evaluate_holdings(dispatch_notifications=not args.no_notifications)
+        ready_ct = sum(1 for v in views if v.status == "READY_TO_LIST")
+        print(f"Evaluated {len(views)} active holding(s) | Ready to list: {ready_ct}")
+        return 0
+    finally:
+        db.close()
+
+
+def cmd_portfolio_sell(args: argparse.Namespace) -> int:
+    """Record manual sale completion for a holding and compute exact realized Steam Wallet proceeds."""
+    db = init_database(args.db)
+    try:
+        updated = PortfolioService(db).record_sale(
+            holding_id=args.holding_id,
+            gross_sale_price_minor=args.gross_cents,
+            notes=args.notes,
+        )
+        print(
+            f"Marked holding #{updated.holding_id} SOLD | Gross:{args.gross_cents} "
+            f"Realized Net Proceeds:{updated.realized_net_proceeds_minor}"
+        )
+        return 0
+    except Exception as exc:
+        print(f"Failed to record sale: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        db.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build CLI argument parser."""
     parser = argparse.ArgumentParser(
@@ -551,6 +646,35 @@ def build_parser() -> argparse.ArgumentParser:
     p_buy.add_argument("--max-buy-cents", type=int, default=None)
     p_buy.add_argument("--no-notifications", action="store_true")
 
+    # portfolio (M7)
+    p_port = subparsers.add_parser("portfolio", help="Track 7-day locked holdings and realized Wallet P&L")
+    port_sub = p_port.add_subparsers(dest="portfolio_action", help="Portfolio actions")
+
+    p_p_add = port_sub.add_parser("add", help="Record an acquired skin holding")
+    p_p_add.add_argument("market_hash_name", help="Exact CS2 market_hash_name")
+    p_p_add.add_argument("--cost-cents", type=int, required=True, help="Total buyer-paid unit cost in cents")
+    p_p_add.add_argument("--currency-id", type=int, default=1)
+    p_p_add.add_argument("--quantity", type=int, default=1)
+    p_p_add.add_argument("--days", type=int, default=7, help="Restriction days (default 7)")
+    p_p_add.add_argument("--marketable-at", default=None, help="Explicit UTC unlock timestamp ISO-8601")
+    p_p_add.add_argument("--asset-id", default=None)
+    p_p_add.add_argument("--notes", default=None)
+    p_p_add.add_argument("--db", default=get_default_db_path())
+
+    p_p_list = port_sub.add_parser("list", help="Show portfolio holdings & Wallet P&L")
+    p_p_list.add_argument("--currency-id", type=int, default=1)
+    p_p_list.add_argument("--db", default=get_default_db_path())
+
+    p_p_eval = port_sub.add_parser("evaluate", help="Check 7-day unlock readiness and break-even health")
+    p_p_eval.add_argument("--no-notifications", action="store_true")
+    p_p_eval.add_argument("--db", default=get_default_db_path())
+
+    p_p_sell = port_sub.add_parser("sell", help="Mark a holding as manually sold")
+    p_p_sell.add_argument("holding_id", type=int)
+    p_p_sell.add_argument("--gross-cents", type=int, required=True, help="Buyer-paid listing gross price in cents")
+    p_p_sell.add_argument("--notes", default=None)
+    p_p_sell.add_argument("--db", default=get_default_db_path())
+
     # test-notifications / test-notification
     p_test = subparsers.add_parser(
         "test-notifications",
@@ -601,6 +725,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_import_history(args)
     elif args.subcommand == "scan-buy":
         return asyncio.run(cmd_scan_buy(args))
+    elif args.subcommand == "portfolio":
+        action = getattr(args, "portfolio_action", None)
+        if action == "add":
+            return cmd_portfolio_add(args)
+        elif action == "list":
+            return cmd_portfolio_list(args)
+        elif action == "evaluate":
+            return asyncio.run(cmd_portfolio_evaluate(args))
+        elif action == "sell":
+            return cmd_portfolio_sell(args)
+        parser.print_help()
+        return 1
     elif args.subcommand in ("test-notifications", "test-notification"):
         return asyncio.run(cmd_test_notifications(args))
     elif args.subcommand in ("status", "channel-status"):

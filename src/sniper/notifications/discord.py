@@ -16,6 +16,7 @@ from sniper.notifications.models import (
     BuyAlertPayload,
     DeliveryStatus,
     NotificationResult,
+    PortfolioAlertPayload,
 )
 
 logger = logging.getLogger(__name__)
@@ -140,10 +141,47 @@ class DiscordNotifier(BaseNotifier):
             embed["url"] = alert.steam_listing_url
         return embed
 
-    def build_embed(self, alert: AlertPayload | BuyAlertPayload) -> dict[str, Any]:
+    def build_portfolio_embed(self, alert: PortfolioAlertPayload) -> dict[str, Any]:
+        """Construct a Discord rich embed for RESALE READY or UNDER WATER portfolio events."""
+        is_underwater = alert.alert_type == "portfolio_under_water"
+        color = 0xE74C3C if is_underwater else 0x10B981
+        prefix = "🔴 UNDER WATER" if is_underwater else "🟢 RESALE READY"
+        title = f"{prefix}: {alert.market_hash_name}"[:256]
+        desc = (
+            f"Holding `#{alert.holding_id}` held for `{alert.days_held}` day(s). "
+            f"Status: `{alert.status}`. Steam Wallet proceeds are non-withdrawable."
+        )[:4096]
+        fields = [
+            {"name": "💳 Cost Basis", "value": alert.formatted_cost(), "inline": True},
+            {"name": "⚖️ Break-Even Gross", "value": alert.formatted_breakeven(), "inline": True},
+            {"name": "🏷️ Current Floor Gross", "value": alert.formatted_recommended_list(), "inline": True},
+            {"name": "💵 Modeled Net Proceeds", "value": alert.formatted_expected_net(), "inline": True},
+            {
+                "name": "📈 Expected Wallet P&L",
+                "value": f"{alert.formatted_expected_profit()} ({alert.expected_roi_pct:.1f}% ROI) [{alert.currency_code}]",
+                "inline": True,
+            },
+        ]
+        embed: dict[str, Any] = {
+            "title": title,
+            "description": desc,
+            "color": color,
+            "fields": fields,
+            "footer": {
+                "text": "CS2 Trading Sniper • Manual Steam listing required • Read-Only",
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        if alert.steam_listing_url:
+            embed["url"] = alert.steam_listing_url
+        return embed
+
+    def build_embed(self, alert: AlertPayload | BuyAlertPayload | PortfolioAlertPayload) -> dict[str, Any]:
         """Construct a validated Discord rich embed conforming to API field limits."""
         if isinstance(alert, BuyAlertPayload):
             return self.build_buy_embed(alert)
+        if isinstance(alert, PortfolioAlertPayload):
+            return self.build_portfolio_embed(alert)
         color = 0x2ECC71  # Green
         if alert.warning_tags:
             color = 0xE67E22  # Orange/Warning

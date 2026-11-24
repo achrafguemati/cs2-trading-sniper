@@ -358,3 +358,52 @@ class StrategyAlertDeliveryRecord(BaseModel):
     last_error: str | None = None
     delivered_at: str | None = None
     created_at: str = Field(default_factory=current_utc_iso)
+
+
+class HoldingRecord(BaseModel):
+    """Acquired skin holding tracked through CS2 7-day restriction until resale."""
+    holding_id: int | None = None
+    item_id: int
+    buy_transaction_id: int | None = None
+    sell_transaction_id: int | None = None
+    asset_id: str | None = None
+    market_hash_name: str
+    currency_id: int = 1
+    quantity: int = 1
+    acquisition_cost_minor: int
+    acquired_at: str = Field(default_factory=current_utc_iso)
+    marketable_at: str | None = None
+    restriction_source: str = "steam_observed"  # 'steam_observed' | 'manual_date' | 'manual_days' | 'default_7d'
+    status: str = "HOLDING"  # 'HOLDING' | 'READY_TO_LIST' | 'LISTED' | 'SOLD'
+    listed_price_minor: int | None = None
+    realized_net_proceeds_minor: int | None = None
+    current_floor_minor: int | None = None
+    current_est_net_minor: int | None = None
+    breakeven_buyer_pays_minor: int
+    is_under_water: bool = False
+    under_water_gap_minor: int = 0
+    last_evaluated_at: str | None = None
+    resale_alert_sent_at: str | None = None
+    underwater_alert_sent_at: str | None = None
+    notes: str | None = None
+    created_at: str = Field(default_factory=current_utc_iso)
+    updated_at: str = Field(default_factory=current_utc_iso)
+
+
+class SourceHealthEventRecord(BaseModel):
+    """Telemetry record for Steam HTTP requests and circuit breaker state changes."""
+    event_id: int | None = None
+    timestamp: str = Field(default_factory=current_utc_iso)
+    endpoint: str
+    http_status: int | None = None
+    response_time_ms: int | None = None
+    breaker_state: str = "CLOSED"
+    retry_after_seconds: int | None = None
+    detail: str | None = None
+
+
+class AppSettingRecord(BaseModel):
+    """Non-secret application setting persisted in SQLite."""
+    setting_key: str
+    value_json: str
+    updated_at: str = Field(default_factory=current_utc_iso)

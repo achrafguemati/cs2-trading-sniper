@@ -17,6 +17,7 @@ from sniper.notifications.models import (
     BuyAlertPayload,
     DeliveryStatus,
     NotificationResult,
+    PortfolioAlertPayload,
 )
 
 logger = logging.getLogger(__name__)
@@ -107,10 +108,34 @@ class TelegramNotifier(BaseNotifier):
         lines.append("<i>Open on Steam, manually verify sticker/float, and confirm purchase.</i>")
         return "\n".join(lines)
 
-    def format_html_message(self, alert: AlertPayload | BuyAlertPayload) -> str:
+    def format_portfolio_html_message(self, alert: PortfolioAlertPayload) -> str:
+        """Render a safely escaped Telegram HTML message for RESALE READY or UNDER WATER alerts."""
+        clean_name = html.escape(alert.market_hash_name)
+        is_underwater = alert.alert_type == "portfolio_under_water"
+        header = "🔴 <b>CS2 PORTFOLIO: UNDER WATER</b>" if is_underwater else "🟢 <b>CS2 PORTFOLIO: RESALE READY</b>"
+        lines = [
+            header,
+            f"<b>Item:</b> <code>{clean_name}</code> (Holding #{alert.holding_id})",
+            f"<b>Status:</b> <i>{html.escape(alert.status)}</i> • Days Held: {alert.days_held}",
+            "",
+            f"💳 <b>Cost Basis:</b> {html.escape(alert.formatted_cost())}",
+            f"⚖️ <b>Break-Even Gross:</b> {html.escape(alert.formatted_breakeven())}",
+            f"🏷️ <b>Current Floor:</b> {html.escape(alert.formatted_recommended_list())}",
+            f"💵 <b>Est. Net Proceeds:</b> {html.escape(alert.formatted_expected_net())}",
+            f"📈 <b>Est. Wallet P&L:</b> {html.escape(alert.formatted_expected_profit())} ({alert.expected_roi_pct:.1f}% ROI) [{html.escape(alert.currency_code)}]",
+            "",
+            "<i>Open Steam Inventory manually to verify price and list item. Steam Wallet ≠ cash.</i>",
+        ]
+        if alert.steam_listing_url:
+            lines.append(f'<a href="{html.escape(alert.steam_listing_url)}">🔗 Open Steam Market Page</a>')
+        return "\n".join(lines)
+
+    def format_html_message(self, alert: AlertPayload | BuyAlertPayload | PortfolioAlertPayload) -> str:
         """Render a clean, safely escaped Telegram HTML message."""
         if isinstance(alert, BuyAlertPayload):
             return self.format_buy_html_message(alert)
+        if isinstance(alert, PortfolioAlertPayload):
+            return self.format_portfolio_html_message(alert)
         clean_name = html.escape(alert.market_hash_name)
         status_tag = html.escape(alert.status)
         bid_gross = html.escape(alert.formatted_bid_gross())

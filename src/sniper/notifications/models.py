@@ -139,6 +139,47 @@ class BuyAlertPayload(BaseModel):
         return f"{sign}{_fmt_minor(self.conservative_net_profit_minor, self.currency_symbol, self.minor_unit_precision)}"
 
 
+class PortfolioAlertPayload(BaseModel):
+    """Payload representing a 7-day Portfolio unlock (RESALE READY) or Under Water alert (M7)."""
+    alert_category: str = "PORTFOLIO"
+    alert_type: str = "portfolio_resale_ready"  # 'portfolio_resale_ready' | 'portfolio_under_water'
+    alert_id: int | None = None
+    alert_fingerprint: str | None = None
+    item_id: int | None = None
+    holding_id: int
+    currency_id: int = 1
+    minor_unit_precision: int = 2
+    market_hash_name: str
+    currency_code: str = "USD"
+    currency_symbol: str = "$"
+    acquisition_cost_minor: int
+    breakeven_buyer_pays_minor: int
+    recommended_list_gross_minor: int
+    expected_net_proceeds_minor: int
+    expected_profit_minor: int
+    expected_roi_pct: float
+    days_held: int = 7
+    status: str = "RESALE READY"
+    created_at: str | None = None
+    steam_listing_url: str | None = None
+
+    def formatted_cost(self) -> str:
+        return _fmt_minor(self.acquisition_cost_minor, self.currency_symbol, self.minor_unit_precision)
+
+    def formatted_breakeven(self) -> str:
+        return _fmt_minor(self.breakeven_buyer_pays_minor, self.currency_symbol, self.minor_unit_precision)
+
+    def formatted_recommended_list(self) -> str:
+        return _fmt_minor(self.recommended_list_gross_minor, self.currency_symbol, self.minor_unit_precision)
+
+    def formatted_expected_net(self) -> str:
+        return _fmt_minor(self.expected_net_proceeds_minor, self.currency_symbol, self.minor_unit_precision)
+
+    def formatted_expected_profit(self) -> str:
+        sign = "+" if self.expected_profit_minor > 0 else ""
+        return f"{sign}{_fmt_minor(self.expected_profit_minor, self.currency_symbol, self.minor_unit_precision)}"
+
+
 class NotificationResult(BaseModel):
     """Result of attempting delivery across a notification channel."""
     channel: str

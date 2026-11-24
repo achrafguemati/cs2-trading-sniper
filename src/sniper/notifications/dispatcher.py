@@ -13,6 +13,7 @@ from sniper.notifications.models import (
     BuyAlertPayload,
     DeliveryStatus,
     NotificationResult,
+    PortfolioAlertPayload,
 )
 from sniper.notifications.telegram import TelegramNotifier
 from sniper.storage.database import Database
@@ -53,7 +54,7 @@ class NotificationDispatcher:
 
     async def dispatch(
         self,
-        alert: AlertPayload | BuyAlertPayload,
+        alert: AlertPayload | BuyAlertPayload | PortfolioAlertPayload,
         alert_id: int | None = None,
         only_configured: bool = True,
         check_cooldown: bool = True,
@@ -65,12 +66,15 @@ class NotificationDispatcher:
     ) -> dict[str, NotificationResult]:
         """Dispatch alert across notification channels.
 
-        Supports SELL (`AlertPayload`) and BUY (`BuyAlertPayload`) payloads with channel isolation,
-        delivery-aware per-channel cooldown, cumulative retry limits, and SQLite audit logging.
+        Supports SELL (`AlertPayload`), BUY (`BuyAlertPayload`), and PORTFOLIO (`PortfolioAlertPayload`)
+        payloads with channel isolation, delivery-aware per-channel cooldown, cumulative retry limits,
+        and SQLite audit logging.
         """
         results: dict[str, NotificationResult] = {}
         target_alert_id = alert_id or alert.alert_id
         is_buy = isinstance(alert, BuyAlertPayload)
+        is_portfolio = isinstance(alert, PortfolioAlertPayload)
+        is_strategy = is_buy or is_portfolio
         persisted_created_at = now_dt.isoformat() if now_dt is not None else None
 
         for ch in self._channels:
@@ -92,24 +96,30 @@ class NotificationDispatcher:
                 self._persist_result(
                     target_alert_id,
                     results[ch_name],
-                    is_buy=is_buy,
+                    is_strategy=is_strategy,
                     created_at=persisted_created_at,
                 )
                 continue
 
             # 2. Per-channel cooldown & retry backoff gate:
             if check_cooldown and alert.item_id is not None:
-                if is_buy and self._strategy_alert_repo is not None:
+                if is_strategy and self._strategy_alert_repo is not None:
+                    strat_name = "BUY" if is_buy else "PORTFOLIO"
+                    a_type = "buy_listing_candidate" if is_buy else alert.alert_type
+                    ref_key = alert.steam_listing_id if is_buy else str(alert.holding_id)
+                    ref_price = alert.purchase_buyer_pays_minor if is_buy else alert.recommended_list_gross_minor
+                    direction = "drop" if is_buy else "rise"
+
                     in_cd = self._strategy_alert_repo.is_channel_in_cooldown(
-                        strategy="BUY",
+                        strategy=strat_name,
                         item_id=alert.item_id,
                         currency_id=alert.currency_id,
-                        alert_type="buy_listing_candidate",
-                        reference_key=alert.steam_listing_id,
+                        alert_type=a_type,
+                        reference_key=ref_key,
                         channel=ch_name,
                         cooldown_seconds=cooldown_seconds,
-                        new_price_minor=alert.purchase_buyer_pays_minor,
-                        price_direction="drop",
+                        new_price_minor=ref_price,
+                        price_direction=direction,
                         meaningful_change_pct=meaningful_increase_pct,
                         now_dt=now_dt,
                     )
@@ -118,21 +128,21 @@ class NotificationDispatcher:
                             channel=ch_name,
                             status=DeliveryStatus.SKIPPED,
                             attempts=0,
-                            last_error=f"Channel '{ch_name}' in cooldown from previous BUY delivery.",
+                            last_error=f"Channel '{ch_name}' in cooldown from previous {strat_name} delivery.",
                         )
                         self._persist_result(
                             target_alert_id,
                             results[ch_name],
-                            is_buy=True,
+                            is_strategy=True,
                             created_at=persisted_created_at,
                         )
                         continue
 
                     in_backoff = self._strategy_alert_repo.is_channel_in_retry_backoff(
-                        strategy="BUY",
+                        strategy=strat_name,
                         item_id=alert.item_id,
                         currency_id=alert.currency_id,
-                        alert_type="buy_listing_candidate",
+                        alert_type=a_type,
                         channel=ch_name,
                         alert_fingerprint=alert.alert_fingerprint or "",
                         backoff_seconds=failed_retry_backoff_seconds,
@@ -144,17 +154,17 @@ class NotificationDispatcher:
                             channel=ch_name,
                             status=DeliveryStatus.SKIPPED,
                             attempts=0,
-                            last_error=f"Channel '{ch_name}' in BUY retry backoff after previous failed delivery.",
+                            last_error=f"Channel '{ch_name}' in {strat_name} retry backoff after previous failed delivery.",
                         )
                         self._persist_result(
                             target_alert_id,
                             results[ch_name],
-                            is_buy=True,
+                            is_strategy=True,
                             created_at=persisted_created_at,
                         )
                         continue
 
-                elif not is_buy and self._alert_repo is not None:
+                elif not is_strategy and self._alert_repo is not None:
                     in_cd = self._alert_repo.is_channel_in_cooldown(
                         item_id=alert.item_id,
                         currency_id=getattr(alert, "currency_id", 1),
@@ -175,7 +185,7 @@ class NotificationDispatcher:
                         self._persist_result(
                             target_alert_id,
                             results[ch_name],
-                            is_buy=False,
+                            is_strategy=False,
                             created_at=persisted_created_at,
                         )
                         continue
@@ -200,7 +210,7 @@ class NotificationDispatcher:
                         self._persist_result(
                             target_alert_id,
                             results[ch_name],
-                            is_buy=False,
+                            is_strategy=False,
                             created_at=persisted_created_at,
                         )
                         continue
@@ -223,7 +233,7 @@ class NotificationDispatcher:
             self._persist_result(
                 target_alert_id,
                 results[ch_name],
-                is_buy=is_buy,
+                is_strategy=is_strategy,
                 created_at=persisted_created_at,
             )
 
@@ -234,14 +244,14 @@ class NotificationDispatcher:
         target_alert_id: int | None,
         r: NotificationResult,
         *,
-        is_buy: bool = False,
+        is_strategy: bool = False,
         created_at: str | None = None,
     ) -> None:
         """Persist delivery outcome or skipped status to SQLite database."""
         if target_alert_id is None:
             return
         try:
-            if is_buy and self._strategy_alert_repo is not None:
+            if is_strategy and self._strategy_alert_repo is not None:
                 kwargs = {
                     "strategy_alert_id": target_alert_id,
                     "channel": r.channel,
@@ -253,7 +263,7 @@ class NotificationDispatcher:
                 if created_at is not None:
                     kwargs["created_at"] = created_at
                 self._strategy_alert_repo.record_delivery(StrategyAlertDeliveryRecord(**kwargs))
-            elif not is_buy and self._alert_repo is not None:
+            elif not is_strategy and self._alert_repo is not None:
                 kwargs = {
                     "alert_id": target_alert_id,
                     "channel": r.channel,

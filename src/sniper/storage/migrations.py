@@ -460,6 +460,75 @@ def _migration_5_down(conn: sqlite3.Connection) -> None:
     cur.execute("DROP TABLE IF EXISTS watchlist_entries")
 
 
+def _migration_6_up(conn: sqlite3.Connection) -> None:
+    """Migration 6: Portfolio 7-day holdings tracker, source health logs, and app settings."""
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE holdings (
+            holding_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER NOT NULL REFERENCES items(item_id) ON DELETE RESTRICT,
+            buy_transaction_id INTEGER REFERENCES portfolio_transactions(transaction_id) ON DELETE SET NULL,
+            sell_transaction_id INTEGER REFERENCES portfolio_transactions(transaction_id) ON DELETE SET NULL,
+            asset_id TEXT,
+            market_hash_name TEXT NOT NULL,
+            currency_id INTEGER NOT NULL REFERENCES currency_configs(currency_id) ON DELETE RESTRICT,
+            quantity INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
+            acquisition_cost_minor INTEGER NOT NULL CHECK (acquisition_cost_minor > 0),
+            acquired_at TEXT NOT NULL,
+            marketable_at TEXT,
+            restriction_source TEXT NOT NULL DEFAULT 'steam_observed',
+            status TEXT NOT NULL DEFAULT 'HOLDING' CHECK (status IN ('HOLDING', 'READY_TO_LIST', 'LISTED', 'SOLD')),
+            listed_price_minor INTEGER CHECK (listed_price_minor IS NULL OR listed_price_minor > 0),
+            realized_net_proceeds_minor INTEGER CHECK (realized_net_proceeds_minor IS NULL OR realized_net_proceeds_minor >= 0),
+            current_floor_minor INTEGER,
+            current_est_net_minor INTEGER,
+            breakeven_buyer_pays_minor INTEGER NOT NULL CHECK (breakeven_buyer_pays_minor > 0),
+            is_under_water INTEGER NOT NULL DEFAULT 0 CHECK (is_under_water IN (0, 1)),
+            under_water_gap_minor INTEGER NOT NULL DEFAULT 0,
+            last_evaluated_at TEXT,
+            resale_alert_sent_at TEXT,
+            underwater_alert_sent_at TEXT,
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    cur.execute("CREATE INDEX idx_holdings_status_unlock ON holdings(status, marketable_at)")
+    cur.execute("CREATE INDEX idx_holdings_item_curr ON holdings(item_id, currency_id)")
+    cur.execute("CREATE INDEX idx_holdings_asset ON holdings(asset_id)")
+
+    cur.execute("""
+        CREATE TABLE source_health_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            endpoint TEXT NOT NULL,
+            http_status INTEGER,
+            response_time_ms INTEGER,
+            breaker_state TEXT NOT NULL,
+            retry_after_seconds INTEGER,
+            detail TEXT
+        )
+    """)
+    cur.execute("CREATE INDEX idx_source_health_ts ON source_health_events(timestamp DESC)")
+
+    cur.execute("""
+        CREATE TABLE app_settings (
+            setting_key TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+
+def _migration_6_down(conn: sqlite3.Connection) -> None:
+    """Migration 6 Down."""
+    cur = conn.cursor()
+    cur.execute("DROP TABLE IF EXISTS app_settings")
+    cur.execute("DROP TABLE IF EXISTS source_health_events")
+    cur.execute("DROP TABLE IF EXISTS holdings")
+
+
 MIGRATIONS: list[Migration] = [
     Migration(
         version=1,
@@ -507,6 +576,17 @@ MIGRATIONS: list[Migration] = [
             "buy_listing_evaluations",
             "price_history_points",
             "watchlist_entries",
+        ),
+    ),
+    Migration(
+        version=6,
+        description="Portfolio 7-day holdings tracker, source health telemetry, and app settings",
+        up=_migration_6_up,
+        down=_migration_6_down,
+        affected_tables=(
+            "app_settings",
+            "source_health_events",
+            "holdings",
         ),
     ),
 ]

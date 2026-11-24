@@ -187,11 +187,13 @@
   - SQLite Migration 5 (`watchlist_entries`, `price_history_points`, `buy_listing_evaluations`, `strategy_alerts`, `strategy_alert_deliveries`), BUY Discord & Telegram alert formatters, and CLI commands (`watchlist`, `import-history`, `scan-buy`).
 * **Acceptance Criteria:** Verified: detects genuinely underpriced listings with conservative net profit and ROI, rejects sold/illiquid/manipulated listings, suppresses missing-baseline alerts, and maintains per-listing cooldown and bounded cumulative retries.
 
-### Milestone 7: Portfolio & 7-Day Marketability Tracker
+### Milestone 7: Portfolio & 7-Day Marketability Tracker (COMPLETED)
+* **Status:** Complete & Verified.
 * **Deliverables:**
-  - Holding database tracking acquired skins, cost basis, and Steam `marketable_at` date.
-  - Background alert when an item passes its 7-day restriction and is ready for resale.
-* **Acceptance Criteria:** Displays accurate countdown for locked items; transitions to "Ready to List" upon restriction expiry.
+  - `src/sniper/engine/portfolio_service.py`: `PortfolioService` and `parse_steam_marketable_timestamp()` extracting authoritative Steam restriction timestamps (`"until/after ... GMT/UTC"`) in UTC rather than blindly estimating `+7` days, calculating exact break-even listing prices via M4 `calculate_exact_breakeven_buyer_pays`, tracking `Under Water` drops, automatically transitioning `HOLDING -> READY_TO_LIST`, dispatching `[RESALE READY]` & `[UNDER WATER]` alerts via Discord/Telegram, and recording realized Wallet P&L via `PortfolioTransactionRecord`.
+  - `src/sniper/engine/scheduler.py`: Unified `SniperScheduler` sharing ONE global `ReadOnlyHttpClient` and `SequentialRateLimiter` (hard capped `<= 12 RPM`) across BUY, SELL, and Portfolio cycles, honoring `OPEN`/`HALF_OPEN`/`HALTED` breaker states and recording telemetry to `source_health_events`.
+  - SQLite Migration 6 (`holdings`, `source_health_events`, `app_settings`), CLI `portfolio add|list|evaluate|sell` subcommands, and `PortfolioAlertPayload`.
+* **Acceptance Criteria:** Verified: accurate lock countdowns, zero premature `RESALE READY` alerts while locked, clean unlock transitions, exact integer Wallet P&L, and global rate budget enforcement.
 
 ### Milestone 8: Dashboard, Settings & Windows Launcher
 * **Deliverables:**

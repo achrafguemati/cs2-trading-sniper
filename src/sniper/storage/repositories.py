@@ -16,8 +16,10 @@ from sniper.core.identity import (
 from sniper.storage.database import Database
 from sniper.storage.models import (
     AlertEventRecord,
+    AppSettingRecord,
     BuyListingEvaluationRecord,
     CurrencyRecord,
+    HoldingRecord,
     InventoryItemRecord,
     InventorySnapshotRecord,
     ItemRecord,
@@ -27,6 +29,7 @@ from sniper.storage.models import (
     PortfolioSummary,
     PortfolioTransactionRecord,
     PriceHistoryPointRecord,
+    SourceHealthEventRecord,
     StrategyAlertDeliveryRecord,
     StrategyAlertRecord,
     WatchlistEntryRecord,
@@ -2150,3 +2153,238 @@ class StrategyAlertRepository:
             delivered_at=row["delivered_at"],
             created_at=created,
         )
+
+
+class HoldingRepository:
+    """Repository for 7-day restricted portfolio holdings and resale readiness tracking."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def create(self, holding: HoldingRecord) -> HoldingRecord:
+        now = current_utc_iso()
+        created = holding.created_at or now
+        updated = holding.updated_at or now
+        with self._db.transaction() as cur:
+            cur.execute("""
+                INSERT INTO holdings (
+                    item_id, buy_transaction_id, sell_transaction_id, asset_id,
+                    market_hash_name, currency_id, quantity, acquisition_cost_minor,
+                    acquired_at, marketable_at, restriction_source, status,
+                    listed_price_minor, realized_net_proceeds_minor,
+                    current_floor_minor, current_est_net_minor,
+                    breakeven_buyer_pays_minor, is_under_water, under_water_gap_minor,
+                    last_evaluated_at, resale_alert_sent_at, underwater_alert_sent_at,
+                    notes, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                holding.item_id,
+                holding.buy_transaction_id,
+                holding.sell_transaction_id,
+                holding.asset_id,
+                holding.market_hash_name,
+                holding.currency_id,
+                holding.quantity,
+                holding.acquisition_cost_minor,
+                holding.acquired_at,
+                holding.marketable_at,
+                holding.restriction_source,
+                holding.status,
+                holding.listed_price_minor,
+                holding.realized_net_proceeds_minor,
+                holding.current_floor_minor,
+                holding.current_est_net_minor,
+                holding.breakeven_buyer_pays_minor,
+                1 if holding.is_under_water else 0,
+                holding.under_water_gap_minor,
+                holding.last_evaluated_at,
+                holding.resale_alert_sent_at,
+                holding.underwater_alert_sent_at,
+                holding.notes,
+                created,
+                updated,
+            ))
+            hid = cur.lastrowid
+            if hid is None:
+                raise RuntimeError("Failed to obtain lastrowid for holding.")
+        return holding.model_copy(update={"holding_id": hid, "created_at": created, "updated_at": updated})
+
+    def update(self, holding: HoldingRecord) -> HoldingRecord:
+        if holding.holding_id is None:
+            raise ValueError("Cannot update holding without holding_id.")
+        updated = current_utc_iso()
+        self._db.execute("""
+            UPDATE holdings SET
+                sell_transaction_id = ?,
+                asset_id = ?,
+                marketable_at = ?,
+                restriction_source = ?,
+                status = ?,
+                listed_price_minor = ?,
+                realized_net_proceeds_minor = ?,
+                current_floor_minor = ?,
+                current_est_net_minor = ?,
+                is_under_water = ?,
+                under_water_gap_minor = ?,
+                last_evaluated_at = ?,
+                resale_alert_sent_at = ?,
+                underwater_alert_sent_at = ?,
+                notes = ?,
+                updated_at = ?
+            WHERE holding_id = ?
+        """, (
+            holding.sell_transaction_id,
+            holding.asset_id,
+            holding.marketable_at,
+            holding.restriction_source,
+            holding.status,
+            holding.listed_price_minor,
+            holding.realized_net_proceeds_minor,
+            holding.current_floor_minor,
+            holding.current_est_net_minor,
+            1 if holding.is_under_water else 0,
+            holding.under_water_gap_minor,
+            holding.last_evaluated_at,
+            holding.resale_alert_sent_at,
+            holding.underwater_alert_sent_at,
+            holding.notes,
+            updated,
+            holding.holding_id,
+        ))
+        return holding.model_copy(update={"updated_at": updated})
+
+    def get_by_id(self, holding_id: int) -> HoldingRecord | None:
+        row = self._db.fetch_one("SELECT * FROM holdings WHERE holding_id = ?", (holding_id,))
+        return self._row_to_record(row) if row is not None else None
+
+    def get_by_asset_id(self, asset_id: str) -> HoldingRecord | None:
+        row = self._db.fetch_one(
+            "SELECT * FROM holdings WHERE asset_id = ? AND status != 'SOLD' ORDER BY holding_id DESC LIMIT 1",
+            (asset_id,),
+        )
+        return self._row_to_record(row) if row is not None else None
+
+    def list_holdings(
+        self,
+        status: str | None = None,
+        currency_id: int | None = None,
+        active_only: bool = False,
+    ) -> list[HoldingRecord]:
+        query = "SELECT * FROM holdings WHERE 1=1"
+        params: list[Any] = []
+        if status is not None:
+            query += " AND status = ?"
+            params.append(status)
+        if active_only:
+            query += " AND status IN ('HOLDING', 'READY_TO_LIST', 'LISTED')"
+        if currency_id is not None:
+            query += " AND currency_id = ?"
+            params.append(currency_id)
+        query += " ORDER BY holding_id DESC"
+        rows = self._db.fetch_all(query, params)
+        return [self._row_to_record(r) for r in rows]
+
+    @staticmethod
+    def _row_to_record(row: sqlite3.Row) -> HoldingRecord:
+        return HoldingRecord(
+            holding_id=row["holding_id"],
+            item_id=row["item_id"],
+            buy_transaction_id=row["buy_transaction_id"],
+            sell_transaction_id=row["sell_transaction_id"],
+            asset_id=row["asset_id"],
+            market_hash_name=row["market_hash_name"],
+            currency_id=row["currency_id"],
+            quantity=row["quantity"],
+            acquisition_cost_minor=row["acquisition_cost_minor"],
+            acquired_at=row["acquired_at"],
+            marketable_at=row["marketable_at"],
+            restriction_source=row["restriction_source"],
+            status=row["status"],
+            listed_price_minor=row["listed_price_minor"],
+            realized_net_proceeds_minor=row["realized_net_proceeds_minor"],
+            current_floor_minor=row["current_floor_minor"],
+            current_est_net_minor=row["current_est_net_minor"],
+            breakeven_buyer_pays_minor=row["breakeven_buyer_pays_minor"],
+            is_under_water=bool(row["is_under_water"]),
+            under_water_gap_minor=row["under_water_gap_minor"],
+            last_evaluated_at=row["last_evaluated_at"],
+            resale_alert_sent_at=row["resale_alert_sent_at"],
+            underwater_alert_sent_at=row["underwater_alert_sent_at"],
+            notes=row["notes"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+
+class SourceHealthRepository:
+    """Repository for recording Steam API health and circuit breaker state transitions."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def log_event(self, event: SourceHealthEventRecord) -> SourceHealthEventRecord:
+        ts = event.timestamp or current_utc_iso()
+        with self._db.transaction() as cur:
+            cur.execute("""
+                INSERT INTO source_health_events (
+                    timestamp, endpoint, http_status, response_time_ms,
+                    breaker_state, retry_after_seconds, detail
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                ts,
+                event.endpoint,
+                event.http_status,
+                event.response_time_ms,
+                event.breaker_state,
+                event.retry_after_seconds,
+                event.detail,
+            ))
+            eid = cur.lastrowid
+            if eid is None:
+                raise RuntimeError("Failed to obtain lastrowid for source health event.")
+        return event.model_copy(update={"event_id": eid, "timestamp": ts})
+
+    def list_recent(self, limit: int = 50) -> list[SourceHealthEventRecord]:
+        rows = self._db.fetch_all(
+            "SELECT * FROM source_health_events ORDER BY timestamp DESC, event_id DESC LIMIT ?",
+            (limit,),
+        )
+        return [
+            SourceHealthEventRecord(
+                event_id=r["event_id"],
+                timestamp=r["timestamp"],
+                endpoint=r["endpoint"],
+                http_status=r["http_status"],
+                response_time_ms=r["response_time_ms"],
+                breaker_state=r["breaker_state"],
+                retry_after_seconds=r["retry_after_seconds"],
+                detail=r["detail"],
+            )
+            for r in rows
+        ]
+
+
+class SettingsRepository:
+    """Repository for non-secret user preferences and scheduler settings."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def set(self, key: str, value_json: str) -> AppSettingRecord:
+        now = current_utc_iso()
+        self._db.execute("""
+            INSERT INTO app_settings (setting_key, value_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(setting_key) DO UPDATE SET
+                value_json = excluded.value_json,
+                updated_at = excluded.updated_at
+        """, (key, value_json, now))
+        return AppSettingRecord(setting_key=key, value_json=value_json, updated_at=now)
+
+    def get(self, key: str) -> str | None:
+        row = self._db.fetch_one("SELECT value_json FROM app_settings WHERE setting_key = ?", (key,))
+        return str(row["value_json"]) if row is not None else None
+
+    def get_all(self) -> dict[str, str]:
+        rows = self._db.fetch_all("SELECT setting_key, value_json FROM app_settings ORDER BY setting_key ASC")
+        return {str(r["setting_key"]): str(r["value_json"]) for r in rows}
