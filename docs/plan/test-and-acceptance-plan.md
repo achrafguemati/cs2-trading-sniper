@@ -18,8 +18,10 @@ Every module must achieve high test coverage before milestone completion:
 | **`test_listings.py`** | Listing-level JSON & HTML parsing | Extraction of `listingid`, `assetid`, integer cents price, inspect link parsing, sticker extraction from description tags, currency validation. |
 | **`test_economics.py`** | Profit & ROI scenarios | Conservative scenario with 5% risk buffer, baseline scenario, optimistic scenario, ROI division by acquisition cost, zero-profit rejection. |
 | **`test_ratelimit.py`** | Token bucket & circuit breaker | Max requests per minute pacing, jitter delay distribution, 300s sleep trigger on HTTP 429/403, canary recovery test. |
-| **`test_inventory.py`** | Public & manual inventory | Marketable flag filtering (`marketable == 1`), 7-day restriction parsing, CSV/JSON manual inventory import, malformed file error handling. |
-| **`test_alerts.py`** | Notification deduplication & cooldown | Cooldown window enforcement (no duplicate alerts for same listing within 30 min), meaningful bid increase re-alerting, Telegram message formatting. |
+| **`test_inventory.py`** | Public & manual inventory | Marketable flag filtering (`marketable == 1`), 7-day restriction parsing, SteamID64 format validation, pagination bounds, CSV/JSON manual inventory import with row-level error reporting. |
+| **`test_sell_engine.py`** | SELL opportunity scoring & baseline | Strict identity provenance gate, historical buy-order median baseline, crossed-book suppression, single-item top bid tagging, opportunity/confidence scoring algorithms, cooldown overrides on >=5% bid increase. |
+| **`test_notifications.py`** | Free multi-channel notifications | Discord rich embed formatting & limits, Telegram safe HTML escaping, standard-library SMTP dual MIME text/html, Messenger unavailable status, channel failure isolation, 429 rate limit backoff, secret redaction. |
+| **`test_storage_m5.py`** | Migration 4 & Alert Persistence | Migration 4 upgrade from V3, rollback to V3, alert deduplication, cooldown query logic, delivery tracking. |
 
 ---
 

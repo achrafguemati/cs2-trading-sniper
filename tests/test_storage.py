@@ -170,10 +170,10 @@ class TestStorage(unittest.TestCase):
     # -------------------------------------------------------------------------
 
     def test_database_initialization(self) -> None:
-        """Verify initial database version matches latest migration version (V3)."""
-        self.assertEqual(self.db.get_version(), 3)
+        """Verify initial database version matches latest migration version (V4)."""
+        self.assertEqual(self.db.get_version(), 4)
         applied = get_applied_versions(self.db.connection)
-        self.assertEqual(applied, [1, 2, 3])
+        self.assertEqual(applied, [1, 2, 3, 4])
 
     def test_repeated_initialization_idempotent(self) -> None:
         """Verify repeated initialization is a safe no-op that preserves existing data."""
@@ -188,7 +188,7 @@ class TestStorage(unittest.TestCase):
         # Re-initialize database
         applied_again = self.db.initialize()
         self.assertEqual(applied_again, [])
-        self.assertEqual(self.db.get_version(), 3)
+        self.assertEqual(self.db.get_version(), 4)
 
         # Existing record remains intact
         retrieved = self.item_repo.get_by_id(saved.item_id)
@@ -284,8 +284,8 @@ class TestStorage(unittest.TestCase):
             observed_at="2026-05-01T00:00:00Z",
         ))
 
-        # 3. Run initialize() on the existing V2 database
-        applied = raw_db.initialize()
+        # 3. Run initialize(target_version=3) on the existing V2 database
+        applied = raw_db.initialize(target_version=3)
         self.assertEqual(applied, [3])
         self.assertEqual(raw_db.get_version(), 3)
 
@@ -339,7 +339,7 @@ class TestStorage(unittest.TestCase):
     def test_fresh_installation_converges_to_v3(self) -> None:
         """Verify fresh installation applies all migrations up to v3 with identical protections."""
         fresh_db = Database(":memory:")
-        applied = fresh_db.initialize()
+        applied = fresh_db.initialize(target_version=3)
         self.assertEqual(applied, [1, 2, 3])
         self.assertEqual(fresh_db.get_version(), 3)
 
@@ -501,7 +501,7 @@ class TestStorage(unittest.TestCase):
     def test_rollback_failure_restores_pre_rollback_state(self) -> None:
         """Verify that failure during a multi-step rollback aborts atomically and restores original state."""
         raw_db = Database(":memory:")
-        raw_db.initialize()
+        raw_db.initialize(target_version=3)
         self.assertEqual(raw_db.get_version(), 3)
 
         from sniper.storage import migrations
@@ -652,7 +652,7 @@ class TestStorage(unittest.TestCase):
 
         # Roll back outer transaction cleanly
         conn.execute("ROLLBACK")
-        self.assertEqual(raw_db.get_version(), 3)
+        self.assertEqual(raw_db.get_version(), 4)
         raw_db.close()
 
     def test_apply_migrations_inside_active_transaction_rejected(self) -> None:
@@ -691,11 +691,11 @@ class TestStorage(unittest.TestCase):
                 futures = [executor.submit(run_init, i) for i in range(4)]
                 results = [f.result() for f in concurrent.futures.as_completed(futures)]
 
-            self.assertEqual(results, [3, 3, 3, 3])
+            self.assertEqual(results, [4, 4, 4, 4])
             with Database(db_path) as final_db:
-                self.assertEqual(final_db.get_version(), 3)
+                self.assertEqual(final_db.get_version(), 4)
                 applied = get_applied_versions(final_db.connection)
-                self.assertEqual(applied, [1, 2, 3])
+                self.assertEqual(applied, [1, 2, 3, 4])
 
     def test_concurrent_apply_versus_rollback_serialize_cleanly(self) -> None:
         """Verify concurrent apply and rollback across independent connections serialize cleanly without corruption."""
@@ -876,7 +876,7 @@ class TestStorage(unittest.TestCase):
     def test_v3_integrity_downgrade_blocked_when_listings_exist(self) -> None:
         """Verify rolling back V3 to V2 is blocked by default when historical listings exist."""
         raw_db = Database(":memory:")
-        raw_db.initialize()
+        raw_db.initialize(target_version=3)
         c_repo = CurrencyRepository(raw_db)
         c_repo.seed_default_currencies()
         i_repo = ItemRepository(raw_db)
@@ -918,7 +918,7 @@ class TestStorage(unittest.TestCase):
     def test_v3_integrity_downgrade_blocked_when_orderbook_snapshots_exist(self) -> None:
         """Verify rolling back V3 to V2 is blocked by default when orderbook snapshots exist."""
         raw_db = Database(":memory:")
-        raw_db.initialize()
+        raw_db.initialize(target_version=3)
         c_repo = CurrencyRepository(raw_db)
         c_repo.seed_default_currencies()
         i_repo = ItemRepository(raw_db)
@@ -945,7 +945,7 @@ class TestStorage(unittest.TestCase):
     def test_v3_integrity_downgrade_explicit_opt_in_preserves_history(self) -> None:
         """Verify explicit allow_integrity_downgrade=True removes triggers but preserves all historical data."""
         raw_db = Database(":memory:")
-        raw_db.initialize()
+        raw_db.initialize(target_version=3)
         c_repo = CurrencyRepository(raw_db)
         c_repo.seed_default_currencies()
         i_repo = ItemRepository(raw_db)
@@ -1616,7 +1616,7 @@ class TestStorage(unittest.TestCase):
                 saved_id = saved_item.item_id
 
             with Database(db_file) as reopened_db:
-                self.assertEqual(reopened_db.get_version(), 3)
+                self.assertEqual(reopened_db.get_version(), 4)
 
                 re_i_repo = ItemRepository(reopened_db)
                 re_item = re_i_repo.get_by_id(saved_id)

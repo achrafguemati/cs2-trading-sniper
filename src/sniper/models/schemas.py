@@ -306,3 +306,5 @@ class PublicInventoryResponse(BaseModel):
     descriptions: list[InventoryDescriptionItem] = Field(default_factory=list)
     total_inventory_count: int | None = None
     success: int | bool = 1
+    more_items: int | bool | None = None
+    last_assetid: str | None = None

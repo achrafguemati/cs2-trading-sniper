@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from datetime import datetime, timezone
 import logging
+import math
 import sqlite3
+from typing import Any, Sequence
 
 from sniper.core.currency import CurrencyConfig
 from sniper.core.identity import (
@@ -13,11 +15,13 @@ from sniper.core.identity import (
 )
 from sniper.storage.database import Database
 from sniper.storage.models import (
+    AlertEventRecord,
     CurrencyRecord,
     InventoryItemRecord,
     InventorySnapshotRecord,
     ItemRecord,
     ListingRecord,
+    NotificationDeliveryRecord,
     OrderbookSnapshotRecord,
     PortfolioSummary,
     PortfolioTransactionRecord,
@@ -637,6 +641,56 @@ class OrderbookRepository:
             return None
         return self._row_to_record(row)
 
+    def get_historical_buy_orders(
+        self,
+        item_id: int,
+        currency_id: int,
+        limit: int = 100,
+        max_age_seconds: int | None = None,
+        exclude_snapshot_id: int | None = None,
+    ) -> list[int]:
+        """Retrieve historical highest_buy_order_minor values for an item and currency.
+
+        Ordered from newest to oldest, optionally excluding a specific snapshot (e.g. current)
+        and filtering out observations older than max_age_seconds.
+        """
+        query = (
+            "SELECT snapshot_id, highest_buy_order_minor, observed_at "
+            "FROM orderbook_snapshots "
+            "WHERE item_id = ? AND currency_id = ? AND highest_buy_order_minor IS NOT NULL"
+        )
+        params: list[Any] = [item_id, currency_id]
+        if exclude_snapshot_id is not None:
+            query += " AND snapshot_id != ?"
+            params.append(exclude_snapshot_id)
+
+        query += " ORDER BY observed_at DESC, snapshot_id DESC LIMIT ?"
+        params.append(limit)
+
+        rows = self._db.fetch_all(query, params)
+        if not rows:
+            return []
+
+        if max_age_seconds is not None:
+            now_dt = datetime.now(timezone.utc)
+            valid_bids: list[int] = []
+            for r in rows:
+                try:
+                    obs_str = r["observed_at"]
+                    if obs_str.endswith("Z"):
+                        obs_str = obs_str[:-1] + "+00:00"
+                    obs_dt = datetime.fromisoformat(obs_str)
+                    if obs_dt.tzinfo is None:
+                        obs_dt = obs_dt.replace(tzinfo=timezone.utc)
+                    age = (now_dt - obs_dt).total_seconds()
+                    if age <= max_age_seconds:
+                        valid_bids.append(int(r["highest_buy_order_minor"]))
+                except Exception:
+                    valid_bids.append(int(r["highest_buy_order_minor"]))
+            return valid_bids
+
+        return [int(r["highest_buy_order_minor"]) for r in rows]
+
     @staticmethod
     def _row_to_record(row: sqlite3.Row) -> OrderbookSnapshotRecord:
         return OrderbookSnapshotRecord(
@@ -928,4 +982,200 @@ class PortfolioRepository:
             timestamp=row["timestamp"],
             cost_basis_metadata=row["cost_basis_metadata"],
             notes=row["notes"],
+        )
+
+
+class AlertRepository:
+    """Repository for alert events and multi-channel notification deliveries."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def record_alert(self, alert: AlertEventRecord) -> AlertEventRecord:
+        """Insert a newly detected alert event."""
+        now = alert.created_at or current_utc_iso()
+        with self._db.transaction() as cur:
+            cur.execute("""
+                INSERT INTO alert_events (
+                    item_id, currency_id, alert_type, alert_fingerprint,
+                    highest_buy_order_minor, lowest_sell_order_minor,
+                    top_level_buy_quantity, cumulative_buy_quantity,
+                    modeled_steam_fee_minor, modeled_publisher_fee_minor,
+                    modeled_seller_receives_minor, historical_baseline_minor,
+                    bid_multiple, opportunity_score, confidence_score,
+                    warning_tags, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                alert.item_id,
+                alert.currency_id,
+                alert.alert_type,
+                alert.alert_fingerprint,
+                alert.highest_buy_order_minor,
+                alert.lowest_sell_order_minor,
+                alert.top_level_buy_quantity,
+                alert.cumulative_buy_quantity,
+                alert.modeled_steam_fee_minor,
+                alert.modeled_publisher_fee_minor,
+                alert.modeled_seller_receives_minor,
+                alert.historical_baseline_minor,
+                alert.bid_multiple,
+                alert.opportunity_score,
+                alert.confidence_score,
+                alert.warning_tags,
+                alert.status,
+                now,
+            ))
+            alert_id = cur.lastrowid
+            if alert_id is None:
+                raise RuntimeError("Failed to obtain lastrowid for alert event.")
+
+        return alert.model_copy(update={"alert_id": alert_id, "created_at": now})
+
+    def get_latest_alert_for_item(
+        self,
+        item_id: int,
+        currency_id: int,
+        alert_type: str = "sell_target_bid",
+    ) -> AlertEventRecord | None:
+        """Retrieve the most recent alert for an item and currency."""
+        row = self._db.fetch_one(
+            """
+            SELECT * FROM alert_events
+            WHERE item_id = ? AND currency_id = ? AND alert_type = ?
+            ORDER BY created_at DESC, alert_id DESC
+            LIMIT 1
+            """,
+            (item_id, currency_id, alert_type),
+        )
+        if row is None:
+            return None
+        return self._row_to_alert(row)
+
+    def get_alert_by_id(self, alert_id: int) -> AlertEventRecord | None:
+        """Fetch alert event by ID."""
+        row = self._db.fetch_one("SELECT * FROM alert_events WHERE alert_id = ?", (alert_id,))
+        if row is None:
+            return None
+        return self._row_to_alert(row)
+
+    def get_recent_alerts(self, limit: int = 50) -> list[AlertEventRecord]:
+        """Fetch recent alerts ordered newest to oldest."""
+        rows = self._db.fetch_all(
+            "SELECT * FROM alert_events ORDER BY created_at DESC, alert_id DESC LIMIT ?",
+            (limit,),
+        )
+        return [self._row_to_alert(r) for r in rows]
+
+    def is_in_cooldown(
+        self,
+        item_id: int,
+        currency_id: int,
+        alert_type: str,
+        cooldown_seconds: int,
+        new_bid_minor: int,
+        meaningful_increase_pct: float = 0.05,
+        now_dt: datetime | None = None,
+    ) -> bool:
+        """Check whether an alert for (item_id, currency_id, alert_type) is in cooldown.
+
+        Returns True (suppress alert) if a prior alert was emitted within cooldown_seconds,
+        UNLESS the new bid represents a meaningful increase (>= meaningful_increase_pct)
+        over the prior alert's highest buy order bid.
+        """
+        last_alert = self.get_latest_alert_for_item(item_id, currency_id, alert_type)
+        if last_alert is None:
+            return False
+
+        if now_dt is None:
+            now_dt = datetime.now(timezone.utc)
+
+        try:
+            created_str = last_alert.created_at
+            if created_str.endswith("Z"):
+                created_str = created_str[:-1] + "+00:00"
+            created_dt = datetime.fromisoformat(created_str)
+            if created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=timezone.utc)
+            elapsed = (now_dt - created_dt).total_seconds()
+        except Exception:
+            return False
+
+        if elapsed >= cooldown_seconds:
+            return False
+
+        # Within cooldown window. Check for meaningful bid increase:
+        increase_threshold = int(math.ceil(last_alert.highest_buy_order_minor * (1.0 + meaningful_increase_pct)))
+        if new_bid_minor >= increase_threshold:
+            # Meaningful increase: allow re-alerting!
+            return False
+
+        # In cooldown and not a meaningful increase: suppress!
+        return True
+
+    def record_delivery(self, delivery: NotificationDeliveryRecord) -> NotificationDeliveryRecord:
+        """Insert or log a notification delivery record."""
+        now = delivery.created_at or current_utc_iso()
+        with self._db.transaction() as cur:
+            cur.execute("""
+                INSERT INTO notification_deliveries (
+                    alert_id, channel, status, attempts, last_error, delivered_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                delivery.alert_id,
+                delivery.channel,
+                delivery.status,
+                delivery.attempts,
+                delivery.last_error,
+                delivery.delivered_at,
+                now,
+            ))
+            delivery_id = cur.lastrowid
+            if delivery_id is None:
+                raise RuntimeError("Failed to obtain lastrowid for notification delivery.")
+
+        return delivery.model_copy(update={"delivery_id": delivery_id, "created_at": now})
+
+    def get_deliveries_for_alert(self, alert_id: int) -> list[NotificationDeliveryRecord]:
+        """Fetch all delivery records for a specific alert."""
+        rows = self._db.fetch_all(
+            "SELECT * FROM notification_deliveries WHERE alert_id = ? ORDER BY delivery_id ASC",
+            (alert_id,),
+        )
+        return [self._row_to_delivery(r) for r in rows]
+
+    @staticmethod
+    def _row_to_alert(row: sqlite3.Row) -> AlertEventRecord:
+        return AlertEventRecord(
+            alert_id=row["alert_id"],
+            item_id=row["item_id"],
+            currency_id=row["currency_id"],
+            alert_type=row["alert_type"],
+            alert_fingerprint=row["alert_fingerprint"],
+            highest_buy_order_minor=row["highest_buy_order_minor"],
+            lowest_sell_order_minor=row["lowest_sell_order_minor"],
+            top_level_buy_quantity=row["top_level_buy_quantity"],
+            cumulative_buy_quantity=row["cumulative_buy_quantity"],
+            modeled_steam_fee_minor=row["modeled_steam_fee_minor"],
+            modeled_publisher_fee_minor=row["modeled_publisher_fee_minor"],
+            modeled_seller_receives_minor=row["modeled_seller_receives_minor"],
+            historical_baseline_minor=row["historical_baseline_minor"],
+            bid_multiple=row["bid_multiple"],
+            opportunity_score=row["opportunity_score"],
+            confidence_score=row["confidence_score"],
+            warning_tags=row["warning_tags"],
+            status=row["status"],
+            created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _row_to_delivery(row: sqlite3.Row) -> NotificationDeliveryRecord:
+        return NotificationDeliveryRecord(
+            delivery_id=row["delivery_id"],
+            alert_id=row["alert_id"],
+            channel=row["channel"],
+            status=row["status"],
+            attempts=row["attempts"],
+            last_error=row["last_error"],
+            delivered_at=row["delivered_at"],
+            created_at=row["created_at"],
         )

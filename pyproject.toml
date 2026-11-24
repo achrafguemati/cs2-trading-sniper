@@ -22,6 +22,9 @@ dev = [
     "pytest>=8.0.0",
 ]
 
+[project.scripts]
+sniper = "sniper.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

@@ -65,6 +65,15 @@ See the complete rules in [AGENTS.md](AGENTS.md).
   - Fail-closed currency configuration hardening in `src/sniper/core/currency.py` preventing invalid or negative fee floors and price steps.
   - Clear separation between pure mathematical fee calculations (`validate_market_listing=False`) and market listing validation (`validate_market_listing=True`). Currency listing minimums and price step increments remain UNKNOWN for USD, EUR, JPY, and Tunisia pending primary empirical evidence.
   - Expanded deterministic unit test coverage in `tests/test_fees.py` covering boundary cases ($0.03, $1.00, $10.00, $1,000.00), unreachable step-jump gaps (113, 114 cents), high-tier unreachable price ($500.00 -> $434.79 net / $499.99 actual), break-even math, and exhaustive invariant verification across 3 to 5,000 cents.
+- **Milestone 5 (SELL Engine + Inventory Tracker + Free Multi-Channel Notifications):**
+  - Public Steam inventory ingestion client (`PublicInventoryClient` in `src/sniper/adapters/inventory.py`) querying public endpoints with pagination bounds and exact `(classid, instanceid)` asset matching.
+  - Manual inventory CSV and JSON importers (`ManualInventoryImporter`) with row-level validation for private profiles.
+  - SELL Sniper Engine (`SellSniperEngine` in `src/sniper/engine/sell_engine.py`) with strict identity provenance gating, historical buy-order median baselines, crossed-book detection, top-level quantity anomaly filters (`Single-Item Top Bid`), exact M4 modeled seller proceeds, and quantitative opportunity/confidence scoring.
+  - Free multi-channel notification infrastructure (`src/sniper/notifications/`): Discord Webhooks with rich embeds, Telegram Bot API with HTML formatting, standard-library SMTP email (STARTTLS/SSL, Gmail App Passwords), and documented Meta Facebook Messenger platform policy analysis (`UNAVAILABLE`).
+  - Zero-cost architecture: 100% free operation without paid subscriptions, paid APIs, or cloud servers.
+  - Complete credential redaction (`redact_secrets()`) preventing secret leakage into database records, logs, or exception traces.
+  - Database schema Migration 4 adding `alert_events` and `notification_deliveries` tables with fingerprint deduplication and cooldown controls.
+  - CLI command-line interface (`src/sniper/cli.py`) supporting `import-inventory`, `import-csv`, `import-json`, `scan-sell`, `test-notifications`, and `status`.
 
 ---
 
@@ -73,6 +82,21 @@ See the complete rules in [AGENTS.md](AGENTS.md).
 ```bash
 # 1. Install package in editable mode with dependencies
 pip install -e .
+
+# 2. Run comprehensive offline unit test suite
+python -m unittest discover -s tests -p "test_*.py" -v
+
+# 3. CLI status and notification checks
+sniper status
+sniper test-notifications
+
+# 4. Import inventory (public SteamID64 or manual CSV/JSON)
+sniper import-inventory 76561198000000000
+sniper import-csv my_inventory.csv
+
+# 5. Run SELL Sniper opportunity scan
+sniper scan-sell
+```
 
 # 2. Run comprehensive offline unit test suite
 python -m unittest discover -s tests -p "test_*.py" -v

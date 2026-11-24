@@ -126,12 +126,27 @@
   - Comprehensive deterministic unit test suite (`tests/test_fees.py`) covering monetary boundaries ($0.03, $1.00, $10.00, $1,000.00), unreachable step-jump gaps (e.g. 113, 114 cents yielding $R=99$, actual buyer pays 112 cents), high-tier unreachable price ($500.00 yielding $R=434.79$, actual buyer pays $499.99), and monotonic range invariant tests across $B_{\text{req}} \in [3, 5000]$.
 * **Acceptance Criteria:** Verified: 100% deterministic test pass for exact arithmetic under the project's modeled formula; mathematically safe integer boundary search; fail-closed rejection on unverified currencies or market listing rules; strict non-coercing input validation.
 
-### Milestone 5: SELL Engine + Inventory Tracker + Telegram Alerts
+### Milestone 5: SELL Engine + Inventory Tracker + Free Multi-Channel Notifications (COMPLETED)
+* **Status:** Complete & Verified.
 * **Deliverables:**
-  - Public inventory fetcher (`/inventory/{steamid64}/730/2`) and manual CSV/JSON parser.
-  - Top-level vs cumulative quantity extraction.
-  - Telegram Bot alert dispatcher with deduplication and cooldown.
-* **Acceptance Criteria:** Generates high-bid alert with exact net proceeds and ghost order warnings; deduplicates alerts within cooldown window.
+  - `src/sniper/adapters/inventory.py`: Production-ready `PublicInventoryClient` with SteamID64 validation, pagination bounds, and exact `(classid, instanceid)` asset matching; `ManualInventoryImporter` supporting CSV and JSON manual imports with row-level validation for private profiles.
+  - `src/sniper/engine/sell_engine.py`: `SellSniperEngine` featuring:
+    - Strict identity provenance gating preventing network requests for items lacking trusted `item_nameid`.
+    - Historical buy-order median baseline modeling (`historical_buy_bid_median_minor`), suppressing alerts when sample counts are insufficient (`DATA INSUFFICIENT`).
+    - Crossed-book detection (`highest_bid >= lowest_ask`) tagging `INCONSISTENT SNAPSHOT / CROSSED BOOK` and suppressing execution recommendations.
+    - Top-level quantity anomaly filters distinguishing `top_level_buy_quantity` vs `cumulative_buy_quantity` and tagging `Single-Item Top Bid` and `Unverified High Bid`.
+    - Modeled seller proceeds calculated via exact M4 fee functions (`calculate_seller_receives(bid, currency, validate_market_listing=False)`).
+    - Quantitative Opportunity Scoring (0–100) and Confidence Scoring (0–100) based on explainable sub-score formulas.
+  - `src/sniper/notifications/`: Zero-cost, multi-channel notification infrastructure:
+    - `DiscordWebhookChannel`: Incoming webhooks with rich embeds, color coding, and character limit protection.
+    - `TelegramBotChannel`: Official Bot API `sendMessage` with safely escaped HTML formatting and retry-after handling.
+    - `EmailSmtpChannel`: Free standard-library SMTP with STARTTLS/SSL, dual MIME text/html parts, and personal Gmail App Password support.
+    - `MessengerChannel`: Documented compliance with Meta Platform Terms (`UNAVAILABLE — requires official Meta messaging setup and an active permitted messaging window`).
+    - Central secret redaction engine (`redact_secrets()`) preventing credential leakage across logs and databases.
+    - `NotificationDispatcher`: Isolated delivery pipeline with per-channel failure tolerance and SQLite audit logging.
+  - SQLite Migration 4 (`src/sniper/storage/migrations.py`): Adding `alert_events` and `notification_deliveries` tables with SHA256 fingerprint deduplication and configurable cooldown (default 30 min) with meaningful bid increase overrides.
+  - CLI Entry Point (`src/sniper/cli.py`): Subcommands `import-inventory`, `import-csv`, `import-json`, `scan-sell`, `test-notifications`, and `status`.
+* **Acceptance Criteria:** Verified: High-bid alert generation with exact net proceeds, ghost order warnings, crossed-book suppression, and cooldown deduplication across 100% free notification transports.
 
 ### Milestone 6: BUY Engine + Listing Evaluator
 * **Deliverables:**

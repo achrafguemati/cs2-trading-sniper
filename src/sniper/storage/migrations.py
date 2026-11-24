@@ -268,6 +268,60 @@ def _migration_3_down(conn: sqlite3.Connection) -> None:
     cur.execute("DROP TRIGGER IF EXISTS prevent_listings_update")
 
 
+def _migration_4_up(conn: sqlite3.Connection) -> None:
+    """Migration 4: Alert events and multi-channel notification deliveries."""
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE alert_events (
+            alert_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER NOT NULL REFERENCES items(item_id),
+            currency_id INTEGER NOT NULL REFERENCES currency_configs(currency_id),
+            alert_type TEXT NOT NULL,
+            alert_fingerprint TEXT NOT NULL,
+            highest_buy_order_minor INTEGER NOT NULL,
+            lowest_sell_order_minor INTEGER,
+            top_level_buy_quantity INTEGER NOT NULL,
+            cumulative_buy_quantity INTEGER NOT NULL,
+            modeled_steam_fee_minor INTEGER NOT NULL,
+            modeled_publisher_fee_minor INTEGER NOT NULL,
+            modeled_seller_receives_minor INTEGER NOT NULL,
+            historical_baseline_minor INTEGER,
+            bid_multiple REAL,
+            opportunity_score REAL NOT NULL,
+            confidence_score REAL NOT NULL,
+            warning_tags TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    cur.execute("CREATE INDEX idx_alert_events_item_id ON alert_events(item_id)")
+    cur.execute("CREATE INDEX idx_alert_events_fingerprint ON alert_events(alert_fingerprint)")
+    cur.execute("CREATE INDEX idx_alert_events_item_curr_created ON alert_events(item_id, currency_id, created_at)")
+    cur.execute("CREATE INDEX idx_alert_events_created_at ON alert_events(created_at)")
+
+    cur.execute("""
+        CREATE TABLE notification_deliveries (
+            delivery_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            alert_id INTEGER NOT NULL REFERENCES alert_events(alert_id) ON DELETE CASCADE,
+            channel TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 1,
+            last_error TEXT,
+            delivered_at TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    cur.execute("CREATE INDEX idx_notification_deliveries_alert_id ON notification_deliveries(alert_id)")
+    cur.execute("CREATE INDEX idx_notification_deliveries_channel_status ON notification_deliveries(channel, status)")
+
+
+def _migration_4_down(conn: sqlite3.Connection) -> None:
+    """Migration 4 Down."""
+    cur = conn.cursor()
+    cur.execute("DROP TABLE IF EXISTS notification_deliveries")
+    cur.execute("DROP TABLE IF EXISTS alert_events")
+
+
 MIGRATIONS: list[Migration] = [
     Migration(
         version=1,
@@ -296,6 +350,13 @@ MIGRATIONS: list[Migration] = [
         up=_migration_3_up,
         down=_migration_3_down,
         affected_tables=(),
+    ),
+    Migration(
+        version=4,
+        description="Alert events and multi-channel notification deliveries",
+        up=_migration_4_up,
+        down=_migration_4_down,
+        affected_tables=("notification_deliveries", "alert_events"),
     ),
 ]
 
