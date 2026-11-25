@@ -482,6 +482,23 @@ class TestSharedCircuitBreakerAcrossAdapters(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SecurityBlockError):
             await adapter.get_ssr_listing_context(identity)
 
+    async def test_get_listing_render_halts_on_non_ssr_html_challenge(self) -> None:
+        """Unexpected HTML challenge (non-SSR) on /render/ must still trip circuit breaker and HALT."""
+        limiter = SequentialRateLimiter(config=RateLimiterConfig(requests_per_minute=6000.0, jitter_max_seconds=0.0))
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, headers={"Content-Type": "text/html"}, text="<html><body>Verify you are human</body></html>")
+
+        client = ReadOnlyHttpClient(rate_limiter=limiter, transport=httpx.MockTransport(handler))
+        adapter = SteamMarketAdapter(client)
+        identity = make_valid_resolved_identity()
+
+        with self.assertRaises(UnexpectedResponseError):
+            await adapter.get_listing_render(identity, currency=1)
+
+        self.assertTrue(limiter.is_halted)
+        self.assertEqual(limiter.state, CircuitBreakerState.HALTED)
+
 
 if __name__ == "__main__":
     unittest.main()

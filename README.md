@@ -69,13 +69,14 @@ python -m unittest discover -s tests -p "test_*.py" -v
 # 3. Frontend build & Vitest suite
 cd frontend && npm ci && npm run build && npm test && cd ..
 
-# 4. Launch dashboard manually
+# 4. Launch dashboard manually (or via launch.bat)
+# Note: On Windows, use `python -m sniper.cli ...` if Python's Scripts folder is not on PATH.
 sniper serve --host 127.0.0.1 --port 8000
 
 # 5. CLI status, watchlists, scans & portfolio management
 sniper status
 sniper test-notifications
-sniper watchlist add "https://steamcommunity.com/market/listings/730/AK-47%20%7C%20Redline%20%28Field-Tested%29" --strategy BUY
+sniper watchlist add "https://steamcommunity.com/market/listings/730/G18820420D5083003?category_Exterior=WearCategory2&appid=730" --max-price 51.00
 sniper import-inventory 76561198000000000
 sniper import-csv my_inventory.csv
 sniper scan-buy

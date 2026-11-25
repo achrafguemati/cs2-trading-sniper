@@ -21,10 +21,15 @@ from urllib.parse import quote
 
 import httpx
 
-from sniper.adapters.listing_parser import extract_public_price_history
+from sniper.adapters.listing_parser import (
+    _SsrScriptExtractor,
+    extract_public_price_history,
+    extract_ssr_listing_render_response,
+)
 from sniper.core.currency import CurrencyConfig
 from sniper.core.http_client import ReadOnlyHttpClient
 from sniper.core.identity import (
+    WEAR_CATEGORY_TO_PARAM,
     ItemIdentityResult,
     ResolutionStatus,
     SsrListingContext,
@@ -38,34 +43,6 @@ from sniper.models.schemas import (
 )
 
 logger = logging.getLogger("sniper.adapters.steam_market")
-
-
-class _SsrScriptExtractor(HTMLParser):
-    """Robust HTML parser to isolate the exact 'valve-ssr-data' script tag."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.matching_scripts: list[str] = []
-        self._current_content: list[str] | None = None
-        self._in_target_script: bool = False
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.lower() == "script":
-            attr_dict = {k.lower(): (v or "") for k, v in attrs}
-            if attr_dict.get("id") == "valve-ssr-data":
-                self._in_target_script = True
-                self._current_content = []
-
-    def handle_data(self, data: str) -> None:
-        if self._in_target_script and self._current_content is not None:
-            self._current_content.append(data)
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag.lower() == "script" and self._in_target_script:
-            if self._current_content is not None:
-                self.matching_scripts.append("".join(self._current_content))
-            self._in_target_script = False
-            self._current_content = None
 
 
 def extract_ssr_hydration_data(html_content: str, source_url: str) -> SsrListingContext:
@@ -272,7 +249,91 @@ class SteamMarketAdapter:
         }
 
         logger.debug(f"Querying listings render for '{name}' (start={start}, count={count}, currency={currency})")
-        return await self.http_client.get_json(url, params=params, schema=ListingRenderResponse)
+
+        def parser_callback(response: httpx.Response) -> ListingRenderResponse:
+            raw_text = response.text or ""
+            stripped = raw_text.lstrip()
+            if stripped.startswith(("{", "[")):
+                data = json.loads(raw_text, parse_float=Decimal)
+                return ListingRenderResponse.model_validate(data)
+            ssr_render = extract_ssr_listing_render_response(raw_text)
+            if ssr_render is not None:
+                return ssr_render
+            raise ValueError(
+                f"Unexpected HTML/challenge response received from {response.url} when listings JSON/SSR was expected."
+            )
+
+        return await self.http_client.get_parsed(
+            url,
+            parser_callback=parser_callback,
+            params=params,
+            expect_json=False,
+        )
+
+    def _build_ssr_page_url(
+        self,
+        identity: ItemIdentityResult,
+        source_url: str | None = None,
+    ) -> str:
+        """Select the wear-filtered SSR URL when group_id is known so Steam hydrates exact wear listings."""
+        if source_url:
+            try:
+                parsed = parse_steam_market_url(source_url)
+                if (
+                    identity.group_id
+                    and parsed.group_id == identity.group_id
+                    and (identity.exterior is None or parsed.exterior == identity.exterior)
+                ):
+                    return source_url.strip()
+            except Exception:
+                pass
+        if identity.group_id and identity.exterior is not None:
+            wear_param = WEAR_CATEGORY_TO_PARAM.get(identity.exterior)
+            if wear_param:
+                q_suffix = "&category_Quality=tag_strange" if identity.is_stattrak else ""
+                return f"https://steamcommunity.com/market/listings/730/{identity.group_id}?category_Exterior={wear_param}{q_suffix}&appid=730"
+        if identity.group_id:
+            return f"https://steamcommunity.com/market/listings/730/{identity.group_id}"
+        encoded_name = quote(identity.market_hash_name.strip(), safe="")
+        return f"https://steamcommunity.com/market/listings/730/{encoded_name}"
+
+    async def get_ssr_market_page(
+        self,
+        identity: ItemIdentityResult,
+        currency: CurrencyConfig,
+        source_url: str | None = None,
+    ) -> tuple[ListingRenderResponse, list[tuple[str, int, int]]]:
+        """Fetch Steam's 2026 SSR listing HTML and extract BOTH live listings and cookie-free history in 1 GET."""
+        if not isinstance(identity, ItemIdentityResult):
+            raise TypeError(f"identity must be an ItemIdentityResult, got {type(identity).__name__}.")
+        if identity.appid != 730:
+            raise ValueError(f"Invalid appid {identity.appid}: market adapters only support CS2 (appid 730).")
+        if identity.resolution_status == ResolutionStatus.PARSED_URL_ONLY or not identity.market_hash_name:
+            raise ValueError("Canonical resolution required to fetch SSR market page.")
+        if not currency.is_metadata_verified:
+            raise ValueError(f"Verified currency metadata required, got {currency.code}.")
+
+        target_url = self._build_ssr_page_url(identity, source_url=source_url)
+
+        def parser_callback(response: httpx.Response) -> tuple[ListingRenderResponse, list[tuple[str, int, int]]]:
+            text = response.text or ""
+            render = extract_ssr_listing_render_response(text)
+            if render is None:
+                raise ValueError(
+                    f"Missing valid SSR market listing cache in HTML response from {response.url}."
+                )
+            hist = extract_public_price_history(
+                text,
+                currency,
+                expected_market_hash_name=identity.market_hash_name,
+            )
+            return render, hist
+
+        return await self.http_client.get_parsed(
+            target_url,
+            parser_callback=parser_callback,
+            expect_json=False,
+        )
 
     async def get_ssr_listing_context(
         self,
@@ -329,14 +390,17 @@ class SteamMarketAdapter:
         if not currency.is_metadata_verified:
             raise ValueError(f"Verified currency metadata required, got {currency.code}.")
 
-        encoded_name = quote(identity.market_hash_name.strip(), safe="")
-        target_url = f"https://steamcommunity.com/market/listings/730/{encoded_name}"
+        target_url = self._build_ssr_page_url(identity)
 
         def parser_callback(response: httpx.Response) -> list[tuple[str, int, int]]:
             text = response.text
             if not isinstance(text, str) or "<html" not in text.lower() and "steamcommunity" not in text.lower():
                 raise ValueError(f"Unexpected non-HTML response from {response.url}")
-            return extract_public_price_history(text, currency)
+            return extract_public_price_history(
+                text,
+                currency,
+                expected_market_hash_name=identity.market_hash_name,
+            )
 
         return await self.http_client.get_parsed(
             target_url,

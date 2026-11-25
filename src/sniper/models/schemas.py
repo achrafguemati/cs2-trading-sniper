@@ -50,6 +50,7 @@ class AssetPropertyItem(BaseModel):
     name: str | None = None
     float_value: str | float | None = None
     int_value: str | int | None = None
+    string_value: str | None = None
 
 
 class AssetInfoItem(BaseModel):

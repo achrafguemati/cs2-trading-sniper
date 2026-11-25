@@ -633,6 +633,74 @@ class TestItemIdentityResolver(unittest.TestCase):
             self.assertEqual(res.resolution_status, ResolutionStatus.CANONICAL_RESOLVED)
             self.assertEqual(res.market_hash_name, "AK-47 | Redline (Field-Tested)")
 
+    def test_multi_quality_grouped_ssr_disambiguates_via_initial_selected_and_quality_param(self):
+        """Real Steam grouped SSR embeds both Normal and StatTrak buckets for the same exterior."""
+        loader_data = {
+            "success": True,
+            "appid": 730,
+            "initialSelectedBucketID": "★ Bowie Knife | Black Laminate (Field-Tested)",
+            "buckets": [
+                {
+                    "bucket_id": "★ Bowie Knife | Black Laminate (Field-Tested)",
+                    "localized_name": "★ Bowie Knife | Black Laminate (Field-Tested)",
+                    "min_price": "7500",
+                    "classid": "7993039401",
+                    "localized_name_inside_group": "Field-Tested",
+                    "filters": [["Quality", "normal"], ["Exterior", "WearCategory2"]],
+                },
+                {
+                    "bucket_id": "★ StatTrak™ Bowie Knife | Black Laminate (Field-Tested)",
+                    "localized_name": "★ StatTrak™ Bowie Knife | Black Laminate (Field-Tested)",
+                    "min_price": "9500",
+                    "classid": "7993046562",
+                    "localized_name_inside_group": "StatTrak™ Field-Tested",
+                    "filters": [["Quality", "strange"], ["Exterior", "WearCategory2"]],
+                },
+            ],
+        }
+        with ItemNameIdDatabase(":memory:") as db:
+            db.import_verified_dataset(VERIFIED_SEED_PATH, verified_seed_metadata())
+
+            normal_url = "https://steamcommunity.com/market/listings/730/G18820420D5083003?category_Exterior=WearCategory2&appid=730"
+            res_norm = resolve_item_identity(
+                normal_url,
+                ssr_data=SsrListingContext(source_url=normal_url, loader_data=loader_data),
+                db=db,
+            )
+            self.assertEqual(res_norm.market_hash_name, "★ Bowie Knife | Black Laminate (Field-Tested)")
+            self.assertEqual(res_norm.item_nameid, 176263276)
+            self.assertEqual(res_norm.classid, "7993039401")
+            self.assertFalse(res_norm.is_stattrak)
+
+            st_url = "https://steamcommunity.com/market/listings/730/G18820420D5083003?category_Exterior=WearCategory2&category_Quality=tag_strange&appid=730"
+            res_st = resolve_item_identity(
+                st_url,
+                ssr_data=SsrListingContext(source_url=st_url, loader_data=loader_data),
+                db=db,
+            )
+            self.assertEqual(res_st.market_hash_name, "★ StatTrak™ Bowie Knife | Black Laminate (Field-Tested)")
+            self.assertTrue(res_st.is_stattrak)
+            self.assertEqual(res_st.classid, "7993046562")
+
+            # Duplicate same-quality buckets still fail closed even when initialSelectedBucketID is set
+            same_quality_dup = {
+                **loader_data,
+                "buckets": [
+                    loader_data["buckets"][0],
+                    {
+                        **loader_data["buckets"][0],
+                        "bucket_id": "★ Bowie Knife | Black Laminate Dup (Field-Tested)",
+                        "classid": "999999",
+                    },
+                ],
+            }
+            with self.assertRaises(SsrBucketResolutionError):
+                resolve_item_identity(
+                    normal_url,
+                    ssr_data=SsrListingContext(source_url=normal_url, loader_data=same_quality_dup),
+                    db=db,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

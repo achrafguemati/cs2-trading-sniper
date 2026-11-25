@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import json
 import logging
 import os
@@ -67,6 +68,42 @@ def init_database(db_path: str) -> Database:
     curr_repo = CurrencyRepository(db)
     curr_repo.seed_default_currencies()
     return db
+
+
+def _resolve_max_buy_minor(
+    db: Database,
+    currency_id: int,
+    max_buy_cents: int | None,
+    max_price: str | None,
+) -> int | None:
+    """Convert optional --max-price decimal string into exact minor units without float math."""
+    parsed_price_minor: int | None = None
+    if max_price is not None:
+        raw = str(max_price).strip()
+        curr = CurrencyRepository(db).get_by_id(currency_id)
+        precision = curr.minor_unit_precision if curr is not None else 2
+        if curr is not None and raw.startswith(curr.symbol):
+            raw = raw[len(curr.symbol):].strip()
+        elif raw.startswith("$"):
+            raw = raw[1:].strip()
+        try:
+            dec = Decimal(raw)
+        except InvalidOperation as exc:
+            raise ValueError(f"Invalid --max-price value '{max_price}'.") from exc
+        if not dec.is_finite() or dec <= 0:
+            raise ValueError(f"--max-price must be positive, got '{max_price}'.")
+        scaled = dec * (Decimal(10) ** precision)
+        if scaled != scaled.to_integral_value():
+            raise ValueError(
+                f"--max-price '{max_price}' exceeds currency minor-unit precision ({precision} decimals)."
+            )
+        parsed_price_minor = int(scaled)
+
+    if max_buy_cents is not None and parsed_price_minor is not None and max_buy_cents != parsed_price_minor:
+        raise ValueError(
+            f"Conflicting --max-buy-cents ({max_buy_cents}) and --max-price ({parsed_price_minor} minor units)."
+        )
+    return parsed_price_minor if parsed_price_minor is not None else max_buy_cents
 
 
 async def cmd_import_inventory(args: argparse.Namespace) -> int:
@@ -368,6 +405,12 @@ async def cmd_watchlist_add(args: argparse.Namespace) -> int:
                 ssr_ctx = await adapter.get_ssr_listing_context(url)
                 res = svc.resolve_and_persist(url, ssr_data=ssr_ctx)
 
+            max_buy_minor = _resolve_max_buy_minor(
+                db,
+                args.currency_id,
+                getattr(args, "max_buy_cents", None),
+                getattr(args, "max_price", None),
+            )
             repo = WatchlistRepository(db)
             saved = repo.save(
                 WatchlistEntryRecord(
@@ -375,7 +418,7 @@ async def cmd_watchlist_add(args: argparse.Namespace) -> int:
                     input_url=url,
                     strategy=args.strategy,
                     currency_id=args.currency_id,
-                    max_buy_price_minor=args.max_buy_cents,
+                    max_buy_price_minor=max_buy_minor,
                     min_discount_pct=args.min_discount,
                     min_net_profit_minor=args.min_profit_cents,
                     min_roi_pct=args.min_roi,
@@ -456,10 +499,16 @@ async def cmd_scan_buy(args: argparse.Namespace) -> int:
             adapter = SteamMarketAdapter(http_client=http_client)
             identity_service = ItemIdentityService(db)
             dispatcher = NotificationDispatcher.from_database(db)
+            max_buy_minor = _resolve_max_buy_minor(
+                db,
+                args.currency_id,
+                getattr(args, "max_buy_cents", None),
+                getattr(args, "max_price", None),
+            )
             config = BuyEvaluationConfig(
                 currency_id=args.currency_id,
                 min_roi_pct=args.min_roi,
-                max_buy_price_minor=args.max_buy_cents,
+                max_buy_price_minor=max_buy_minor,
             )
             engine = BuySniperEngine(
                 db=db,
@@ -637,7 +686,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_wl_add.add_argument("--db", default=get_default_db_path(), help="Database path")
     p_wl_add.add_argument("--strategy", choices=["BUY", "SELL", "BOTH"], default="BUY")
     p_wl_add.add_argument("--currency-id", type=int, default=1)
-    p_wl_add.add_argument("--max-buy-cents", type=int, default=None)
+    p_wl_add.add_argument("--max-buy-cents", type=int, default=None, help="Maximum buyer-pays cap in minor units")
+    p_wl_add.add_argument("--max-price", default=None, help="Maximum buyer-pays cap in major units (e.g. 51.00)")
     p_wl_add.add_argument("--min-discount", type=float, default=None)
     p_wl_add.add_argument("--min-profit-cents", type=int, default=None)
     p_wl_add.add_argument("--min-roi", type=float, default=5.0)
@@ -662,7 +712,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_buy.add_argument("--db", default=get_default_db_path(), help="Database path")
     p_buy.add_argument("--currency-id", type=int, default=1)
     p_buy.add_argument("--min-roi", type=float, default=5.0)
-    p_buy.add_argument("--max-buy-cents", type=int, default=None)
+    p_buy.add_argument("--max-buy-cents", type=int, default=None, help="Maximum buyer-pays cap in minor units")
+    p_buy.add_argument("--max-price", default=None, help="Maximum buyer-pays cap in major units (e.g. 51.00)")
     p_buy.add_argument("--no-notifications", action="store_true")
 
     # portfolio (M7)

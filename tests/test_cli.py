@@ -168,6 +168,37 @@ class TestCli(unittest.TestCase):
                 code = main(["import-inventory", "76561198000000000", "--db", self.db_path])
                 self.assertEqual(code, 0)
 
+    def test_cli_watchlist_add_supports_exact_decimal_max_price(self) -> None:
+        """Verify --max-price parses exact major units without binary float drift and rejects excess decimals."""
+        from sniper.storage.database import Database
+        from sniper.storage.repositories import WatchlistRepository
+
+        with patch("sys.stdout", new_callable=io.StringIO):
+            code = main([
+                "watchlist", "add",
+                "https://steamcommunity.com/market/listings/730/AK-47%20%7C%20Redline%20%28Field-Tested%29",
+                "--max-price", "51.00",
+                "--db", self.db_path,
+            ])
+        self.assertEqual(code, 0)
+        db = Database(self.db_path)
+        try:
+            entries = WatchlistRepository(db).list_entries()
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0].max_buy_price_minor, 5100)
+        finally:
+            db.close()
+
+        # Excess fractional digits must fail closed
+        with patch("sys.stderr", new_callable=io.StringIO):
+            bad_code = main([
+                "watchlist", "add",
+                "https://steamcommunity.com/market/listings/730/AK-47%20%7C%20Redline%20%28Field-Tested%29",
+                "--max-price", "51.005",
+                "--db", self.db_path,
+            ])
+        self.assertEqual(bad_code, 1)
+
 
 class TestHttpClientLifecycle(unittest.IsolatedAsyncioTestCase):
     """Test lifecycle and explicit closing of ReadOnlyHttpClient."""

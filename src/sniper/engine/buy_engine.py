@@ -381,46 +381,79 @@ class BuySniperEngine:
         now_iso = now.isoformat()
         identity = self._build_identity(item_record)
 
-        # 1. Load daily historical points (cookie-free sources)
+        # 1. Load daily historical points & active listings (single SSR fetch when grouped URL item)
         pts_30d = self._history_repo.get_recent_points(
             item_id=item_record.item_id,
             currency_id=curr_id,
             days=30,
             now_dt=now,
         )
-        if len(pts_30d) < self._config.min_daily_history_points and self._config.fetch_public_history_fallback:
-            try:
-                public_pts = await self._adapter.get_public_price_history(identity, currency_cfg)
-                if public_pts:
-                    records = [
-                        PriceHistoryPointRecord(
-                            item_id=item_record.item_id,
-                            currency_id=curr_id,
-                            bucket_date=bdate,
-                            median_price_minor=median_p,
-                            volume=vol,
-                            source="steam_public_chart",
-                            observed_at=now_iso,
-                        )
-                        for bdate, median_p, vol in public_pts
-                    ]
-                    self._history_repo.upsert_batch(records)
-                    pts_30d = self._history_repo.get_recent_points(
+        render: ListingRenderResponse | None = None
+        if (
+            identity.group_id
+            and type(self._adapter) is SteamMarketAdapter
+        ):
+            src_url = watchlist_entry.input_url if watchlist_entry else None
+            render, ssr_pts = await self._adapter.get_ssr_market_page(
+                identity=identity,
+                currency=currency_cfg,
+                source_url=src_url,
+            )
+            if ssr_pts:
+                records = [
+                    PriceHistoryPointRecord(
                         item_id=item_record.item_id,
                         currency_id=curr_id,
-                        days=30,
-                        now_dt=now,
+                        bucket_date=bdate,
+                        median_price_minor=median_p,
+                        volume=vol,
+                        source="steam_ssr_chart",
+                        observed_at=now_iso,
                     )
-            except Exception as exc:
-                logger.debug("Optional public chart history extraction skipped for '%s': %s", item_record.market_hash_name, exc)
+                    for bdate, median_p, vol in ssr_pts
+                ]
+                self._history_repo.upsert_batch(records)
+                pts_30d = self._history_repo.get_recent_points(
+                    item_id=item_record.item_id,
+                    currency_id=curr_id,
+                    days=30,
+                    now_dt=now,
+                )
 
-        # 2. Retrieve individual listings from /render/
-        render = await self._adapter.get_listing_render(
-            identity=identity,
-            currency=curr_id,
-            start=0,
-            count=self._config.render_count,
-        )
+        if render is None:
+            if len(pts_30d) < self._config.min_daily_history_points and self._config.fetch_public_history_fallback:
+                try:
+                    public_pts = await self._adapter.get_public_price_history(identity, currency_cfg)
+                    if public_pts:
+                        records = [
+                            PriceHistoryPointRecord(
+                                item_id=item_record.item_id,
+                                currency_id=curr_id,
+                                bucket_date=bdate,
+                                median_price_minor=median_p,
+                                volume=vol,
+                                source="steam_public_chart",
+                                observed_at=now_iso,
+                            )
+                            for bdate, median_p, vol in public_pts
+                        ]
+                        self._history_repo.upsert_batch(records)
+                        pts_30d = self._history_repo.get_recent_points(
+                            item_id=item_record.item_id,
+                            currency_id=curr_id,
+                            days=30,
+                            now_dt=now,
+                        )
+                except Exception as exc:
+                    logger.debug("Optional public chart history extraction skipped for '%s': %s", item_record.market_hash_name, exc)
+
+            # 2. Retrieve individual listings from /render/
+            render = await self._adapter.get_listing_render(
+                identity=identity,
+                currency=curr_id,
+                start=0,
+                count=self._config.render_count,
+            )
         valid_cards, rejected_cards = parse_listing_render_cards(
             render=render,
             expected_market_hash_name=item_record.market_hash_name,

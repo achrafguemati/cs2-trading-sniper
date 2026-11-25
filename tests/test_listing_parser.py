@@ -9,6 +9,7 @@ import unittest
 from sniper.adapters.listing_parser import (
     compute_weighted_median_minor,
     extract_public_price_history,
+    extract_ssr_listing_render_response,
     parse_listing_render_cards,
 )
 from sniper.core.currency import CurrencyConfig
@@ -173,6 +174,118 @@ class TestListingParser(unittest.TestCase):
     def test_compute_weighted_median_minor(self) -> None:
         self.assertEqual(compute_weighted_median_minor([(1000, 1), (2000, 5), (3000, 1)]), 2000)
         self.assertEqual(compute_weighted_median_minor([(1000, 10), (5000, 1)]), 1000)
+
+    def test_extract_ssr_2026_listings_properties_inspect_and_pricehistory(self) -> None:
+        """Verify 2026 SSR valve-ssr-data market_item_search and pricehistory parsing cleanly."""
+        query_data = {
+            "queries": [
+                {
+                    "queryKey": ["market_item_search", {"appid": 730, "strItemName": "G18820420D5083003"}],
+                    "state": {
+                        "data": {
+                            "pages": [
+                                {
+                                    "start": 0,
+                                    "total_count": 2,
+                                    "listings": [
+                                        {
+                                            "listingid": "681604214558471823",
+                                            "unPrice": 4340,
+                                            "unFee": 651,
+                                            "unSteamFee": 217,
+                                            "unPublisherFee": 434,
+                                            "eCurrency": 1,
+                                            "asset": {
+                                                "id": "52645377248",
+                                                "classid": "7993039401",
+                                                "instanceid": "188530139",
+                                                "appid": 730,
+                                                "contextid": "2",
+                                                "asset_properties": [
+                                                    {"propertyid": 1, "int_value": "356"},
+                                                    {"propertyid": 2, "float_value": 0.27541118},
+                                                    {"propertyid": 6, "string_value": "8E9E6E67"},
+                                                ],
+                                            },
+                                            "description": {
+                                                "appid": 730,
+                                                "classid": "7993039401",
+                                                "instanceid": "188530139",
+                                                "name": "★ Bowie Knife | Black Laminate (Field-Tested)",
+                                                "market_hash_name": "★ Bowie Knife | Black Laminate (Field-Tested)",
+                                                "descriptions": [{"value": "Exterior: Field-Tested"}],
+                                                "market_actions": [
+                                                    {
+                                                        "link": "steam://run/730//+csgo_econ_action_preview%20%propid:6%",
+                                                        "name": "Inspect in Game...",
+                                                    }
+                                                ],
+                                            },
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    },
+                },
+                {
+                    "queryKey": ["market", "pricehistory", 730, "★ Bowie Knife | Black Laminate (Field-Tested)"],
+                    "state": {
+                        "data": {
+                            "ecurrency": 1,
+                            "prices": [
+                                {"time": 1795532400, "price_median": 50.3364, "purchases": 3},
+                                {"time": 1795536000, "price_median": 48.1248, "purchases": 2},
+                            ],
+                        }
+                    },
+                },
+            ]
+        }
+        ssr_envelope = {
+            "route": "/market/listings/:appid/:name/:bucket?",
+            "loaderData": ["{}", "{}", "true", "{}"],
+            "renderContext": {"queryData": json.dumps(query_data)},
+        }
+        html_doc = f'<html><script type="application/json" id="valve-ssr-data">{json.dumps(ssr_envelope)}</script></html>'
+
+        render = extract_ssr_listing_render_response(html_doc)
+        self.assertIsNotNone(render)
+        valid, rejected = parse_listing_render_cards(
+            render,
+            expected_market_hash_name="★ Bowie Knife | Black Laminate (Field-Tested)",
+            expected_currency_id=1,
+            expected_exterior="Field-Tested",
+        )
+        self.assertEqual(len(rejected), 0)
+        self.assertEqual(len(valid), 1)
+        card = valid[0]
+        self.assertEqual(card.buyer_pays_minor, 4991)
+        self.assertEqual(card.seller_receives_minor, 4340)
+        self.assertEqual(card.paint_seed, 356)
+        self.assertAlmostEqual(card.float_value or 0.0, 0.27541118, places=6)
+        self.assertEqual(card.inspect_link, "steam://run/730//+csgo_econ_action_preview%208E9E6E67")
+
+        usd = CurrencyConfig(
+            currency_id=1,
+            code="USD",
+            symbol="$",
+            minor_unit_precision=2,
+            is_metadata_verified=True,
+            is_fee_verified=True,
+        )
+        pts = extract_public_price_history(
+            html_doc,
+            usd,
+            expected_market_hash_name="★ Bowie Knife | Black Laminate (Field-Tested)",
+        )
+        self.assertEqual(len(pts), 1)
+        self.assertEqual(pts[0][1], 5034)
+        self.assertEqual(pts[0][2], 5)
+        self.assertEqual(
+            extract_public_price_history(html_doc, usd, expected_market_hash_name="Wrong Item"),
+            [],
+        )
 
 
 if __name__ == "__main__":

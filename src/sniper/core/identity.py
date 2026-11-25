@@ -384,6 +384,10 @@ def parse_steam_market_url(url: str) -> ItemIdentityResult:
         if not _GROUP_TOKEN_REGEX.match(decoded_token) or len(decoded_token) <= 1:
             raise ValueError(f"Malformed group identifier: '{decoded_token}'.")
 
+        q_val = query_params.get("category_Quality", "").strip().lower()
+        is_st = q_val in ("tag_strange", "strange")
+        is_souv = q_val in ("tag_tournament", "tournament")
+
         return ItemIdentityResult(
             appid=730,
             input_url=url,
@@ -392,8 +396,8 @@ def parse_steam_market_url(url: str) -> ItemIdentityResult:
             base_name="",
             market_hash_name="",
             exterior=exterior,
-            is_stattrak=False,
-            is_souvenir=False,
+            is_stattrak=is_st,
+            is_souvenir=is_souv,
             classid=None,
             item_nameid=None,
             resolution_status=ResolutionStatus.PARSED_URL_ONLY,
@@ -446,16 +450,33 @@ def parse_steam_market_url(url: str) -> ItemIdentityResult:
 # Grouped SSR Bucket Resolution
 # -----------------------------------------------------------------------------
 
+def _bucket_quality_tag(bucket: SsrBucketItem) -> str:
+    """Return normalized quality key ('normal' | 'strange' | 'tournament') for SSR bucket disambiguation."""
+    for f in bucket.filters:
+        if len(f) >= 2 and str(f[0]).strip().lower() == "quality":
+            return str(f[1]).strip().lower()
+    _, _, is_st, is_souv = decompose_market_hash_name(bucket.bucket_id)
+    if is_st:
+        return "strange"
+    if is_souv:
+        return "tournament"
+    return "normal"
+
+
 def resolve_grouped_ssr_bucket(
     loader_data: SsrListingLoaderData | dict[str, Any],
     wear_category: WearCategory | str,
+    *,
+    initial_selected_bucket_id: str | None = None,
+    is_stattrak: bool | None = None,
+    is_souvenir: bool | None = None,
 ) -> SsrBucketItem:
     """Resolve the specific SSR bucket matching the requested wear filter.
     
     Fails closed if:
     - Loader data indicates success is false or appid != 730.
     - Requested wear category is missing from buckets.
-    - Ambiguous matching buckets are found.
+    - Ambiguous matching buckets are found without unambiguous quality or initialSelectedBucketID selection.
     """
     if isinstance(loader_data, dict):
         data = SsrListingLoaderData.model_validate(loader_data)
@@ -508,6 +529,26 @@ def resolve_grouped_ssr_bucket(
             f"Requested wear bucket '{target_name}' ({target_param}) not found in SSR loader data."
         )
     if len(matching) > 1:
+        if is_stattrak is True:
+            st_matches = [b for b in matching if _bucket_quality_tag(b) == "strange"]
+            if len(st_matches) == 1:
+                return st_matches[0]
+        elif is_souvenir is True:
+            souv_matches = [b for b in matching if _bucket_quality_tag(b) == "tournament"]
+            if len(souv_matches) == 1:
+                return souv_matches[0]
+
+        if initial_selected_bucket_id:
+            selected_all = [b for b in data.buckets if b.bucket_id == initial_selected_bucket_id]
+            selected_matching = [b for b in matching if b.bucket_id == initial_selected_bucket_id]
+            quality_tags = [_bucket_quality_tag(b) for b in matching]
+            if (
+                len(selected_all) == 1
+                and len(selected_matching) == 1
+                and len(quality_tags) == len(set(quality_tags))
+            ):
+                return selected_matching[0]
+
         raise SsrBucketResolutionError(
             f"Ambiguous SSR buckets matching wear '{target_name}': found {len(matching)} candidates."
         )
@@ -905,7 +946,13 @@ def resolve_item_identity(
                 )
 
             if result.exterior is not None:
-                bucket = resolve_grouped_ssr_bucket(loader, result.exterior)
+                bucket = resolve_grouped_ssr_bucket(
+                    loader,
+                    result.exterior,
+                    initial_selected_bucket_id=loader.initialSelectedBucketID,
+                    is_stattrak=True if result.is_stattrak else None,
+                    is_souvenir=True if result.is_souvenir else None,
+                )
             elif loader.initialSelectedBucketID:
                 selected = [b for b in loader.buckets if b.bucket_id == loader.initialSelectedBucketID]
                 if not selected:
