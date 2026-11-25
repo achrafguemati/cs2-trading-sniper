@@ -15,9 +15,6 @@ from typing import Sequence
 
 from dotenv import load_dotenv
 
-# Load local .env early without overriding existing process environment variables
-load_dotenv(override=False)
-
 from sniper.core.http_client import ReadOnlyHttpClient
 from sniper.adapters.inventory import ManualInventoryImporter, PublicInventoryClient, validate_steamid64
 from sniper.adapters.steam_market import SteamMarketAdapter
@@ -68,6 +65,13 @@ def init_database(db_path: str) -> Database:
     curr_repo = CurrencyRepository(db)
     curr_repo.seed_default_currencies()
     return db
+
+
+def _open_identity_service(db: Database, db_path: str) -> tuple[ItemIdentityService, Any]:
+    """Build ItemIdentityService backed by the packaged verified item_nameids mapping."""
+    nid_path = ":memory:" if db.is_memory else str(Path(db_path).parent / "item_nameids.db")
+    nameid_db = load_default_nameid_db(nid_path)
+    return ItemIdentityService(db, nameid_db=nameid_db), nameid_db
 
 
 def _resolve_max_buy_minor(
@@ -214,10 +218,11 @@ def cmd_import_json(args: argparse.Namespace) -> int:
 async def cmd_scan_sell(args: argparse.Namespace) -> int:
     """Scan marketable inventory items for profitable SELL opportunities."""
     db = init_database(args.db)
+    nameid_db = None
     try:
+        identity_service, nameid_db = _open_identity_service(db, args.db)
         async with ReadOnlyHttpClient() as http_client:
             market_adapter = SteamMarketAdapter(http_client=http_client)
-            identity_service = ItemIdentityService(db)
             dispatcher = NotificationDispatcher.from_database(db)
 
             config = SellEvaluationConfig(
@@ -239,6 +244,7 @@ async def cmd_scan_sell(args: argparse.Namespace) -> int:
                 snapshot_id=args.snapshot_id,
                 owner_id=args.owner_id,
                 dispatch_notifications=not args.no_notifications,
+                max_unique_items=getattr(args, "limit", None),
             )
 
             print(f"\nEvaluated {len(evaluations)} unique items:\n")
@@ -271,6 +277,8 @@ async def cmd_scan_sell(args: argparse.Namespace) -> int:
             print(f"Total Evaluated: {len(evaluations)} | Actionable Signals: {actionable_count}")
             return 0
     finally:
+        if nameid_db is not None:
+            nameid_db.close()
         db.close()
 
 
@@ -494,10 +502,11 @@ def cmd_import_history(args: argparse.Namespace) -> int:
 async def cmd_scan_buy(args: argparse.Namespace) -> int:
     """Scan active BUY watchlist entries for underpriced individual listings."""
     db = init_database(args.db)
+    nameid_db = None
     try:
+        identity_service, nameid_db = _open_identity_service(db, args.db)
         async with ReadOnlyHttpClient() as http_client:
             adapter = SteamMarketAdapter(http_client=http_client)
-            identity_service = ItemIdentityService(db)
             dispatcher = NotificationDispatcher.from_database(db)
             max_buy_minor = _resolve_max_buy_minor(
                 db,
@@ -529,6 +538,8 @@ async def cmd_scan_buy(args: argparse.Namespace) -> int:
                 print(f"  [{ev.status:<22}] {ev.market_hash_name:<35} #{ev.steam_listing_id:<14} Cost:{p_str} ConsNet:{net_str} ({ev.conservative_roi_pct:.1f}%)")
             return 0
     finally:
+        if nameid_db is not None:
+            nameid_db.close()
         db.close()
 
 
@@ -652,8 +663,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_inv = subparsers.add_parser("import-inventory", help="Fetch and import public CS2 inventory via SteamID64")
     p_inv.add_argument("steamid64", help="17-digit SteamID64 starting with 7656119")
     p_inv.add_argument("--db", default=get_default_db_path(), help="Database path")
-    p_inv.add_argument("--count", type=int, default=5000, help="Items per page")
-    p_inv.add_argument("--max-pages", type=int, default=10, help="Maximum pagination pages")
+    p_inv.add_argument("--count", type=int, default=1000, help="Items per page (Steam max 2000; default 1000)")
+    p_inv.add_argument("--max-pages", type=int, default=25, help="Maximum pagination pages")
 
     # import-csv
     p_csv = subparsers.add_parser("import-csv", help="Import inventory items from CSV file")
@@ -675,6 +686,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--currency-id", type=int, default=1, help="Currency ID (1 = USD)")
     p_scan.add_argument("--min-bid-cents", type=int, default=100, help="Minimum bid in minor units (cents)")
     p_scan.add_argument("--min-multiple", type=float, default=1.0, help="Minimum bid multiple over baseline")
+    p_scan.add_argument("--limit", type=int, default=None, help="Maximum unique items to evaluate in this run")
     p_scan.add_argument("--no-notifications", action="store_true", help="Do not dispatch notifications")
 
     # watchlist management (M6)
@@ -773,6 +785,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point."""
+    load_dotenv(override=False)
     parser = build_parser()
     args = parser.parse_args(argv)
 

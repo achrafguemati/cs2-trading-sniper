@@ -97,7 +97,7 @@ class TestNotifications(unittest.IsolatedAsyncioTestCase):
             captured_request["body"] = json.loads(req.content.decode("utf-8"))
             return httpx.Response(204)
 
-        channel = DiscordWebhookChannel(webhook_url="https://discord.com/api/webhooks/123/token")
+        channel = DiscordWebhookChannel(webhook_url="https://discord.com/api/webhooks/123/token", enabled=True)
         with patch("httpx.AsyncClient", side_effect=lambda **kw: _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(mock_handler))):
             res = await channel.send(self.alert)
 
@@ -125,7 +125,7 @@ class TestNotifications(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(429, json={"retry_after": 0.01})
             return httpx.Response(204)
 
-        channel = DiscordWebhookChannel(webhook_url="https://discord.com/api/webhooks/123/token")
+        channel = DiscordWebhookChannel(webhook_url="https://discord.com/api/webhooks/123/token", enabled=True)
         with patch("httpx.AsyncClient", side_effect=lambda **kw: _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(mock_handler))):
             res = await channel.send(self.alert)
 

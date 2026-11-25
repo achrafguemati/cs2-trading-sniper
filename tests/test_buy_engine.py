@@ -250,8 +250,8 @@ class TestBuyEngine(unittest.IsolatedAsyncioTestCase):
 
         dispatcher = NotificationDispatcher(
             channels=[
-                DiscordNotifier(webhook_url="https://discord.com/api/webhooks/111/secret"),
-                TelegramNotifier(bot_token="123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ_12345678", chat_id="42"),
+                DiscordNotifier(webhook_url="https://discord.com/api/webhooks/111/secret", enabled=True),
+                TelegramNotifier(bot_token="123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ_12345678", chat_id="42", enabled=True),
             ],
             strategy_alert_repo=self.strategy_alert_repo,
         )
@@ -447,7 +447,7 @@ class TestBuyEngine(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(204)
 
         dispatcher = NotificationDispatcher(
-            channels=[DiscordNotifier(webhook_url="https://discord.com/api/webhooks/111/secret")],
+            channels=[DiscordNotifier(webhook_url="https://discord.com/api/webhooks/111/secret", enabled=True)],
             strategy_alert_repo=self.strategy_alert_repo,
         )
         engine = BuySniperEngine(

@@ -84,7 +84,7 @@ class TestPortfolioAndScheduler(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(204)
 
         dispatcher = NotificationDispatcher(
-            channels=[DiscordNotifier(webhook_url="https://discord.com/api/webhooks/111/secret")],
+            channels=[DiscordNotifier(webhook_url="https://discord.com/api/webhooks/111/secret", enabled=True)],
             strategy_alert_repo=PortfolioService(self.db)._strategy_alert_repo,
         )
         svc = PortfolioService(self.db, dispatcher=dispatcher)

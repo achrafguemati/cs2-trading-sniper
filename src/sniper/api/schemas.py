@@ -43,8 +43,8 @@ class HistoryImportRequest(BaseModel):
 
 class SteamInventoryImportRequest(BaseModel):
     steamid64: str
-    count: int = 5000
-    max_pages: int = 10
+    count: int = 1000
+    max_pages: int = 25
 
 
 class ManualInventoryImportRequest(BaseModel):

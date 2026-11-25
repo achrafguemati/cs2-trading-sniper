@@ -556,6 +556,7 @@ class SellSniperEngine:
         snapshot_id: int | None = None,
         owner_id: str | None = None,
         dispatch_notifications: bool = True,
+        max_unique_items: int | None = None,
     ) -> list[SellCandidateEvaluation]:
         """Scan all marketable items in the specified or latest inventory snapshot."""
         if snapshot_id is not None:
@@ -580,6 +581,8 @@ class SellSniperEngine:
             if it.market_hash_name not in seen_names:
                 seen_names.add(it.market_hash_name)
                 unique_items.append(it)
+                if max_unique_items is not None and len(unique_items) >= max_unique_items:
+                    break
 
         logger.info("Evaluating %d unique marketable items for SELL opportunities.", len(unique_items))
         evaluations: list[SellCandidateEvaluation] = []

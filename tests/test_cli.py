@@ -23,6 +23,18 @@ class TestCli(unittest.TestCase):
     """Test suite for command-line interface commands."""
 
     def setUp(self) -> None:
+        self._saved_env = {
+            k: os.environ.get(k)
+            for k in (
+                "SNIPER_DB_PATH",
+                "STEAMID64",
+                "DISCORD_WEBHOOK_URL",
+                "DISCORD_ENABLED",
+                "TELEGRAM_BOT_TOKEN",
+                "TELEGRAM_CHAT_ID",
+                "TELEGRAM_ENABLED",
+            )
+        }
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.temp_dir.name) / "test_cli.db")
 
@@ -33,6 +45,11 @@ class TestCli(unittest.TestCase):
         db.close()
 
     def tearDown(self) -> None:
+        for k, val in self._saved_env.items():
+            if val is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = val
         self.temp_dir.cleanup()
 
     def test_cli_help(self) -> None:

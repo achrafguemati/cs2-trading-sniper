@@ -52,8 +52,8 @@ class PublicInventoryClient:
         self,
         steamid64: str,
         language: str = "english",
-        count: int = 5000,
-        max_pages: int = 10,
+        count: int = 1000,
+        max_pages: int = 25,
         max_items: int = 25000,
     ) -> tuple[InventorySnapshotRecord, list[InventoryItemRecord]]:
         """Fetch a public CS2 inventory and import the snapshot into the local database.

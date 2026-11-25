@@ -65,7 +65,6 @@ from sniper.storage.repositories import (
 )
 from sniper.storage.service import ItemIdentityService, load_default_nameid_db
 
-load_dotenv(override=False)
 logger = logging.getLogger("sniper.api")
 
 
