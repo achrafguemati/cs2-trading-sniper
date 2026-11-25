@@ -111,6 +111,28 @@ class DiscoverScreenRequest(BaseModel):
     min_roi_pct: float = Field(5.0, ge=0.0, le=500.0)
     auto_watchlist: bool = False
     max_budget_minor: int | None = Field(None, ge=1)
+    strategy: str = "all"
+
+
+class AutoHuntRequest(BaseModel):
+    strategy: str = "all"  # 'all' | 'cross_market' | 'steam_dip' | 'float_craft'
+    query: str = ""
+    category: str | None = None
+    exterior: str | None = None
+    min_price_minor: int = Field(300, ge=50)
+    max_price_minor: int | None = Field(None, ge=100)
+    min_roi_pct: float = Field(5.0, ge=0.0, le=500.0)
+    max_items: int = Field(6, ge=1, le=8)
+    currency_id: int = Field(1, ge=1)
+    auto_watchlist: bool = False
+
+    @field_validator("strategy")
+    @classmethod
+    def check_hunt_strategy(cls, v: str) -> str:
+        clean = v.strip().lower()
+        if clean not in ("all", "cross_market", "steam_dip", "float_craft"):
+            raise ValueError("strategy must be all, cross_market, steam_dip, or float_craft.")
+        return clean
 
 
 class SellScanRequest(BaseModel):

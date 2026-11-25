@@ -1,6 +1,8 @@
 import type {
+  AutoHuntResponse,
   BuyCandidate,
   CatalogSearchResponse,
+  CrossMarketResponse,
   DiscoverScreenResponse,
   HealthStatus,
   InventoryResponse,
@@ -118,7 +120,40 @@ export const api = {
     min_roi_pct?: number;
     auto_watchlist?: boolean;
     max_budget_minor?: number | null;
+    strategy?: string;
   }) => request<DiscoverScreenResponse>("/api/discover/screen", { method: "POST", body: JSON.stringify(body) }),
+  getCrossMarketSpreads: (params: {
+    q?: string;
+    category?: string;
+    exterior?: string;
+    min_price_minor?: number;
+    max_price_minor?: number | null;
+    min_supply?: number;
+    min_roi_pct?: number;
+    limit?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params.q) qs.set("q", params.q);
+    if (params.category) qs.set("category", params.category);
+    if (params.exterior) qs.set("exterior", params.exterior);
+    if (params.min_price_minor) qs.set("min_price_minor", String(params.min_price_minor));
+    if (params.max_price_minor) qs.set("max_price_minor", String(params.max_price_minor));
+    if (params.min_supply) qs.set("min_supply", String(params.min_supply));
+    if (params.min_roi_pct !== undefined) qs.set("min_roi_pct", String(params.min_roi_pct));
+    if (params.limit) qs.set("limit", String(params.limit));
+    return request<CrossMarketResponse>(`/api/discover/cross-market?${qs.toString()}`);
+  },
+  autoHuntDeals: (body: {
+    strategy: string;
+    query?: string;
+    category?: string;
+    exterior?: string;
+    min_price_minor?: number;
+    max_price_minor?: number | null;
+    min_roi_pct?: number;
+    max_items?: number;
+    auto_watchlist?: boolean;
+  }) => request<AutoHuntResponse>("/api/discover/auto-hunt", { method: "POST", body: JSON.stringify(body) }),
 
   getLatestInventory: () => request<InventoryResponse>("/api/inventory/latest"),
   importSteamInventory: (steamid64: string) =>

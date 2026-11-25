@@ -18,10 +18,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from sniper.adapters.external_markets import ExternalMarketFeedAdapter
 from sniper.adapters.inventory import ManualInventoryImporter, PublicInventoryClient
 from sniper.adapters.steam_market import SteamMarketAdapter
 from sniper.api.schemas import (
     AppSettingsUpdateRequest,
+    AutoHuntRequest,
     BreakerResetRequest,
     DiscoverScreenRequest,
     DiscoverSteamSearchRequest,
@@ -52,6 +54,7 @@ from sniper.engine.discovery import (
     build_grouped_inventory_views,
     compute_target_buy_price_minor,
     get_presets_with_metadata,
+    hunt_best_opportunities,
     load_currency_config,
     screen_market_items,
 )
@@ -103,6 +106,7 @@ class AppContainer:
     identity_service: ItemIdentityService
     scheduler: SniperScheduler
     portfolio_service: PortfolioService
+    external_markets: ExternalMarketFeedAdapter
     owns_db: bool = True
 
     @property
@@ -136,6 +140,7 @@ def _build_container(
     db_path: str | Path = "data/sniper.db",
     http_client: ReadOnlyHttpClient | None = None,
     nameid_db: ItemNameIdDatabase | None = None,
+    external_markets: ExternalMarketFeedAdapter | None = None,
     scheduler_enabled: bool = False,
 ) -> AppContainer:
     owns_db = db is None
@@ -179,6 +184,7 @@ def _build_container(
         identity_service=identity_service,
         scheduler=scheduler,
         portfolio_service=portfolio_service,
+        external_markets=external_markets or ExternalMarketFeedAdapter(),
         owns_db=owns_db,
     )
 
@@ -188,6 +194,7 @@ def create_app(
     db_path: str | Path | None = None,
     http_client: ReadOnlyHttpClient | None = None,
     nameid_db: ItemNameIdDatabase | None = None,
+    external_markets: ExternalMarketFeedAdapter | None = None,
     enable_scheduler: bool = False,
     frontend_dist: str | Path | None = None,
 ) -> FastAPI:
@@ -198,6 +205,7 @@ def create_app(
         db_path=target_db_path,
         http_client=http_client,
         nameid_db=nameid_db,
+        external_markets=external_markets,
         scheduler_enabled=enable_scheduler,
     )
 
@@ -557,10 +565,75 @@ def create_app(
             "items": filtered,
         }
 
+    @app.get("/api/discover/cross-market")
+    async def discover_cross_market_spreads(
+        q: str = "",
+        category: str | None = None,
+        exterior: str | None = None,
+        min_price_minor: int = Query(300, ge=50),
+        max_price_minor: int | None = Query(None, ge=100),
+        min_supply: int = Query(5, ge=1),
+        min_roi_pct: float = Query(5.0, ge=0.0, le=500.0),
+        only_verified_nameid: bool = False,
+        currency_id: int = Query(1, ge=1),
+        limit: int = Query(35, ge=1, le=100),
+    ) -> dict[str, Any]:
+        c = _ctx()
+        cfg, _ = load_currency_config(c.db, currency_id)
+        items = await c.external_markets.find_cross_market_candidates(
+            currency_cfg=cfg,
+            nameid_db=c.nameid_db,
+            query=q,
+            category=category,
+            exterior=exterior,
+            min_price_minor=min_price_minor,
+            max_price_minor=max_price_minor,
+            min_supply=min_supply,
+            min_roi_pct=min_roi_pct,
+            only_verified_nameid=only_verified_nameid,
+            limit=limit,
+        )
+        return {
+            "feed_items": len(c.external_markets._skinport_cache),
+            "currency": {
+                "currency_id": cfg.currency_id,
+                "code": cfg.code,
+                "symbol": cfg.symbol,
+            },
+            "items": items,
+        }
+
+    @app.post("/api/discover/auto-hunt")
+    async def auto_hunt_best_deals(req: AutoHuntRequest) -> dict[str, Any]:
+        c = _ctx()
+        try:
+            return await hunt_best_opportunities(
+                strategy=req.strategy,
+                query=req.query,
+                category=req.category,
+                exterior=req.exterior,
+                min_price_minor=req.min_price_minor,
+                max_price_minor=req.max_price_minor,
+                min_roi_pct=req.min_roi_pct,
+                max_items=req.max_items,
+                auto_watchlist=req.auto_watchlist,
+                adapter=c.scheduler.adapter,
+                external_markets=c.external_markets,
+                identity_service=c.identity_service,
+                nameid_db=c.nameid_db,
+                db=c.db,
+                currency_id=req.currency_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
     @app.post("/api/discover/screen")
     async def screen_discover_candidates(req: DiscoverScreenRequest) -> dict[str, Any]:
         c = _ctx()
         try:
+            ext_index = await c.external_markets.get_merged_reference_index()
             candidates = await screen_market_items(
                 market_hash_names=req.market_hash_names,
                 adapter=c.scheduler.adapter,
@@ -570,6 +643,8 @@ def create_app(
                 min_roi_pct=req.min_roi_pct,
                 auto_watchlist=req.auto_watchlist,
                 max_budget_minor=req.max_budget_minor,
+                external_index=ext_index,
+                strategy=req.strategy,
             )
             return {
                 "screened": len(candidates),

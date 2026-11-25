@@ -1,4 +1,4 @@
-"""Self-discovering Buy-to-Sell screener, preset collections & grouped inventory analytics."""
+"""Self-discovering Buy-to-Sell screener, cross-market arbitrage & float/craft alpha engine."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import statistics
 from typing import Any
 from urllib.parse import quote
 
+from sniper.adapters.external_markets import ExternalMarketFeedAdapter
 from sniper.adapters.listing_parser import (
     compute_weighted_median_minor,
     parse_listing_render_cards,
@@ -21,6 +22,7 @@ from sniper.core.fees import (
 )
 from sniper.core.identity import (
     ItemNameIdDatabase,
+    WearCategory,
     decompose_market_hash_name,
     is_trusted_mapping_source,
 )
@@ -42,6 +44,20 @@ from sniper.storage.repositories import (
 from sniper.storage.service import ItemIdentityService
 
 logger = logging.getLogger("sniper.engine.discovery")
+
+_WEAR_BOUNDS: dict[str, tuple[float, float, str | None, str]] = {
+    WearCategory.FACTORY_NEW.value: (0.00, 0.07, None, "FN"),
+    WearCategory.MINIMAL_WEAR.value: (0.07, 0.15, WearCategory.FACTORY_NEW.value, "MW"),
+    WearCategory.FIELD_TESTED.value: (0.15, 0.38, WearCategory.MINIMAL_WEAR.value, "FT"),
+    WearCategory.WELL_WORN.value: (0.38, 0.45, WearCategory.FIELD_TESTED.value, "WW"),
+    WearCategory.BATTLE_SCARRED.value: (0.45, 1.00, WearCategory.WELL_WORN.value, "BS"),
+}
+
+_SKINPORT_TIERS: tuple[tuple[int, int], ...] = (
+    (3000, 12),
+    (10000, 9),
+    (10**9, 6),
+)
 
 
 CURATED_LIQUID_PRESETS: list[dict[str, Any]] = [
@@ -135,11 +151,7 @@ def compute_target_buy_price_minor(
     min_roi_pct: float,
     currency_cfg: CurrencyConfig,
 ) -> tuple[int, int]:
-    """Return exact integer (breakeven_buy_minor, target_buy_minor) for an expected resale gross price.
-
-    Uses integer fee inversion via `calculate_seller_receives` and Decimal basis-point division
-    so buying at or below `target_buy_minor` preserves at least `min_roi_pct` Wallet ROI.
-    """
+    """Return exact integer (breakeven_buy_minor, target_buy_minor) for an expected resale gross price."""
     if target_exit_gross_minor is None or target_exit_gross_minor <= 0:
         return 0, 0
     fee_floor = 1 + currency_cfg.min_fee_steam_minor + currency_cfg.min_fee_publisher_minor
@@ -159,6 +171,156 @@ def compute_target_buy_price_minor(
     )
     target_buy = (exit_net * 10000) // (10000 + roi_bps)
     return exit_net, max(0, target_buy)
+
+
+def compute_exit_venues_comparison(
+    gross_exit_minor: int | None,
+    currency_cfg: CurrencyConfig,
+) -> list[dict[str, Any]]:
+    """Compare modeled seller net payout across Steam Wallet vs external cashout marketplaces."""
+    if gross_exit_minor is None or gross_exit_minor <= 0:
+        return []
+    fee_floor = 1 + currency_cfg.min_fee_steam_minor + currency_cfg.min_fee_publisher_minor
+    if gross_exit_minor < fee_floor:
+        return []
+
+    steam_res = calculate_seller_receives(
+        gross_exit_minor,
+        currency=currency_cfg,
+        validate_market_listing=False,
+    )
+
+    sp_pct = next(pct for thresh, pct in _SKINPORT_TIERS if gross_exit_minor < thresh)
+    sp_fee = (gross_exit_minor * sp_pct + 50) // 100
+    sp_net = max(0, gross_exit_minor - sp_fee)
+
+    csfloat_fee = (gross_exit_minor * 2 + 50) // 100
+    csfloat_net = max(0, gross_exit_minor - csfloat_fee)
+
+    return [
+        {
+            "venue": "Steam Market",
+            "wallet_type": "Steam Wallet (Non-Withdrawable)",
+            "fee_label": "~13.04% buyer-side",
+            "fee_minor": steam_res.total_fee,
+            "net_minor": steam_res.seller_receives,
+        },
+        {
+            "venue": "CSFloat",
+            "wallet_type": "External Cash",
+            "fee_label": "2.0%",
+            "fee_minor": csfloat_fee,
+            "net_minor": csfloat_net,
+        },
+        {
+            "venue": "Skinport",
+            "wallet_type": "External Cash",
+            "fee_label": f"{sp_pct}%",
+            "fee_minor": sp_fee,
+            "net_minor": sp_net,
+        },
+    ]
+
+
+def compute_wear_float_metrics(
+    float_val: float | None,
+    exterior: str | None,
+) -> dict[str, Any]:
+    """Compute wear-bracket percentile (inspired by CSFloatPriceChecker stats) and next-tier distance."""
+    if float_val is None or not exterior or exterior not in _WEAR_BOUNDS:
+        return {
+            "wear_percentile": None,
+            "distance_to_better_wear": None,
+            "next_better_wear": None,
+            "float_alpha_badge": None,
+        }
+    lo, hi, better_wear, abbr = _WEAR_BOUNDS[exterior]
+    span = hi - lo
+    if span <= 0:
+        return {
+            "wear_percentile": None,
+            "distance_to_better_wear": None,
+            "next_better_wear": better_wear,
+            "float_alpha_badge": None,
+        }
+    clamped = max(lo, min(hi, float_val))
+    pct = round(((clamped - lo) / span) * 100.0, 1)
+    dist = round(max(0.0, float_val - lo), 4) if better_wear else None
+    badge: str | None = None
+    if pct <= 10.0:
+        badge = f"Top {max(1, round(pct))}% {abbr} Float"
+        if dist is not None and dist <= 0.015:
+            badge += f" (+{dist:.4f} above {better_wear})"
+    return {
+        "wear_percentile": pct,
+        "distance_to_better_wear": dist,
+        "next_better_wear": better_wear,
+        "float_alpha_badge": badge,
+    }
+
+
+def evaluate_craft_alpha(
+    base_price_minor: int | None,
+    floor_ask_minor: int | None,
+    stickers: list[str],
+    charms: list[str],
+    external_index: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Price applied stickers/charms using cached reference data and conservative SP retention tiers."""
+    if not external_index or (not stickers and not charms):
+        return {
+            "sticker_total_value_minor": 0,
+            "retained_craft_alpha_minor": 0,
+            "craft_sp_pct": None,
+            "craft_badge": None,
+        }
+
+    total_val = 0
+    for st in stickers:
+        key = st if st.startswith("Sticker | ") else f"Sticker | {st}"
+        entry = external_index.get(key)
+        if entry:
+            p = entry.get("skinport_min_minor") or entry.get("skinport_suggested_minor") or entry.get("csmarket_min_minor")
+            if p and p > 0:
+                total_val += int(p)
+    for ch in charms:
+        key = ch if ch.startswith("Charm | ") else f"Charm | {ch}"
+        entry = external_index.get(key)
+        if entry:
+            p = entry.get("skinport_min_minor") or entry.get("skinport_suggested_minor") or entry.get("csmarket_min_minor")
+            if p and p > 0:
+                total_val += int(p)
+
+    if total_val <= 0:
+        return {
+            "sticker_total_value_minor": 0,
+            "retained_craft_alpha_minor": 0,
+            "craft_sp_pct": None,
+            "craft_badge": None,
+        }
+
+    ref_base = base_price_minor or floor_ask_minor or 0
+    if ref_base <= 500:
+        ret_bps = 100  # 1% on budget skins <= $5
+    elif ref_base <= 5000:
+        ret_bps = 400  # 4% on mid skins <= $50
+    else:
+        ret_bps = 600  # 6% on liquid skins > $50
+    retained = (total_val * ret_bps) // 10000
+
+    overpay = max(0, (floor_ask_minor or 0) - (base_price_minor or 0))
+    sp_pct = round((float(overpay) / float(total_val)) * 100.0, 2) if (base_price_minor and floor_ask_minor) else None
+
+    badge = f"${total_val // 100}.{total_val % 100:02d} applied craft"
+    if sp_pct is not None and sp_pct <= 15.0:
+        badge += f" ({sp_pct}% SP)"
+
+    return {
+        "sticker_total_value_minor": total_val,
+        "retained_craft_alpha_minor": retained,
+        "craft_sp_pct": sp_pct,
+        "craft_badge": badge if total_val >= 300 else None,
+    }
 
 
 def get_presets_with_metadata(nameid_db: ItemNameIdDatabase | None) -> list[dict[str, Any]]:
@@ -293,8 +455,10 @@ async def screen_market_items(
     risk_buffer_pct: int = 5,
     auto_watchlist: bool = False,
     max_budget_minor: int | None = None,
+    external_index: dict[str, dict[str, Any]] | None = None,
+    strategy: str = "all",
 ) -> list[dict[str, Any]]:
-    """Run strictly read-only Buy-to-Sell evaluation across 1..8 CS2 items using SSR bundles."""
+    """Run strictly read-only Buy-to-Sell evaluation across 1..8 CS2 items combining Steam SSR & external prices."""
     currency_cfg, curr_rec = load_currency_config(db, currency_id)
     if not currency_cfg.is_metadata_verified or not currency_cfg.is_fee_verified:
         raise ValueError(f"Unverified currency rules for {curr_rec.code}.")
@@ -386,8 +550,17 @@ async def screen_market_items(
                 if valid_cards
                 else lowest_ask
             )
-            highest_bid = ob_snap.get("highest_buy_order_minor") if ob_snap else None
-            buy_order_count = ob_snap.get("buy_order_count") if ob_snap else None
+            cached_ob = ob_repo.get_latest(item_rec.item_id, currency_id) if (item_rec.item_id is not None) else None
+            highest_bid = (
+                ob_snap.get("highest_buy_order_minor")
+                if ob_snap and ob_snap.get("highest_buy_order_minor")
+                else (cached_ob.highest_buy_order_minor if cached_ob else None)
+            )
+            buy_order_count = (
+                ob_snap.get("buy_order_count")
+                if ob_snap and ob_snap.get("buy_order_count") is not None
+                else (cached_ob.buy_order_count if cached_ob else None)
+            )
             sell_order_count = (
                 ob_snap.get("sell_order_count") if ob_snap and ob_snap.get("sell_order_count") else render.total_count
             )
@@ -453,16 +626,122 @@ async def screen_market_items(
             floats = [c.float_value for c in valid_cards if c.float_value is not None]
             lowest_float = min(floats) if floats else None
             has_low_float_card = any(c.is_low_float_tier for c in valid_cards)
+            wear_metrics = compute_wear_float_metrics(lowest_float, item_rec.exterior)
+
             stickers_seen: list[str] = []
+            charms_seen: list[str] = []
             for card in valid_cards[:5]:
                 for stk in card.stickers:
                     if stk not in stickers_seen:
                         stickers_seen.append(stk)
+                for ch in card.charms:
+                    if ch not in charms_seen:
+                        charms_seen.append(ch)
             has_notable_craft = any(c.has_notable_craft for c in valid_cards[:5])
             best_inspect = next((c.inspect_link for c in valid_cards if c.inspect_link), None)
 
+            craft_info = evaluate_craft_alpha(
+                base_price_minor=floor_median,
+                floor_ask_minor=valid_cards[0].buyer_pays_minor if valid_cards else lowest_ask,
+                stickers=valid_cards[0].stickers if valid_cards else stickers_seen,
+                charms=valid_cards[0].charms if valid_cards else charms_seen,
+                external_index=external_index,
+            )
+
+            ext_ref = (external_index or {}).get(name)
+            sp_min = ext_ref.get("skinport_min_minor") if ext_ref else None
+            sp_qty = int(ext_ref.get("skinport_quantity") or 0) if ext_ref else 0
+            sp_url = ext_ref.get("skinport_url") if ext_ref else None
+            cm_min = ext_ref.get("csmarket_min_minor") if ext_ref else None
+
+            ext_buy_minor: int | None = None
+            ext_buy_venue: str | None = None
+            if sp_min and sp_qty > 0 and cm_min:
+                if sp_min <= cm_min:
+                    ext_buy_minor, ext_buy_venue = sp_min, "Skinport Cash"
+                else:
+                    ext_buy_minor, ext_buy_venue = cm_min, "CS.Market Cash"
+            elif sp_min and sp_qty > 0:
+                ext_buy_minor, ext_buy_venue = sp_min, "Skinport Cash"
+            elif cm_min:
+                ext_buy_minor, ext_buy_venue = cm_min, "CS.Market Cash"
+
+            cross_instant_profit: int | None = None
+            cross_target_profit: int | None = None
+            cross_target_roi: float | None = None
+            if ext_buy_minor and ext_buy_minor > 0:
+                if highest_bid and highest_bid >= fee_floor:
+                    instant_net = calculate_seller_receives(
+                        highest_bid, currency=currency_cfg, validate_market_listing=False
+                    ).seller_receives
+                    cross_instant_profit = instant_net - ext_buy_minor
+                if net_at_base is not None:
+                    cross_target_profit = net_at_base - ext_buy_minor
+                    cross_target_roi = round((float(cross_target_profit) / float(ext_buy_minor)) * 100.0, 2)
+
+            # Construct recommended "Where to Buy -> Where to Sell @ Best Price" Trade Ticket
+            best_buy_venue = "Steam Ask"
+            best_buy_price = lowest_ask
+            best_sell_venue = "Steam 30d Median"
+            best_sell_gross = baseline_exit
+            best_sell_net = net_at_base
+            best_profit = profit_at_base
+            best_roi = roi_at_base
+
+            allow_cross = strategy in ("all", "cross_market") and ext_buy_minor is not None and cross_target_profit is not None
+            intra_is_better = profit_at_base is not None and profit_at_base > 0 and (
+                not allow_cross or profit_at_base >= (cross_target_profit or -10**9)
+            )
+            if allow_cross and not intra_is_better and (cross_target_profit or 0) > 0:
+                best_buy_venue = ext_buy_venue or "External Cash"
+                best_buy_price = ext_buy_minor
+                best_sell_venue = (
+                    "Steam Top Bid (Instant)"
+                    if (cross_instant_profit is not None and cross_instant_profit > 0 and (cross_instant_profit >= (cross_target_profit or 0) * 0.7))
+                    else "Steam 30d Median"
+                )
+                if best_sell_venue == "Steam Top Bid (Instant)" and highest_bid is not None:
+                    best_sell_gross = highest_bid
+                    best_sell_net = calculate_seller_receives(
+                        highest_bid, currency=currency_cfg, validate_market_listing=False
+                    ).seller_receives
+                    best_profit = best_sell_net - ext_buy_minor
+                    best_roi = round((float(best_profit) / float(ext_buy_minor)) * 100.0, 2)
+                else:
+                    best_sell_gross = baseline_exit
+                    best_sell_net = net_at_base
+                    best_profit = cross_target_profit
+                    best_roi = cross_target_roi
+            elif (profit_at_base is None or profit_at_base <= 0) and target_buy > 0 and net_at_base is not None:
+                best_buy_venue = "Steam Buy Order (Target)"
+                best_buy_price = target_buy
+                best_sell_venue = "Steam 30d Median"
+                best_sell_gross = baseline_exit
+                best_sell_net = net_at_base
+                best_profit = net_at_base - target_buy
+                best_roi = round((float(best_profit) / float(target_buy)) * 100.0, 2) if target_buy > 0 else None
+
+            sym = curr_rec.symbol
+            if best_buy_price and best_sell_gross and best_profit is not None:
+                trade_summary = (
+                    f"Buy {best_buy_venue} @ {sym}{best_buy_price // 100}.{best_buy_price % 100:02d}"
+                    f" -> Sell {best_sell_venue} @ {sym}{best_sell_gross // 100}.{best_sell_gross % 100:02d}"
+                    f" ({'+' if best_profit > 0 else '-'}{sym}{abs(best_profit) // 100}.{abs(best_profit) % 100:02d})"
+                )
+            else:
+                trade_summary = "Collect more historical points or verify on Steam"
+
             if lowest_ask is not None and target_buy > 0 and lowest_ask <= target_buy and sales_7d >= 5:
                 verdict = "STRONG BUY NOW"
+                verdict_tone = "good"
+            elif (
+                allow_cross
+                and cross_target_roi is not None
+                and cross_target_roi >= min_roi_pct
+                and (cross_target_profit or 0) >= 50
+                and sales_7d >= 5
+            ):
+                verdict = "BEST ARBITRAGE"
                 verdict_tone = "good"
             elif (
                 (lowest_ask is not None and breakeven_buy > 0 and lowest_ask <= breakeven_buy)
@@ -470,7 +749,7 @@ async def screen_market_items(
             ):
                 verdict = "DIP CANDIDATE"
                 verdict_tone = "good"
-            elif has_notable_craft or has_low_float_card:
+            elif has_notable_craft or has_low_float_card or craft_info["craft_badge"] or wear_metrics["float_alpha_badge"]:
                 verdict = "CRAFT / FLOAT ALPHA"
                 verdict_tone = "warn"
             elif target_buy > 0:
@@ -480,10 +759,19 @@ async def screen_market_items(
                 verdict = "INSUFFICIENT HISTORY"
                 verdict_tone = "neutral"
 
-            roi_component = max(-30.0, min(60.0, (roi_at_base if roi_at_base is not None else -15.0) + 20.0))
+            eff_roi_for_score = (
+                cross_target_roi
+                if (best_buy_venue in ("Skinport Cash", "CS.Market Cash") and cross_target_roi is not None)
+                else roi_at_base
+            )
+            roi_component = max(-25.0, min(55.0, (eff_roi_for_score if eff_roi_for_score is not None else -15.0) + 15.0))
             liq_component = min(25.0, float(sales_7d) * 0.5)
-            alpha_component = (10.0 if has_notable_craft else 0.0) + (5.0 if has_low_float_card else 0.0)
-            screener_score = round(max(0.0, min(100.0, roi_component + liq_component + alpha_component)), 1)
+            instant_bonus = 10.0 if (cross_instant_profit is not None and cross_instant_profit > 0) else 0.0
+            alpha_component = (
+                (10.0 if (has_notable_craft or craft_info["craft_badge"]) else 0.0)
+                + (5.0 if (has_low_float_card or wear_metrics["float_alpha_badge"]) else 0.0)
+            )
+            screener_score = round(max(0.0, min(100.0, roi_component + liq_component + instant_bonus + alpha_component)), 1)
 
             watchlist_added = False
             if auto_watchlist and item_rec.item_id is not None:
@@ -539,10 +827,33 @@ async def screen_market_items(
                 "breakeven_buy_minor": breakeven_buy,
                 "target_buy_minor": target_buy,
                 "lowest_float": lowest_float,
+                "wear_percentile": wear_metrics["wear_percentile"],
+                "distance_to_better_wear": wear_metrics["distance_to_better_wear"],
+                "float_alpha_badge": wear_metrics["float_alpha_badge"],
                 "has_notable_craft": has_notable_craft,
                 "notable_stickers": stickers_seen[:6],
+                "sticker_total_value_minor": craft_info["sticker_total_value_minor"],
+                "retained_craft_alpha_minor": craft_info["retained_craft_alpha_minor"],
+                "craft_sp_pct": craft_info["craft_sp_pct"],
+                "craft_badge": craft_info["craft_badge"],
                 "best_inspect_link": best_inspect,
                 "active_listings_count": len(valid_cards),
+                "skinport_min_minor": sp_min,
+                "skinport_quantity": sp_qty,
+                "skinport_url": sp_url,
+                "csmarket_min_minor": cm_min,
+                "cross_instant_profit_minor": cross_instant_profit,
+                "cross_target_profit_minor": cross_target_profit,
+                "cross_target_roi_pct": cross_target_roi,
+                "best_buy_venue": best_buy_venue,
+                "best_buy_price_minor": best_buy_price,
+                "best_sell_venue": best_sell_venue,
+                "best_sell_gross_minor": best_sell_gross,
+                "best_sell_net_minor": best_sell_net,
+                "best_profit_minor": best_profit,
+                "best_roi_pct": best_roi,
+                "trade_summary": trade_summary,
+                "exit_comparison": compute_exit_venues_comparison(baseline_exit, currency_cfg),
                 "verdict": verdict,
                 "verdict_tone": verdict_tone,
                 "screener_score": screener_score,
@@ -584,10 +895,33 @@ async def screen_market_items(
                 "breakeven_buy_minor": 0,
                 "target_buy_minor": 0,
                 "lowest_float": None,
+                "wear_percentile": None,
+                "distance_to_better_wear": None,
+                "float_alpha_badge": None,
                 "has_notable_craft": False,
                 "notable_stickers": [],
+                "sticker_total_value_minor": 0,
+                "retained_craft_alpha_minor": 0,
+                "craft_sp_pct": None,
+                "craft_badge": None,
                 "best_inspect_link": None,
                 "active_listings_count": 0,
+                "skinport_min_minor": None,
+                "skinport_quantity": 0,
+                "skinport_url": None,
+                "csmarket_min_minor": None,
+                "cross_instant_profit_minor": None,
+                "cross_target_profit_minor": None,
+                "cross_target_roi_pct": None,
+                "best_buy_venue": None,
+                "best_buy_price_minor": None,
+                "best_sell_venue": None,
+                "best_sell_gross_minor": None,
+                "best_sell_net_minor": None,
+                "best_profit_minor": None,
+                "best_roi_pct": None,
+                "trade_summary": None,
+                "exit_comparison": [],
                 "verdict": "SCAN ERROR",
                 "verdict_tone": "neutral",
                 "screener_score": 0.0,
@@ -597,9 +931,112 @@ async def screen_market_items(
 
     results.sort(
         key=lambda x: (
+            1 if x["verdict_tone"] == "good" else 0,
             x["screener_score"],
-            x["roi_at_baseline_pct"] if x["roi_at_baseline_pct"] is not None else -999.0,
+            x["best_profit_minor"] if x["best_profit_minor"] is not None else -999999,
         ),
         reverse=True,
     )
     return results
+
+
+async def hunt_best_opportunities(
+    *,
+    strategy: str = "all",
+    query: str = "",
+    category: str | None = None,
+    exterior: str | None = None,
+    min_price_minor: int = 300,
+    max_price_minor: int | None = None,
+    min_roi_pct: float = 5.0,
+    max_items: int = 6,
+    auto_watchlist: bool = False,
+    adapter: SteamMarketAdapter,
+    external_markets: ExternalMarketFeedAdapter,
+    identity_service: ItemIdentityService,
+    nameid_db: ItemNameIdDatabase | None,
+    db: Database,
+    currency_id: int = 1,
+) -> dict[str, Any]:
+    """Two-stage funnel: 0-Steam-cost reference scan -> sequential live Steam SSR deal verification."""
+    currency_cfg, _ = load_currency_config(db, currency_id)
+    ext_index = await external_markets.get_merged_reference_index()
+
+    cross_preview: list[dict[str, Any]] = []
+    if strategy in ("all", "cross_market") and ext_index:
+        cross_preview = await external_markets.find_cross_market_candidates(
+            currency_cfg=currency_cfg,
+            nameid_db=nameid_db,
+            query=query,
+            category=category,
+            exterior=exterior,
+            min_price_minor=max(100, min_price_minor),
+            max_price_minor=max_price_minor,
+            min_supply=5,
+            min_roi_pct=max(0.0, min_roi_pct),
+            limit=25,
+        )
+
+    queue: list[str] = []
+    for c in cross_preview:
+        name = c["market_hash_name"]
+        if name not in queue:
+            queue.append(name)
+        if len(queue) >= max(1, min(8, max_items)):
+            break
+
+    # Supplement from liquid presets or local catalog when more candidates fit within budget
+    if len(queue) < max(1, min(8, max_items)) or strategy in ("steam_dip", "float_craft"):
+        if not query and not category:
+            # Prefer high-turnover play skins, rifles & knives over short-name collectibles (e.g. Pins)
+            for preset_id in ("play_skins", "mid_rifles", "budget_knives"):
+                preset = next((p for p in CURATED_LIQUID_PRESETS if p["id"] == preset_id), None)
+                if preset:
+                    for item_name in preset["items"]:
+                        if exterior and f"({exterior})" not in item_name:
+                            continue
+                        if item_name not in queue:
+                            queue.append(item_name)
+                        if len(queue) >= max(1, min(8, max_items)):
+                            break
+                if len(queue) >= max(1, min(8, max_items)):
+                    break
+
+        if len(queue) < max(1, min(8, max_items)) and nameid_db is not None:
+            local_matches = nameid_db.search_mappings(
+                query=query,
+                category=category,
+                exterior=exterior,
+                limit=20,
+            )
+            for row in local_matches:
+                mname = row["market_hash_name"]
+                if mname not in queue:
+                    queue.append(mname)
+                if len(queue) >= max(1, min(8, max_items)):
+                    break
+
+    candidates = (
+        await screen_market_items(
+            market_hash_names=queue,
+            adapter=adapter,
+            identity_service=identity_service,
+            db=db,
+            currency_id=currency_id,
+            min_roi_pct=min_roi_pct,
+            auto_watchlist=auto_watchlist,
+            max_budget_minor=max_price_minor,
+            external_index=ext_index,
+            strategy=strategy,
+        )
+        if queue
+        else []
+    )
+    return {
+        "strategy": strategy,
+        "external_feed_items": len(ext_index),
+        "cross_market_preview": cross_preview,
+        "screened": len(candidates),
+        "actionable": sum(1 for item in candidates if item["verdict_tone"] == "good"),
+        "candidates": candidates,
+    }

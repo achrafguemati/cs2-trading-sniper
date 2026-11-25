@@ -11,6 +11,7 @@ import unittest
 
 import httpx
 
+from sniper.adapters.external_markets import ExternalMarketFeedAdapter
 from sniper.api.app import create_app
 from sniper.core.http_client import ReadOnlyHttpClient
 from sniper.core.rate_limiter import RateLimiterConfig, SequentialRateLimiter
@@ -223,6 +224,36 @@ def _build_mock_transport() -> httpx.MockTransport:
     return httpx.MockTransport(handler)
 
 
+def _build_mock_external_transport() -> httpx.MockTransport:
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.host == "api.skinport.com":
+            return httpx.Response(200, json=[
+                {
+                    "market_hash_name": "M4A1-S | Printstream (Field-Tested)",
+                    "min_price": "30.00",
+                    "suggested_price": "55.00",
+                    "quantity": 90,
+                    "item_page": "https://skinport.com/item/m4a1-s-printstream-ft",
+                },
+                {
+                    "market_hash_name": "Sticker | Crown (Foil)",
+                    "min_price": "340.00",
+                    "suggested_price": "335.00",
+                    "quantity": 20,
+                },
+            ])
+        if req.url.host == "market.csgo.com":
+            return httpx.Response(200, json={
+                "success": True,
+                "items": [
+                    {"market_hash_name": "M4A1-S | Printstream (Field-Tested)", "price": "31.50"},
+                ],
+            })
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handler)
+
+
 class TestFastApiBackend(unittest.IsolatedAsyncioTestCase):
     """Offline tests covering REST endpoints, secret redaction, safety clamps, and SPA serving."""
 
@@ -242,6 +273,7 @@ class TestFastApiBackend(unittest.IsolatedAsyncioTestCase):
         self.app = create_app(
             db_path=self.db_path,
             http_client=self.http_client,
+            external_markets=ExternalMarketFeedAdapter(transport=_build_mock_external_transport()),
             enable_scheduler=False,
             frontend_dist=self.dist_dir,
         )
@@ -472,6 +504,27 @@ class TestFastApiBackend(unittest.IsolatedAsyncioTestCase):
         r_sel = await self.client.post("/api/sell/scan", json={"dispatch_notifications": False, "limit": 1})
         self.assertEqual(r_sel.status_code, 200)
         self.assertEqual(r_sel.json()["evaluated"], 1)
+
+        # 5. Cross-market spread radar + 1-click Auto-Hunt best deals
+        r_cross = await self.client.get("/api/discover/cross-market", params={"min_roi_pct": 10.0})
+        self.assertEqual(r_cross.status_code, 200)
+        cross_items = r_cross.json()["items"]
+        self.assertEqual(len(cross_items), 1)
+        self.assertEqual(cross_items[0]["skinport_min_minor"], 3000)
+
+        r_hunt = await self.client.post("/api/discover/auto-hunt", json={
+            "strategy": "all",
+            "min_price_minor": 500,
+            "min_roi_pct": 5.0,
+            "max_items": 1,
+        })
+        self.assertEqual(r_hunt.status_code, 200)
+        hunt_cand = r_hunt.json()["candidates"][0]
+        self.assertEqual(hunt_cand["best_buy_venue"], "Skinport Cash")
+        self.assertGreater(hunt_cand["best_profit_minor"], 1000)
+        self.assertEqual(hunt_cand["sticker_total_value_minor"], 34000)
+        self.assertIsNotNone(hunt_cand["wear_percentile"])
+        self.assertGreaterEqual(len(hunt_cand["exit_comparison"]), 3)
 
 
 if __name__ == "__main__":

@@ -357,10 +357,39 @@ export interface ScreenerCandidate {
   breakeven_buy_minor: number;
   target_buy_minor: number;
   lowest_float: number | null;
+  wear_percentile?: number | null;
+  distance_to_better_wear?: number | null;
+  float_alpha_badge?: string | null;
   has_notable_craft: boolean;
   notable_stickers: string[];
+  sticker_total_value_minor?: number;
+  retained_craft_alpha_minor?: number;
+  craft_sp_pct?: number | null;
+  craft_badge?: string | null;
   best_inspect_link: string | null;
   active_listings_count: number;
+  skinport_min_minor?: number | null;
+  skinport_quantity?: number;
+  skinport_url?: string | null;
+  csmarket_min_minor?: number | null;
+  cross_instant_profit_minor?: number | null;
+  cross_target_profit_minor?: number | null;
+  cross_target_roi_pct?: number | null;
+  best_buy_venue?: string | null;
+  best_buy_price_minor?: number | null;
+  best_sell_venue?: string | null;
+  best_sell_gross_minor?: number | null;
+  best_sell_net_minor?: number | null;
+  best_profit_minor?: number | null;
+  best_roi_pct?: number | null;
+  trade_summary?: string | null;
+  exit_comparison?: Array<{
+    venue: string;
+    wallet_type: string;
+    fee_label: string;
+    fee_minor: number;
+    net_minor: number;
+  }>;
   verdict: string;
   verdict_tone: "good" | "warn" | "neutral";
   screener_score: number;
@@ -369,6 +398,42 @@ export interface ScreenerCandidate {
 }
 
 export interface DiscoverScreenResponse {
+  screened: number;
+  actionable: number;
+  candidates: ScreenerCandidate[];
+}
+
+export interface CrossMarketOpportunity {
+  market_hash_name: string;
+  exterior: string | null;
+  is_stattrak: boolean;
+  is_souvenir: boolean;
+  item_nameid: number | null;
+  has_trusted_nameid: boolean;
+  currency_code: string;
+  currency_symbol: string;
+  skinport_min_minor: number;
+  skinport_suggested_minor: number;
+  skinport_quantity: number;
+  skinport_url: string | null;
+  csmarket_min_minor: number | null;
+  est_steam_net_minor: number;
+  est_wallet_profit_minor: number;
+  est_wallet_roi_pct: number;
+  rank_score: number;
+  steam_listing_url: string;
+}
+
+export interface CrossMarketResponse {
+  feed_items: number;
+  currency: { currency_id: number; code: string; symbol: string };
+  items: CrossMarketOpportunity[];
+}
+
+export interface AutoHuntResponse {
+  strategy: string;
+  external_feed_items: number;
+  cross_market_preview: CrossMarketOpportunity[];
   screened: number;
   actionable: number;
   candidates: ScreenerCandidate[];

@@ -12,7 +12,14 @@ This watchlist tracks open-source repositories audited for potential code reuse,
 | [`somespecialone/cs2-items-schema`](https://github.com/somespecialone/cs2-items-schema) | MIT | Active (`main` branch) | ✅ Safe (Static Data) | **Reuse Candidate** | Maps game item definitions, paint index, rarity. |
 | [`i4cobus/cs2-cross-market-arbitrage-analyzer`](https://github.com/i4cobus/cs2-cross-market-arbitrage-analyzer) | MIT | Maintained | ✅ Safe (Read-Only) | **Reference Only** | Multi-market fee logic (uses floating point). |
 | [`Luca-Ospel/cs2-market-scraper`](https://github.com/Luca-Ospel/cs2-market-scraper) | MIT | Inactive | ⚠️ Unbuffered Scraper | **Reference Only** | Legacy scraper; superseded by our async client. |
-| [`MhmdMK277/CSFloatPriceChecker`](https://github.com/MhmdMK277/CSFloatPriceChecker) | MIT | Maintained | ✅ Safe (Public API) | **Reference Only** | CSFloat public API queries; lacks backoff. |
+| [`MhmdMK277/CSFloatPriceChecker`](https://github.com/MhmdMK277/CSFloatPriceChecker) | MIT | Active (`2026-08`) | ✅ Safe (Public API) | **Reuse Candidate (concepts)** | Unauthenticated Skinport `/v1/items` feed, tiered fees (`markets.py`), wear-bracket float percentiles & tier proximity (`stats.py`). |
+| [`maciejL03/price-oracle`](https://github.com/maciejL03/price-oracle) | MIT | Active (`2026-11`) | ✅ Safe (Read-Only) | **Reuse Candidate (concepts)** | Skinport + Steam snapshot normalization, quote freshness checks (`max_quote_age`), clean read-only market adapter contracts. |
+| [`spikeshowglhf-max/cs2-skin-pricer`](https://github.com/spikeshowglhf-max/cs2-skin-pricer) | MIT | Active (`2026-11`) | ✅ Safe (Read-Only) | **Reuse Candidate (concepts)** | Public CS.Market `/api/v2/prices/USD.json` feed & multi-venue comparison with Discord webhook alerts. |
+| [`woctezuma/steam-market`](https://github.com/woctezuma/steam-market) | MIT | Maintained | ✅ Safe (Read-Only core) | **Reference Only** | Two-stage funnel: bulk low-cost screen before selective live orderbook confirmation (`apply_workflow` also has optional crafting flags excluded here). |
+| [`raitnigol/Steam-Market-Arbitrage-Calculator`](https://github.com/raitnigol/Steam-Market-Arbitrage-Calculator) | Unlicense | Active (`2026-05`) | ✅ Safe (Calculator) | **Reference Only** | Client-side arbitrage percentage helpers (excluded float fee math in favor of our exact integer model). |
+| [`ByMykel/CSGO-API`](https://github.com/ByMykel/CSGO-API) | MIT | Active (`2026-11`) | ✅ Safe (Static JSON) | **Reuse Candidate (data reference)** | Comprehensive open CS2 skin, collection, crate, sticker & charm catalog JSONs. |
+| [`ernsahin/Csfloat-Trades`](https://github.com/ernsahin/Csfloat-Trades) | No License | Active (`2026-11`) | ✅ Safe (Read-Only) | **Reference Only (zero code copy)** | Strategy taxonomy only: float tier upgrade proximity, dynamic profit tiers, conservative vs aggressive sticker retention %. |
+| [`ErayBahar/steammarketscraper`](https://github.com/ErayBahar/steammarketscraper) | MIT | Active (`2026-07`) | ❌ Proxy Rotation | **License or Security Concern (Reject)** | Contains `core/proxy_manager.py` and rotating user-agent evasion; strictly incompatible with `AGENTS.md` Rule 3. |
 | [`Soophere/cs2-sniper`](https://github.com/Soophere/cs2-sniper) | N/A | Inaccessible / 404 | ❌ Unverified | **Reject** | Repository deleted, private, or non-existent. |
 
 ---
@@ -64,18 +71,57 @@ This watchlist tracks open-source repositories audited for potential code reuse,
 * **Classification:** **Reference Only**
 * **Action:** Superseded by our hardened `ReadOnlyHttpClient` and `SequentialRateLimiter`. Retain as reference for legacy scraping edge cases only.
 
-### 5. `MhmdMK277/CSFloatPriceChecker`
+### 5. `MhmdMK277/CSFloatPriceChecker` (Re-Audited November 2026)
 * **Source URL:** `https://github.com/MhmdMK277/CSFloatPriceChecker`
-* **Date Checked (UTC):** 2026-11-22T17:25:00Z
-* **SPDX License:** MIT.
-* **Language & Tech:** Python.
-* **Project Relevance:** Queries CSFloat public APIs to inspect item prices and wear values.
-* **Safety Evaluation:** Read-only queries against public endpoints.
-* **Issues / Non-Compliance:** Lacks error handling, backoff, and integer minor-unit conversion.
-* **Classification:** **Reference Only**
-* **Action:** Useful reference for CSFloat JSON response shapes if secondary market cashout monitoring is integrated in later phases.
+* **Date Checked (UTC):** 2026-11-25T10:23:00Z
+* **SPDX License & Evidence:** MIT License (verified `LICENSE` in repository root).
+* **Language & Tech:** Python (`httpx`, `FastAPI`, `React`), SQLite cache.
+* **Project Relevance:** Implements unauthenticated `GET https://api.skinport.com/v1/items?app_id=730&currency=USD` (`Accept-Encoding: br`) caching ~37k CS2 items, static multi-venue seller fee schedules (`markets.py`: Skinport 12%/9%/6%, CSFloat 2%, Buff163 2.5%), wear-bracket percentile calculations (`stats.py:deal_reason`), and next-better-wear comparison.
+* **Safety Evaluation:** Read-only public API endpoints; zero credential harvesting or proxy evasion. Note `core/skinport.py` uses `round(float(...) * 100)` — our re-implementation strictly parses via `Decimal` -> integer cents instead.
+* **Classification:** **Reuse Candidate (MIT concepts; integer-rewritten)**
 
-### 6. `Soophere/cs2-sniper`
+### 6. `maciejL03/price-oracle`
+* **Source URL:** `https://github.com/maciejL03/price-oracle`
+* **Date Checked (UTC):** 2026-11-25T10:24:20Z
+* **SPDX License & Evidence:** MIT License (`Copyright (c) 2026 Maciej Dorian Lapczynski`).
+* **Language & Tech:** Python (`httpx`, `Pydantic`, `Decimal`).
+* **Project Relevance:** Clean separation between quote normalization (`PricingService`, `QuoteExclusionReason.STALE` freshness window) and cached Skinport index loading (`SkinportMarketplace`).
+* **Safety Evaluation:** Strictly read-only public observers; zero credential inputs.
+* **Classification:** **Reuse Candidate (concepts)**
+
+### 7. `spikeshowglhf-max/cs2-skin-pricer`
+* **Source URL:** `https://github.com/spikeshowglhf-max/cs2-skin-pricer`
+* **Date Checked (UTC):** 2026-11-25T10:24:20Z
+* **SPDX License & Evidence:** MIT License (`Copyright (c) 2026 spikeshowglhf-max`).
+* **Language & Tech:** Python stdlib + HTML/JS.
+* **Project Relevance:** Documents public `https://market.csgo.com/api/v2/prices/USD.json` CS2 market feed and Discord alert formatting.
+* **Safety Evaluation:** Read-only public price feeds only. Superseded rate limiter / float math by our strict `SequentialRateLimiter` and integer arithmetic.
+* **Classification:** **Reuse Candidate (feed reference)**
+
+### 8. `woctezuma/steam-market`
+* **Source URL:** `https://github.com/woctezuma/steam-market`
+* **Date Checked (UTC):** 2026-11-25T10:23:08Z
+* **SPDX License & Evidence:** MIT License (`Copyright (c) 2019 Wok`).
+* **Language & Tech:** Python.
+* **Project Relevance:** Demonstrates clean two-stage funnel optimization: run bulk low-cost filtering before spending strict Steam orderbook requests on top shortlisted candidates. Note automated execution flags (`create_then_sell_booster_packs_for_batch`) are strictly ignored per `AGENTS.md`.
+* **Classification:** **Reference Only**
+
+### 9. `ernsahin/Csfloat-Trades`
+* **Source URL:** `https://github.com/ernsahin/Csfloat-Trades`
+* **Date Checked (UTC):** 2026-11-25T10:23:07Z
+* **SPDX License & Evidence:** No license file present in repository root.
+* **Language & Tech:** Python (`requests`, Flask).
+* **Project Relevance:** Clear taxonomy of profit opportunity strategies: Price Anomaly (`>= 8%` dip), Float Tier Upgrade Proximity (`< 0.008` from next tier), Low Float Top-10% Percentile, Conservative Sticker Retention Tiers (`1% / 4% / 6%`), and Dynamic ROI Targets by skin price bracket.
+* **Classification:** **Reference Only (conceptual strategies only; zero code copied due to missing license)**
+
+### 10. `ErayBahar/steammarketscraper`
+* **Source URL:** `https://github.com/ErayBahar/steammarketscraper`
+* **Date Checked (UTC):** 2026-11-25T10:23:07Z
+* **SPDX License & Evidence:** MIT License.
+* **Safety Evaluation:** Includes `core/proxy_manager.py` for IP/proxy rotation and user-agent spoofing to evade Steam rate limits.
+* **Classification:** **License or Security Concern (Reject — violates `AGENTS.md` Rule 3)**
+
+### 11. `Soophere/cs2-sniper`
 * **Source URL:** `https://github.com/Soophere/cs2-sniper`
 * **Date Checked (UTC):** 2026-11-22T17:25:00Z
 * **SPDX License:** Unknown / Unavailable.
