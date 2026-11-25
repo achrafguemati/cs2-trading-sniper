@@ -28,6 +28,8 @@ Every module must achieve high test coverage before milestone completion:
 | **`test_cli.py`** | CLI interface & lifecycle | CLI commands parsing (`import-inventory`, `import-csv`, `import-json`, `watchlist`, `import-history`, `scan-buy`, `scan-sell`, `portfolio`, `serve`, `status`), `python-dotenv` `.env` loading, explicit `ReadOnlyHttpClient.aclose()`. |
 | **`test_api.py`** | FastAPI local backend & SPA serving (M8) | `/api/health`, `/api/overview`, watchlist & history APIs, BUY/SELL scan routes, inventory import routes, portfolio lock/sell lifecycle, settings zero-secret echo-back & RPM `<= 12` enforcement, breaker reset, static `frontend/dist` SPA serving. |
 | **`frontend/src/App.test.tsx`** | React/Vite SPA smoke & safety gates (M8) | Multi-tab workspace rendering (Overview, BUY, SELL, Portfolio, Health/Alerts, Settings), empty credential input enforcement, `<= 12 RPM` validation, and Steam Wallet vs Cash banner verification. |
+| **`tests/test_security_audit.py`** | Static & runtime security compliance audit (M9) | AST audit forbidding Steam mutations/proxies/anti-bot bypasses, SQLite schema audit for zero credential columns, frontend & `launch.bat` check, runtime ASGI zero-secret-leak across all GET/PUT endpoints & RPM `<= 12` enforcement. |
+| **`tests/test_e2e_lifecycle.py`** | Full cross-module E2E simulation (M9) | End-to-end journey: grouped `G...` URL watchlist ingest -> BUY listing scan & Discord/Telegram dispatch -> Portfolio 7-day Steam lock suppression -> post-unlock `RESALE READY` dispatch -> public inventory & SELL anomaly scan -> manual sale integer Wallet P&L. |
 
 ---
 

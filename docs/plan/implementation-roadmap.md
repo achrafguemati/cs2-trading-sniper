@@ -204,8 +204,10 @@
   - `launch.bat`: Windows 11 single-click launcher verifying Python + venv dependencies, building `frontend/dist` if missing, starting local Uvicorn server on `127.0.0.1:8000`, and opening the dashboard in the default browser.
 * **Acceptance Criteria:** Verified: FastAPI ASGI API & zero-secret-leak tests pass, React SPA builds cleanly and passes Vitest smoke tests, and `launch.bat` starts the full stack cleanly on Windows 11.
 
-### Milestone 9: Final Acceptance, Security Audit & Packaging
+### Milestone 9: Final Acceptance, Security Audit & Packaging (COMPLETED)
+* **Status:** Complete & Verified.
 * **Deliverables:**
-  - Comprehensive end-to-end test suite.
-  - Security audit confirming zero credential storage and strictly read-only execution.
-* **Acceptance Criteria:** All acceptance criteria in Section 12 of the Project Brief are satisfied.
+  - `tests/test_security_audit.py`: Static AST/schema/frontend/launcher audit and runtime ASGI security verification proving strictly read-only Steam operations, zero credential storage, zero proxy rotation, zero secret leakage, and enforced `<= 12 RPM` bounds.
+  - `tests/test_e2e_lifecycle.py`: Full offline simulated E2E lifecycle test covering Watchlist add -> cookie-free history / BUY scan + Discord/Telegram alert -> Portfolio 7-day lock -> unlock `RESALE READY` -> Steam public inventory import + SELL scan -> manual sale + exact integer Wallet P&L accounting.
+  - `SECURITY.md`, `CHANGELOG.md`, finalized `README.md`, and complete Windows + Ubuntu + Frontend CI verification.
+* **Acceptance Criteria:** Verified: All non-negotiable `AGENTS.md` safety rules, financial precision invariants, E2E workflows, and cross-platform CI jobs pass cleanly.

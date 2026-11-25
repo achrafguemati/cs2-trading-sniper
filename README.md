@@ -25,96 +25,64 @@ See the complete rules in [AGENTS.md](AGENTS.md).
 
 ---
 
-## Current Status: M3 Steam Market Adapters & Token-Bucket Circuit Breaker
+## Current Status: Production Complete (Milestones M1–M9)
 
-- **Milestone 1 / 1.1 / 1.2 / 1.2.1 / 1.2.2 / 1.2.3 (Previously completed):**
-  - Read-only asynchronous HTTP client (`ReadOnlyHttpClient`) with strict request-level serialization (`asyncio.Lock`), preventing concurrent execution overlap.
-  - Transparent, non-spoofed application identification (`CS2TradingSniper/0.1.0`) with minimal standard headers (zero fabricated `Sec-Fetch-*` headers).
-  - Strict production URL allowlist: HTTPS only, `steamcommunity.com` only, exact path matching for `/market/itemordershistogram`, boundary validation for `/market/listings/730/` and `/inventory/`, userinfo and non-default port rejection. Mock routes injected only through test configuration.
-  - Redirect pacing: every redirect hop acquires the shared rate limiter separately, maintaining sequential pacing across redirect lifecycles while rejecting cross-host and HTTPS-to-HTTP downgrades before following.
-  - Unified, fail-closed JSON processing path (`get_json(schema=...)`) with exact Decimal token parsing (`parse_float=Decimal`) and schema validation inside the serialized request lock.
-  - Fail-closed circuit breaker: unexpected HTML challenges, malformed JSON, and schema failures immediately halt subsequent polling.
-  - Sequential rate limiter (`SequentialRateLimiter`) with monotonic timers (`time.monotonic()`), exponential backoff, and full RFC 7231 `Retry-After` support (delta-seconds and HTTP-date).
-  - Fail-closed currency semantics: currency metadata, fee rules, and market listing rules are verified independently. USD, EUR, JPY, and Tunisia listing minimums/price steps remain UNKNOWN absent direct Community Market evidence; pure mathematical inversion requires `validate_market_listing=False`.
-  - `calculate_seller_receives` requires explicit currency context for market listing validation; pure mathematical inversion requires the caller to explicitly disable listing validation.
-  - Orderbook normalization requires verified currency metadata and minor-unit precision, independently of market listing rules; fee calculations with currency require both verified metadata and fee rules.
-  - Integer fee model (`calculate_buyer_pays`, `calculate_seller_receives`, `calculate_exact_breakeven_buyer_pays`) with step-jump gap handling ($R=99 \rightarrow 112, R=100 \rightarrow 115$) using exact arithmetic under the project's modeled formula. Valve's exact rounding implementation remains UNKNOWN (`calculate_exact_breakeven_buyer_pays` is exact relative to the project's model, not proof of Valve's live implementation).
-  - Strict minor-unit currency model (`CurrencyConfig`) with hardened grammar and trailing zero exactness (accepts `Decimal("22.500") -> 2250`, continues rejecting `22.501`, `22.505`, `22.50001`).
-  - Strict orderbook graph validation: strictly positive orderbook prices, non-negative integer quantities without silent fractional truncation.
-  - Research skills (`.agents/skills/`) and intelligence registers (`docs/research/`).
-- **Milestone 2.1 & 2.2 & 2.3 (Previously completed):**
-  - M2.1: Canonical and grouped Steam listing URL parsing, SSR hydration bucket resolution, and pinned offline mapping database (`somespecialone/steam-market-ids` at `caac34bd8a28578e800501da5cc9f16c7cb3fa67`).
-  - M2.2: Persistent SQLite storage layer (schema version 3) with integer minor-unit financial arithmetic, typed repositories (`ItemRepository`, `CurrencyRepository`, `ListingRepository`, `OrderbookRepository`, `PortfolioRepository`, `InventoryRepository`), triggers protecting immutable listing/orderbook history and parent-item integrity, atomic migrations, and concurrency serialization with full rollback guards.
-  - M2.3: Application service layer (`ItemIdentityService`, `ingest_market_item` in `src/sniper/storage/service.py`) integrating URL parsing, grouped SSR hydration, and trusted offline mapping lookup directly into the SQLite catalog.
-  - Strict mapping trust policy: `SYNTHETIC_TEST_DATA` and `legacy_unverified` are strictly rejected from production identity resolution; only verified dataset provenance matching pinned repository and revision is accepted.
-  - Fail-closed synthetic classid protection: synthetic or unverified `classid` values never leak into identity results.
-  - Provenance protection in `ItemRepository.save()`: prevents lower-trust, unverified, or missing incoming data from overwriting verified mapping provenance on both insert and upsert paths.
-  - Strict integer validation on `ItemRecord.item_nameid` preventing boolean-to-integer coercion.
-  - 100% offline deterministic test coverage across all identity-to-storage paths.
-- **Milestone 3 (Steam Market Adapters & Token-Bucket Circuit Breaker):**
-  - Typed Steam Market adapters (`SteamMarketAdapter` in `src/sniper/adapters/steam_market.py`) for deep order-book histogram (`/market/itemordershistogram`), active listing render (`/market/listings/730/{market_hash_name}/render/`), and SSR hydration data extraction (`valve-ssr-data` JSON script parsing).
-  - Strict provenance and input validation: requires verified `ItemIdentityResult`, strictly positive integer IDs, validated currency IDs, pagination bounds, and safe URL percent-encoding for market hash names.
-  - Genuine token-bucket rate limiter (`SequentialRateLimiter`): budget of 12 requests per minute (internal conservative safety policy, not an official Valve quota or guarantee), capacity of 1 token (burst prevention), monotonic refill, and randomized jitter that only slows requests down.
-  - Global circuit breaker with 4 states (`CLOSED`, `OPEN`, `HALF_OPEN`, `HALTED`), exponential backoff (300s initial safety minimum up to 3600s), single-canary recovery in `HALF_OPEN` blocking waiting requests, and permanent fail-closed halt on HTTP 403 or protocol/schema violations.
-  - `ReadOnlyHttpClient.get_parsed()` execution path ensuring response parsing and validation occurs within the serialized request lock, guaranteeing invalid HTML/SSR payloads trip the circuit breaker and cannot pass as canaries.
-  - 251 offline deterministic unit tests passing across all test suites without issuing live Steam network calls.
-- **Milestone 4 (Exact Fee Calculator & Math Engine):**
-  - Pure integer minor-unit fee functions in `src/sniper/core/fees.py` implementing the project's modeled CS2 fee formula with independent floor components (5% Steam, 10% CS2 publisher; Valve's exact live rounding implementation remains UNKNOWN).
-  - Mathematically safe integer binary search algorithm for backward fee inversion, finding the maximal integer seller proceeds whose forward buyer price does not exceed the target, with exact reachability tracking (`is_exact_match`).
-  - Strict input validation rejecting booleans, floats, strings, negative amounts, zero amounts, and invalid publisher percentages without silent type coercion.
-  - Fail-closed currency configuration hardening in `src/sniper/core/currency.py` preventing invalid or negative fee floors and price steps.
-  - Clear separation between pure mathematical fee calculations (`validate_market_listing=False`) and market listing validation (`validate_market_listing=True`). Currency listing minimums and price step increments remain UNKNOWN for USD, EUR, JPY, and Tunisia pending primary empirical evidence.
-  - Expanded deterministic unit test coverage in `tests/test_fees.py` covering boundary cases ($0.03, $1.00, $10.00, $1,000.00), unreachable step-jump gaps (113, 114 cents), high-tier unreachable price ($500.00 -> $434.79 net / $499.99 actual), break-even math, and exhaustive invariant verification across 3 to 5,000 cents.
-- **Milestone 5 (SELL Engine + Inventory Tracker + Free Multi-Channel Notifications):**
-  - Public Steam inventory ingestion client (`PublicInventoryClient` in `src/sniper/adapters/inventory.py`) querying public endpoints with pagination bounds and exact `(classid, instanceid)` asset matching.
-  - Manual inventory CSV and JSON importers (`ManualInventoryImporter`) with row-level validation for private profiles.
-  - SELL Sniper Engine (`SellSniperEngine` in `src/sniper/engine/sell_engine.py`) with strict identity provenance gating, historical buy-order median baselines, crossed-book detection, top-level quantity anomaly filters (`Single-Item Top Bid`), exact M4 modeled seller proceeds, and quantitative opportunity/confidence scoring.
-  - Free multi-channel notification infrastructure (`src/sniper/notifications/`): Discord Webhooks (`DiscordNotifier`) with rich embeds and Telegram Bot API (`TelegramNotifier`) with safely escaped HTML formatting.
-  - Zero-cost architecture: 100% free operation without paid subscriptions, paid APIs, or cloud servers.
-  - Complete credential redaction (`redact_secrets()`) preventing secret leakage into database records, logs, or exception traces.
-  - Database schema Migration 4 adding `alert_events` and `notification_deliveries` tables with fingerprint deduplication and cooldown controls.
-  - CLI command-line interface (`src/sniper/cli.py`) supporting `import-inventory`, `import-csv`, `import-json`, `scan-sell`, `test-notification`, and `channel-status`.
-- **Milestone 5.1 (Critical Hardening & Reliability Fixes):**
-  - Strict Steam inventory description matching: matched exclusively by `(classid, instanceid)` tuple, removing all ambiguous classid-only fallbacks, and marking unmatched assets as unknown, non-marketable, and non-tradable.
-  - Fail-closed public inventory pagination: raises `PublicInventoryError` and rolls back transactions on page failures, private inventories, missing cursors, or repeated cursors; validates pagination limits (`count` 1..5000, `max_pages` 1..50, `max_items` 1..50000); legitimately empty inventories produce empty snapshots cleanly.
-  - Hardened manual CSV/JSON marketability validation: strict boolean parsing with fail-closed `False` defaults on missing values, rejecting ambiguous strings (`'maybe'`, `'unknown'`, `'2'`) and invalid restriction days with row-level errors.
-  - Un-fabricated buy depth: removed artificial fallback defaults (`or 1`); missing or zero orderbook depth tags `BUY DEPTH UNAVAILABLE` and suppresses actionable notifications; opportunity scoring assigns 0.0 to depth when missing.
-  - Per-channel delivery-aware cooldown: cooldown references actual successful deliveries (`status = 'delivered'`) per channel in `notification_deliveries`; intervening non-actionable or suppressed observations do not alter the cooldown reference timestamp or reference bid; supports short failure retry backoff (default 60s, max 3 retries) with channel independence.
-  - Actionable status alignment: `High-confidence signal` and `Candidate` are notification-eligible; `Needs verification` is suppressed by default unless explicitly configured.
-  - Local environment loading: integrates `python-dotenv` with `override=False` to preserve existing process environment variables while loading `.env` on Windows and Linux; ensures clean HTTP client lifecycle management via `ReadOnlyHttpClient.aclose()`.
-- **Milestone 5.2 (Final Inventory Integrity & Notification Retry Hardening):**
-  - Public inventory truncation elimination: verified total accumulated asset count against `max_items` across completed inventories (including when `more_items=False`); raises `PublicInventoryError` on limit breach without creating snapshots, and tracks cursor histories (`seen_cursors`) to reject cycles.
-  - Cumulative notification retry accounting: persistent retry accounting independently tracked per `(item_id, currency_id, alert_type, channel, alert_fingerprint)`; counts failed delivery cycles cumulatively, enforcing the maximum of 3 retries after the initial failed send; skipped/cooldown evaluations never consume or reset failure counts; fresh bids receive a fresh retry budget; successful delivery clears retry state.
-  - Fail-closed historical timestamp validation: `OrderbookRepository.get_historical_buy_orders()` excludes malformed, missing, or far-future timestamps from age-filtered baselines under an explicit clock-skew tolerance policy (`MAX_CLOCK_SKEW_SECONDS = 5.0s`), preserving historical database records without deletion.
-  - Strict manual JSON/CSV numeric validation: `ManualInventoryImporter` rejects booleans, floats (`1.0`, `1.9`, `0.0`, `7.0`), non-positive amounts, and negative restriction days without silent truncation; enforces an explicit manual-only namespace (`manual_`) for all manual asset IDs.
+All 9 implementation milestones are complete and verified via automated offline tests, static & runtime security audits, and cross-platform CI (Windows & Linux Python 3.12/3.13 + React/TypeScript Vite SPA):
+
+- **Milestones 1–4 (Core & Financial Engine):**
+  - Strictly read-only `ReadOnlyHttpClient` with single `asyncio.Lock`, non-spoofed `CS2TradingSniper/0.1.0` headers, HTTPS `steamcommunity.com` path allowlist, redirect validation, fail-closed JSON/Decimal parsing, monotonic `SequentialRateLimiter` (capacity `1`, hard-capped `<= 12 RPM`, zero proxy/override backdoors), and 4-state global circuit breaker (`CLOSED`, `OPEN` 300s+ backoff, `HALF_OPEN` single-canary, `HALTED` fail-closed).
+  - Exact `(app_id, market_hash_name, item_nameid)` SSR hydration & canonical/grouped `G...` URL resolution against pinned verified mapping provenance, backed by integer minor-unit dual-floor Valve fee arithmetic and `calculate_exact_breakeven_buyer_pays`.
+- **Milestones 5 / 5.1 / 5.2 (SELL Sniper, Inventory & Free Notifications):**
+  - Exact `(classid, instanceid)` public inventory client (`PublicInventoryClient`) with pagination cycle/limit enforcement and strict manual CSV/JSON importers (`manual_` asset IDs, strict integer validation).
+  - `SellSniperEngine` with crossed-book suppression, un-fabricated `BUY DEPTH UNAVAILABLE` gating, top-level bid anomaly scoring, and zero-cost `DiscordNotifier` + `TelegramNotifier` with token redaction, per-channel cooldowns, and cumulative retry caps.
+- **Milestone 6 (BUY Sniper & Cookie-Free History):**
+  - Individual `/render/` card parser (`listing_parser.py`) extracting buyer-pays minor units, stickers/charms, optional float/seed metadata, inspect links, and cookie-free `var line1` HTML series while excluding sold listings and variant mismatches.
+  - `BuySniperEngine` using Volume-Weighted Median baselines, 7d/30d spike guard, 5% 7-day volatility risk buffer, Conservative/Base/Optimistic exit scenarios, and Migration 5 persistence.
+- **Milestone 7 (Portfolio 7-Day Lock Tracker & Unified Scheduler):**
+  - `PortfolioService` parsing Steam `"until/after ... GMT/UTC"` lock timestamps cleanly in UTC, suppressing premature `RESALE READY` alerts while locked, flagging `Under Water` holdings, dispatching `[RESALE READY]` & `[UNDER WATER]` notifications, and computing exact integer Wallet P&L.
+  - `SniperScheduler` sharing ONE global rate limiter and HTTP client (`<= 12 RPM`) across BUY, SELL, and Portfolio loops alongside SQLite Migration 6.
+- **Milestone 8 (FastAPI Local Dashboard, React/Vite SPA & Windows Launcher):**
+  - FastAPI backend (`src/sniper/api/app.py`) exposing local REST APIs with zero secret echo-back and SPA serving (`frontend/`), React 18 + TypeScript + Vite multi-tab workspace (Overview, BUY Sniper, SELL Sniper, Portfolio, Health & Alerts, Settings), `sniper serve` CLI, and one-click Windows 11 launcher (`launch.bat`).
+- **Milestone 9 (Acceptance, Security Audit & Packaging):**
+  - Automated static + runtime security audit (`tests/test_security_audit.py`), full offline E2E lifecycle verification (`tests/test_e2e_lifecycle.py`), [Security Policy](SECURITY.md), and [Changelog](CHANGELOG.md).
 
 ---
 
-## Installation & Verification
+## Quick Start (Windows 11 One-Click Launch)
+
+Double-click **`launch.bat`** (or run `.\launch.bat` in PowerShell / CMD):
+- Creates `.env` from `.env.example` if missing (configure `DISCORD_WEBHOOK_URL` / `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` optionally for alerts — **never** add Steam passwords or cookies).
+- Installs Python dependencies (`pip install -e .`) and builds `frontend/dist` (`npm install && npm run build`) automatically if needed.
+- Starts the local dashboard at `http://127.0.0.1:8000` (`sniper serve`) and opens your browser.
+
+---
+
+## CLI Installation & Manual Commands
 
 ```bash
 # 1. Install package in editable mode with dependencies
 pip install -e .
 
-# 2. Run comprehensive offline unit test suite
+# 2. Run comprehensive offline unit & security test suite
 python -m unittest discover -s tests -p "test_*.py" -v
 
-# 3. CLI status and notification checks
+# 3. Frontend build & Vitest suite
+cd frontend && npm ci && npm run build && npm test && cd ..
+
+# 4. Launch dashboard manually
+sniper serve --host 127.0.0.1 --port 8000
+
+# 5. CLI status, watchlists, scans & portfolio management
 sniper status
 sniper test-notifications
-
-# 4. Import inventory (public SteamID64 or manual CSV/JSON)
+sniper watchlist add "https://steamcommunity.com/market/listings/730/AK-47%20%7C%20Redline%20%28Field-Tested%29" --strategy BUY
 sniper import-inventory 76561198000000000
 sniper import-csv my_inventory.csv
-
-# 5. Run SELL Sniper opportunity scan
+sniper scan-buy
 sniper scan-sell
-```
+sniper portfolio list
 
-# 2. Run comprehensive offline unit test suite
-python -m unittest discover -s tests -p "test_*.py" -v
-
-# 3. Run single-request read-only connectivity smoke test
+# 6. Controlled single-request live smoke check (manual only)
 python scripts/smoke_test.py
 ```
 
