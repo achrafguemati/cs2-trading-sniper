@@ -53,6 +53,7 @@ from sniper.storage.service import (
     IngestedItemResult,
     ItemIdentityService,
     ingest_market_item,
+    load_default_nameid_db,
 )
 
 __all__ = [
@@ -102,5 +103,6 @@ __all__ = [
     "get_applied_versions",
     "get_current_version",
     "ingest_market_item",
+    "load_default_nameid_db",
     "rollback_migration",
 ]

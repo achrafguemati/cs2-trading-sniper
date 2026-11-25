@@ -48,7 +48,7 @@ from sniper.storage.repositories import (
     ItemRepository,
     WatchlistRepository,
 )
-from sniper.storage.service import ItemIdentityService
+from sniper.storage.service import ItemIdentityService, load_default_nameid_db
 
 logger = logging.getLogger("sniper.cli")
 
@@ -353,10 +353,13 @@ def cmd_status(args: argparse.Namespace) -> int:
 async def cmd_watchlist_add(args: argparse.Namespace) -> int:
     """Resolve URL (canonical or grouped G...) and save to watchlist."""
     db = init_database(args.db)
+    nameid_db = None
     try:
+        nid_path = ":memory:" if db.is_memory else str(Path(args.db).parent / "item_nameids.db")
+        nameid_db = load_default_nameid_db(nid_path)
         async with ReadOnlyHttpClient() as http_client:
             adapter = SteamMarketAdapter(http_client=http_client)
-            svc = ItemIdentityService(db)
+            svc = ItemIdentityService(db, nameid_db=nameid_db)
             url = args.url.strip()
             try:
                 res = svc.resolve_and_persist(url)
@@ -385,6 +388,8 @@ async def cmd_watchlist_add(args: argparse.Namespace) -> int:
         print(f"Failed to add watchlist entry: {exc}", file=sys.stderr)
         return 1
     finally:
+        if nameid_db is not None:
+            nameid_db.close()
         db.close()
 
 
@@ -572,6 +577,20 @@ def cmd_portfolio_sell(args: argparse.Namespace) -> int:
         db.close()
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    """Start the local FastAPI backend & React SPA web server."""
+    import uvicorn
+    from sniper.api.app import create_app
+
+    app = create_app(
+        db_path=args.db,
+        enable_scheduler=not args.no_scheduler,
+    )
+    print(f"Starting CS2 Trading Sniper web dashboard on http://{args.host}:{args.port} (Read-Only)...")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build CLI argument parser."""
     parser = argparse.ArgumentParser(
@@ -691,6 +710,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_stat.add_argument("--db", default=get_default_db_path(), help="Database path")
 
+    # serve (M8)
+    p_srv = subparsers.add_parser("serve", help="Start FastAPI backend & web dashboard server")
+    p_srv.add_argument("--db", default=get_default_db_path(), help="Database path")
+    p_srv.add_argument("--host", default="127.0.0.1", help="Bind host (default 127.0.0.1)")
+    p_srv.add_argument("--port", type=int, default=8000, help="Bind port (default 8000)")
+    p_srv.add_argument("--no-scheduler", action="store_true", help="Disable periodic background polling loop")
+
     return parser
 
 
@@ -741,6 +767,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return asyncio.run(cmd_test_notifications(args))
     elif args.subcommand in ("status", "channel-status"):
         return cmd_status(args)
+    elif args.subcommand == "serve":
+        return cmd_serve(args)
     else:
         parser.print_help()
         return 1

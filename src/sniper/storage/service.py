@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, NamedTuple
 
 from sniper.core.identity import (
@@ -111,3 +113,18 @@ def ingest_market_item(
     """Convenience function to resolve and persist a market item in one call."""
     service = ItemIdentityService(db, nameid_db=nameid_db)
     return service.resolve_and_persist(url, ssr_data=ssr_data)
+
+
+def load_default_nameid_db(db_path: str | Path = ":memory:") -> ItemNameIdDatabase | None:
+    """Load the pinned offline Steam item_nameid mapping database from packaged JSON assets."""
+    data_dir = Path(__file__).resolve().parent.parent / "data"
+    seed_path = data_dir / "seed_market_ids.json"
+    meta_path = data_dir / "seed_market_ids.metadata.json"
+    if not seed_path.is_file() or not meta_path.is_file():
+        return None
+
+    nameid_db = ItemNameIdDatabase(db_path)
+    if not nameid_db.has_verified_metadata():
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        nameid_db.import_verified_dataset(seed_path, meta)
+    return nameid_db

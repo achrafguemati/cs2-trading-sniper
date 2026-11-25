@@ -195,11 +195,14 @@
   - SQLite Migration 6 (`holdings`, `source_health_events`, `app_settings`), CLI `portfolio add|list|evaluate|sell` subcommands, and `PortfolioAlertPayload`.
 * **Acceptance Criteria:** Verified: accurate lock countdowns, zero premature `RESALE READY` alerts while locked, clean unlock transitions, exact integer Wallet P&L, and global rate budget enforcement.
 
-### Milestone 8: Dashboard, Settings & Windows Launcher
+### Milestone 8: Dashboard, Settings & Windows Launcher (COMPLETED)
+* **Status:** Complete & Verified.
 * **Deliverables:**
-  - React/TypeScript dashboard with BUY view, SELL view, Portfolio view, and Source Health indicator.
-  - Windows `launch.bat` script.
-* **Acceptance Criteria:** Single click launches backend and frontend, opening browser automatically on Windows 11.
+  - `src/sniper/api/`: Localhost-only FastAPI backend (`app.py`, `schemas.py`) backed by SQLite + `SniperScheduler`, serving `/api/overview`, `/api/watchlists`, `/api/history/import`, `/api/buy/*`, `/api/inventory/*`, `/api/sell/*`, `/api/portfolio/*`, `/api/alerts`, `/api/notifications/test`, `/api/source-health/*`, and `/api/settings` (zero secret echo-back, hard-clamped `<= 12 RPM`), plus static SPA serving of `frontend/dist`.
+  - `frontend/`: React 18 + TypeScript + Vite SPA featuring Overview, BUY Sniper, SELL Sniper, Portfolio & 7-Day Lock Tracker, Health & Alerts, and Settings tabs, plus Vitest component smoke suite (`src/App.test.tsx`).
+  - `src/sniper/cli.py`: `sniper serve` launcher subcommand and packaged default `seed_market_ids.json` loader.
+  - `launch.bat`: Windows 11 single-click launcher verifying Python + venv dependencies, building `frontend/dist` if missing, starting local Uvicorn server on `127.0.0.1:8000`, and opening the dashboard in the default browser.
+* **Acceptance Criteria:** Verified: FastAPI ASGI API & zero-secret-leak tests pass, React SPA builds cleanly and passes Vitest smoke tests, and `launch.bat` starts the full stack cleanly on Windows 11.
 
 ### Milestone 9: Final Acceptance, Security Audit & Packaging
 * **Deliverables:**
