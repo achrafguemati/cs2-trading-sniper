@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -104,6 +105,117 @@ def _build_mock_transport() -> httpx.MockTransport:
                     "marketable": 1, "tradable": 1, "market_marketable_restriction": 0,
                 }],
             })
+        if "/market/search" in url:
+            qd = {
+                "queries": [
+                    {
+                        "queryKey": ["market_search", {"appid": 730, "q": "Printstream"}],
+                        "state": {
+                            "data": {
+                                "pages": [
+                                    {
+                                        "total_count": 2,
+                                        "results": [
+                                            {
+                                                "strHash": "M4A1-S | Printstream (Field-Tested)",
+                                                "cSellOrders": 180,
+                                                "cBuyOrders": 1200,
+                                                "strMinSellSubtotal": "$42.00 USD",
+                                                "eCurrency": 1,
+                                                "asset_description": {"type": "Covert Rifle", "name_color": "EB4B4B", "icon_url": "p/img"},
+                                            },
+                                            {
+                                                "strHash": "Dusty Low Supply Skin",
+                                                "cSellOrders": 1,
+                                                "strMinSellSubtotal": "$0.10 USD",
+                                                "eCurrency": 1,
+                                                "asset_description": {"type": "Consumer Grade"},
+                                            },
+                                        ],
+                                    }
+                                ]
+                            }
+                        },
+                    }
+                ]
+            }
+            html = (
+                '<script type="application/json" id="valve-ssr-data">'
+                + json.dumps({"route": "/market/search", "renderContext": {"queryData": json.dumps(qd)}})
+                + "</script>"
+            )
+            return httpx.Response(200, text=html)
+        if "/market/listings/730/M4A1-S" in url:
+            now_ts = int(datetime.now(timezone.utc).timestamp())
+            qd = {
+                "queries": [
+                    {
+                        "queryKey": ["market_item_search", {"appid": 730}],
+                        "state": {
+                            "data": {
+                                "pages": [
+                                    {
+                                        "start": 0,
+                                        "total_count": 180,
+                                        "listings": [
+                                            {
+                                                "listingid": "77001122",
+                                                "unPrice": 3652,
+                                                "unFee": 548,
+                                                "unSteamFee": 182,
+                                                "unPublisherFee": 366,
+                                                "eCurrency": 1,
+                                                "asset": {
+                                                    "id": "ast_p1", "classid": "5", "instanceid": "0",
+                                                    "appid": 730, "contextid": "2",
+                                                    "asset_properties": [{"propertyid": 2, "float_value": 0.1582}],
+                                                },
+                                                "description": {
+                                                    "appid": 730, "classid": "5", "instanceid": "0",
+                                                    "name": "M4A1-S | Printstream (Field-Tested)",
+                                                    "market_hash_name": "M4A1-S | Printstream (Field-Tested)",
+                                                    "descriptions": [{"value": "Sticker: Crown (Foil)"}],
+                                                    "market_actions": [],
+                                                },
+                                            }
+                                        ],
+                                    }
+                                ]
+                            }
+                        },
+                    },
+                    {
+                        "queryKey": ["market", "pricehistory", 730, "M4A1-S | Printstream (Field-Tested)"],
+                        "state": {
+                            "data": {
+                                "ecurrency": 1,
+                                "prices": [
+                                    {"time": now_ts - 86400 * 3, "price_median": 55.00, "purchases": 40},
+                                    {"time": now_ts - 86400 * 1, "price_median": 54.00, "purchases": 35},
+                                ],
+                            }
+                        },
+                    },
+                    {
+                        "queryKey": ["market", "orderbook", 730, "M4A1-S | Printstream (Field-Tested)"],
+                        "state": {
+                            "data": {
+                                "eCurrency": 1,
+                                "amtMaxBuyOrder": 4050,
+                                "amtMinSellOrder": 4200,
+                                "cBuyOrders": 1200,
+                                "cSellOrders": 180,
+                            }
+                        },
+                    },
+                ]
+            }
+            html = (
+                '<script type="application/json" id="valve-ssr-data">'
+                + json.dumps({"route": "/market/listings/:appid/:name", "renderContext": {"queryData": json.dumps(qd)}})
+                + "</script>"
+            )
+            return httpx.Response(200, text=html)
         if "/market/listings/730/" in url:
             return httpx.Response(200, text="<html><body>Steam page</body></html>")
         return httpx.Response(404)
@@ -298,6 +410,68 @@ class TestFastApiBackend(unittest.IsolatedAsyncioTestCase):
                 os.environ["DISCORD_WEBHOOK_URL"] = old_dc
             else:
                 os.environ.pop("DISCORD_WEBHOOK_URL", None)
+
+    async def test_discover_catalog_steam_search_screener_and_grouped_inventory(self) -> None:
+        # 1. Offline catalog search + curated presets
+        r_cat = await self.client.get("/api/catalog/search", params={"q": "Redline", "exterior": "Field-Tested"})
+        self.assertEqual(r_cat.status_code, 200)
+        cat_body = r_cat.json()
+        self.assertTrue(cat_body["mappings_loaded"])
+        self.assertTrue(any(i["market_hash_name"] == "AK-47 | Redline (Field-Tested)" for i in cat_body["items"]))
+        self.assertGreaterEqual(len(cat_body["presets"]), 4)
+
+        # 2. Live Steam SSR search + price/supply filters
+        r_steam = await self.client.post("/api/discover/steam", json={
+            "query": "Printstream",
+            "min_price_minor": 1000,
+            "min_supply": 50,
+            "currency_id": 1,
+        })
+        self.assertEqual(r_steam.status_code, 200)
+        steam_items = r_steam.json()["items"]
+        self.assertEqual(len(steam_items), 1)
+        self.assertEqual(steam_items[0]["market_hash_name"], "M4A1-S | Printstream (Field-Tested)")
+        self.assertEqual(steam_items[0]["min_sell_price_minor"], 4200)
+
+        # 3. Auto-Hunt Screener (evaluates dip vs 30d median, target buy price, craft & auto-watchlist)
+        r_screen = await self.client.post("/api/discover/screen", json={
+            "market_hash_names": ["M4A1-S | Printstream (Field-Tested)"],
+            "currency_id": 1,
+            "min_roi_pct": 5.0,
+            "auto_watchlist": True,
+        })
+        self.assertEqual(r_screen.status_code, 200)
+        sc_body = r_screen.json()
+        self.assertEqual(sc_body["screened"], 1)
+        cand = sc_body["candidates"][0]
+        self.assertEqual(cand["lowest_ask_minor"], 4200)
+        self.assertEqual(cand["highest_buy_order_minor"], 4050)
+        self.assertGreater(cand["target_buy_minor"], 4200)
+        self.assertGreater(cand["profit_at_baseline_minor"], 0)
+        self.assertTrue(cand["watchlist_added"])
+        self.assertEqual(cand["verdict"], "STRONG BUY NOW")
+
+        # Verify watchlist persisted
+        r_wl = await self.client.get("/api/watchlists")
+        self.assertTrue(any(w["market_hash_name"] == "M4A1-S | Printstream (Field-Tested)" for w in r_wl.json()["items"]))
+
+        # 4. Grouped inventory & selective SELL scan with limit
+        r_manual = await self.client.post("/api/inventory/import-manual", json={
+            "format": "csv",
+            "content": "market_hash_name,is_marketable,is_tradable\nAK-47 | Redline (Field-Tested),true,true\nAK-47 | Redline (Field-Tested),true,true\n",
+        })
+        self.assertEqual(r_manual.status_code, 200)
+
+        r_inv = await self.client.get("/api/inventory/latest")
+        self.assertEqual(r_inv.status_code, 200)
+        groups = r_inv.json()["grouped_items"]
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["quantity"], 2)
+        self.assertEqual(groups[0]["marketable_count"], 2)
+
+        r_sel = await self.client.post("/api/sell/scan", json={"dispatch_notifications": False, "limit": 1})
+        self.assertEqual(r_sel.status_code, 200)
+        self.assertEqual(r_sel.json()["evaluated"], 1)
 
 
 if __name__ == "__main__":

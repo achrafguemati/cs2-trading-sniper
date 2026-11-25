@@ -1,141 +1,159 @@
 import type {
   BuyCandidate,
-  HealthResponse,
-  InventoryItem,
+  CatalogSearchResponse,
+  DiscoverScreenResponse,
+  HealthStatus,
+  InventoryResponse,
   OverviewResponse,
   PortfolioOverview,
   SellCandidate,
   SettingsPayload,
-  SourceHealthEvent,
+  SourceHealthResponse,
+  SteamDiscoverResponse,
   UnifiedAlert,
   WatchlistItem,
 } from "../types";
 
-export function formatMinor(
-  minor: number | null | undefined,
-  symbol = "$",
-  precision = 2,
-): string {
-  if (minor === null || minor === undefined) return "N/A";
-  const neg = minor < 0;
-  const abs = Math.abs(Math.trunc(minor));
-  if (precision <= 0) {
-    return `${neg ? "-" : ""}${symbol}${abs}`;
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(path, {
+    headers: {
+      "Content-Type": "application/json",
+      ...(init?.headers ?? {}),
+    },
+    ...init,
+  });
+
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const payload = await res.json();
+      if (payload?.detail) detail = String(payload.detail);
+    } catch {
+      // Ignore unparseable body
+    }
+    throw new Error(detail);
   }
-  const div = 10 ** precision;
-  const whole = Math.floor(abs / div);
-  const rem = String(abs % div).padStart(precision, "0");
-  return `${neg ? "-" : ""}${symbol}${whole}.${rem}`;
+  return (await res.json()) as T;
 }
 
-export function formatSignedMinor(
-  minor: number | null | undefined,
-  symbol = "$",
-  precision = 2,
-): string {
-  if (minor === null || minor === undefined) return "N/A";
+export function formatMinor(minor: number | null | undefined, symbol = "$"): string {
+  if (minor === null || minor === undefined) return "—";
+  const neg = minor < 0;
+  const abs = Math.abs(minor);
+  const dollars = Math.floor(abs / 100);
+  const cents = String(abs % 100).padStart(2, "0");
+  return `${neg ? "-" : ""}${symbol}${dollars}.${cents}`;
+}
+
+export function formatSignedMinor(minor: number | null | undefined, symbol = "$"): string {
+  if (minor === null || minor === undefined) return "—";
   const prefix = minor > 0 ? "+" : "";
-  return `${prefix}${formatMinor(minor, symbol, precision)}`;
-}
-
-export function formatDurationSeconds(totalSeconds: number): string {
-  if (totalSeconds <= 0) return "Unlocked";
-  const d = Math.floor(totalSeconds / 86400);
-  const h = Math.floor((totalSeconds % 86400) / 3600);
-  const m = Math.floor((totalSeconds % 3600) / 60);
-  if (d > 0) return `${d}d ${h}h`;
-  if (h > 0) return `${h}h ${m}m`;
-  return `${Math.max(1, m)}m`;
+  return `${prefix}${formatMinor(minor, symbol)}`;
 }
 
 export function formatLocalTime(iso: string | null | undefined): string {
   if (!iso) return "—";
-  const dt = new Date(iso);
-  if (Number.isNaN(dt.getTime())) return iso;
-  return dt.toLocaleString();
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString();
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-    ...init,
-  });
-  const text = await res.text();
-  const data = text ? JSON.parse(text) : {};
-  if (!res.ok) {
-    const detail = typeof data?.detail === "string" ? data.detail : `HTTP ${res.status}`;
-    throw new Error(detail);
-  }
-  return data as T;
+export function formatDurationSeconds(seconds: number): string {
+  if (seconds <= 0) return "Ready now";
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
 }
 
 export const api = {
-  getHealth: () => request<HealthResponse>("/api/health"),
+  getHealth: () => request<HealthStatus>("/api/health"),
   getOverview: (currencyId = 1) => request<OverviewResponse>(`/api/overview?currency_id=${currencyId}`),
 
   getWatchlists: () => request<{ items: WatchlistItem[] }>("/api/watchlists"),
-  addWatchlist: (payload: {
+  addWatchlist: (body: {
     url: string;
-    strategy: string;
-    currency_id?: number;
+    strategy?: string;
     max_buy_price_minor?: number | null;
     min_roi_pct?: number;
-  }) => request<{ watchlist: WatchlistItem }>("/api/watchlists", { method: "POST", body: JSON.stringify(payload) }),
+    poll_interval_seconds?: number;
+  }) => request("/api/watchlists", { method: "POST", body: JSON.stringify(body) }),
   toggleWatchlist: (id: number, isActive: boolean) =>
     request(`/api/watchlists/${id}`, { method: "PATCH", body: JSON.stringify({ is_active: isActive }) }),
   deleteWatchlist: (id: number) => request(`/api/watchlists/${id}`, { method: "DELETE" }),
 
-  importHistory: (payload: {
-    market_hash_name: string;
-    currency_id: number;
-    points: Array<{ bucket_date: string; median_price_minor: number; volume: number }>;
-  }) => request<{ imported: number }>("/api/history/import", { method: "POST", body: JSON.stringify(payload) }),
-
   getBuyCandidates: () => request<{ candidates: BuyCandidate[] }>("/api/buy/candidates"),
-  scanBuy: (dispatchNotifications = true) =>
-    request<{ evaluated: number; actionable: number }>(`/api/buy/scan?dispatch_notifications=${dispatchNotifications}`, { method: "POST" }),
+  triggerBuyScan: (dispatchNotifications = true) =>
+    request(`/api/buy/scan?dispatch_notifications=${dispatchNotifications}`, { method: "POST" }),
 
-  getLatestInventory: () =>
-    request<{ snapshot: { snapshot_id: number; total_count: number; observed_at: string; source: string } | null; items: InventoryItem[] }>(
-      "/api/inventory/latest",
-    ),
+  searchCatalog: (params: {
+    q?: string;
+    category?: string;
+    exterior?: string;
+    stattrak_only?: boolean;
+    limit?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params.q) qs.set("q", params.q);
+    if (params.category) qs.set("category", params.category);
+    if (params.exterior) qs.set("exterior", params.exterior);
+    if (params.stattrak_only) qs.set("stattrak_only", "true");
+    if (params.limit) qs.set("limit", String(params.limit));
+    return request<CatalogSearchResponse>(`/api/catalog/search?${qs.toString()}`);
+  },
+  discoverSteamMarket: (body: {
+    query: string;
+    start?: number;
+    min_price_minor?: number | null;
+    max_price_minor?: number | null;
+    min_supply?: number;
+    currency_id?: number;
+    only_verified_nameid?: boolean;
+  }) => request<SteamDiscoverResponse>("/api/discover/steam", { method: "POST", body: JSON.stringify(body) }),
+  screenCandidates: (body: {
+    market_hash_names: string[];
+    currency_id?: number;
+    min_roi_pct?: number;
+    auto_watchlist?: boolean;
+    max_budget_minor?: number | null;
+  }) => request<DiscoverScreenResponse>("/api/discover/screen", { method: "POST", body: JSON.stringify(body) }),
+
+  getLatestInventory: () => request<InventoryResponse>("/api/inventory/latest"),
   importSteamInventory: (steamid64: string) =>
-    request<{ imported_count: number; marketable_count: number }>("/api/inventory/import-steam", {
-      method: "POST",
-      body: JSON.stringify({ steamid64 }),
-    }),
+    request("/api/inventory/import-steam", { method: "POST", body: JSON.stringify({ steamid64 }) }),
   importManualInventory: (format: "csv" | "json", content: string) =>
-    request<{ imported_count: number; errors: string[] }>("/api/inventory/import-manual", {
-      method: "POST",
-      body: JSON.stringify({ format, content }),
-    }),
-  getSellCandidates: () => request<{ candidates: SellCandidate[] }>("/api/sell/candidates"),
-  scanSell: (dispatchNotifications = true) =>
-    request<{ evaluated: number; actionable: number }>(`/api/sell/scan?dispatch_notifications=${dispatchNotifications}`, { method: "POST" }),
+    request("/api/inventory/import-manual", { method: "POST", body: JSON.stringify({ format, content }) }),
 
-  getPortfolio: (currencyId = 1) => request<PortfolioOverview>(`/api/portfolio/holdings?currency_id=${currencyId}`),
-  addHolding: (payload: {
+  getSellCandidates: () => request<{ candidates: SellCandidate[] }>("/api/sell/candidates"),
+  triggerSellScan: (
+    dispatchNotifications = true,
+    options?: { limit?: number; market_hash_names?: string[] },
+  ) =>
+    request(`/api/sell/scan?dispatch_notifications=${dispatchNotifications}`, {
+      method: "POST",
+      ...(options ? { body: JSON.stringify({ dispatch_notifications: dispatchNotifications, ...options }) } : {}),
+    }),
+
+  getPortfolio: (currencyId = 1) =>
+    request<PortfolioOverview>(`/api/portfolio/holdings?currency_id=${currencyId}`),
+  addHolding: (body: {
     market_hash_name: string;
     acquisition_cost_minor: number;
     restriction_days: number;
-    currency_id?: number;
-  }) => request("/api/portfolio/holdings", { method: "POST", body: JSON.stringify(payload) }),
-  evaluatePortfolio: (dispatchNotifications = true) =>
-    request(`/api/portfolio/evaluate?dispatch_notifications=${dispatchNotifications}`, { method: "POST" }),
+    notes?: string;
+  }) => request("/api/portfolio/holdings", { method: "POST", body: JSON.stringify(body) }),
   sellHolding: (holdingId: number, grossSalePriceMinor: number) =>
     request(`/api/portfolio/holdings/${holdingId}/sell`, {
       method: "POST",
       body: JSON.stringify({ gross_sale_price_minor: grossSalePriceMinor }),
     }),
+  evaluatePortfolio: (dispatchNotifications = true) =>
+    request(`/api/portfolio/evaluate?dispatch_notifications=${dispatchNotifications}`, { method: "POST" }),
 
   getAlerts: () => request<{ alerts: UnifiedAlert[] }>("/api/alerts"),
-  testNotifications: (channel: "all" | "discord" | "telegram") =>
-    request<{ results: Record<string, { status: string; last_error?: string }> }>("/api/notifications/test", {
-      method: "POST",
-      body: JSON.stringify({ channel }),
-    }),
-  getSourceHealth: () =>
-    request<{ breaker: HealthResponse; events: SourceHealthEvent[] }>("/api/source-health"),
+  getSourceHealth: () => request<SourceHealthResponse>("/api/source-health"),
   resetBreaker: () =>
     request("/api/source-health/reset-breaker", {
       method: "POST",
@@ -145,4 +163,9 @@ export const api = {
   getSettings: () => request<SettingsPayload>("/api/settings"),
   updateSettings: (settings: SettingsPayload["settings"]) =>
     request<SettingsPayload>("/api/settings", { method: "PUT", body: JSON.stringify(settings) }),
+  testNotifications: (channel: "all" | "discord" | "telegram" = "all") =>
+    request<{ results: Record<string, { status: string; last_error?: string }> }>("/api/notifications/test", {
+      method: "POST",
+      body: JSON.stringify({ channel }),
+    }),
 };

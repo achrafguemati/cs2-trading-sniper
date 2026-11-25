@@ -817,6 +817,89 @@ class ItemNameIdDatabase:
             return None, None
         return verified["item_nameid"], verified["classid"]
 
+    def search_mappings(
+        self,
+        query: str = "",
+        category: str | None = None,
+        exterior: str | None = None,
+        stattrak_only: bool = False,
+        limit: int = 40,
+    ) -> list[dict[str, Any]]:
+        """Search verified CS2 market mappings locally without touching Steam network."""
+        if not self.has_verified_metadata():
+            return []
+
+        clauses = [
+            "item_nameid_source = ?",
+            "item_nameid_revision = ?",
+        ]
+        params: list[Any] = [VERIFIED_MAPPING_REPOSITORY, VERIFIED_MAPPING_REVISION]
+
+        tokens = [t.strip() for t in (query or "").split() if t.strip()]
+        for tok in tokens[:6]:
+            clauses.append("market_hash_name LIKE ?")
+            params.append(f"%{tok}%")
+
+        if exterior and exterior.strip():
+            clauses.append("market_hash_name LIKE ?")
+            params.append(f"%({exterior.strip()})%")
+
+        if stattrak_only:
+            clauses.append("market_hash_name LIKE '%StatTrak%'")
+
+        cat = (category or "").strip().lower()
+        if cat == "knives":
+            clauses.append("market_hash_name LIKE '★ %'")
+            clauses.append("market_hash_name NOT LIKE '%Gloves%' AND market_hash_name NOT LIKE '%Wraps%'")
+        elif cat == "gloves":
+            clauses.append("(market_hash_name LIKE '%Gloves%' OR market_hash_name LIKE '%Wraps%')")
+        elif cat == "rifles":
+            clauses.append(
+                "(market_hash_name LIKE 'AK-47 | %' OR market_hash_name LIKE 'M4A1-S | %' "
+                "OR market_hash_name LIKE 'M4A4 | %' OR market_hash_name LIKE 'AWP | %' "
+                "OR market_hash_name LIKE 'FAMAS | %' OR market_hash_name LIKE 'Galil AR | %' "
+                "OR market_hash_name LIKE 'AUG | %' OR market_hash_name LIKE 'SG 553 | %' "
+                "OR market_hash_name LIKE 'SSG 08 | %')"
+            )
+        elif cat == "pistols":
+            clauses.append(
+                "(market_hash_name LIKE 'USP-S | %' OR market_hash_name LIKE 'Glock-18 | %' "
+                "OR market_hash_name LIKE 'Desert Eagle | %' OR market_hash_name LIKE 'P250 | %' "
+                "OR market_hash_name LIKE 'Five-SeveN | %' OR market_hash_name LIKE 'Tec-9 | %' "
+                "OR market_hash_name LIKE 'CZ75-Auto | %' OR market_hash_name LIKE 'Dual Berettas | %')"
+            )
+        elif cat == "cases":
+            clauses.append("(market_hash_name LIKE '%Case' OR market_hash_name LIKE '%Capsule%')")
+        elif cat == "stickers":
+            clauses.append("market_hash_name LIKE 'Sticker | %'")
+        elif cat == "agents":
+            clauses.append("(market_hash_name LIKE '% | %SEAL%' OR market_hash_name LIKE '% | %Sabre%' OR market_hash_name LIKE '% | %SWAT%' OR market_hash_name LIKE '% | %FBI%' OR market_hash_name LIKE '% | %Gendarmerie%' OR market_hash_name LIKE '% | %Guerrilla%')")
+
+        safe_limit = max(1, min(100, int(limit)))
+        sql = (
+            "SELECT market_hash_name, item_nameid FROM item_mappings "
+            f"WHERE {' AND '.join(clauses)} "
+            "ORDER BY LENGTH(market_hash_name) ASC, market_hash_name ASC LIMIT ?"
+        )
+        params.append(safe_limit)
+
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            mname = str(row["market_hash_name"])
+            _, ext, is_st, is_souv = decompose_market_hash_name(mname)
+            results.append({
+                "market_hash_name": mname,
+                "item_nameid": int(row["item_nameid"]),
+                "exterior": ext.value if ext else None,
+                "is_stattrak": is_st,
+                "is_souvenir": is_souv,
+                "steam_listing_url": f"https://steamcommunity.com/market/listings/730/{quote(mname, safe='')}",
+            })
+        return results
+
     def lookup_item_provenance(self, market_hash_name: str) -> dict[str, Any] | None:
         """Return separate source/revision metadata for item_nameid and classid."""
         if not market_hash_name:

@@ -2,46 +2,58 @@ import { useCallback, useEffect, useState } from "react";
 import {
   Activity,
   Briefcase,
+  Compass,
+  Crosshair,
   LayoutDashboard,
+  Radar,
   RefreshCw,
   Settings,
   ShieldCheck,
-  TrendingDown,
-  TrendingUp,
 } from "lucide-react";
 import { api } from "./api/client";
 import type {
   BuyCandidate,
-  HealthResponse,
-  InventoryItem,
+  HealthStatus,
+  InventoryResponse,
   OverviewResponse,
   PortfolioOverview,
   SellCandidate,
   SettingsPayload,
-  SourceHealthEvent,
+  SourceHealthResponse,
   UnifiedAlert,
   WatchlistItem,
 } from "./types";
 import { OverviewTab } from "./components/OverviewTab";
+import { DiscoverTab } from "./components/DiscoverTab";
 import { BuySniperTab } from "./components/BuySniperTab";
 import { SellSniperTab } from "./components/SellSniperTab";
 import { PortfolioTab } from "./components/PortfolioTab";
 import { HealthAlertsTab } from "./components/HealthAlertsTab";
 import { SettingsTab } from "./components/SettingsTab";
 
-type TabId = "overview" | "buy" | "sell" | "portfolio" | "health" | "settings";
+type TabId = "overview" | "discover" | "buy" | "sell" | "portfolio" | "health" | "settings";
 
-export function App() {
-  const [tab, setTab] = useState<TabId>("overview");
-  const [health, setHealth] = useState<HealthResponse | null>(null);
+const TABS: Array<{ id: TabId; label: string; icon: typeof LayoutDashboard }> = [
+  { id: "overview", label: "Overview", icon: LayoutDashboard },
+  { id: "discover", label: "Discover Deals", icon: Compass },
+  { id: "buy", label: "BUY Sniper", icon: Crosshair },
+  { id: "sell", label: "SELL Sniper", icon: Radar },
+  { id: "portfolio", label: "7-Day Portfolio", icon: Briefcase },
+  { id: "health", label: "Health & Alerts", icon: Activity },
+  { id: "settings", label: "Settings", icon: Settings },
+];
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState<TabId>("overview");
+  const [health, setHealth] = useState<HealthStatus | null>(null);
   const [overview, setOverview] = useState<OverviewResponse | null>(null);
   const [watchlists, setWatchlists] = useState<WatchlistItem[]>([]);
   const [buyCandidates, setBuyCandidates] = useState<BuyCandidate[]>([]);
   const [sellCandidates, setSellCandidates] = useState<SellCandidate[]>([]);
-  const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
+  const [inventory, setInventory] = useState<InventoryResponse | null>(null);
   const [portfolio, setPortfolio] = useState<PortfolioOverview | null>(null);
   const [alerts, setAlerts] = useState<UnifiedAlert[]>([]);
-  const [healthEvents, setHealthEvents] = useState<SourceHealthEvent[]>([]);
+  const [sourceHealth, setSourceHealth] = useState<SourceHealthResponse | null>(null);
   const [settingsPayload, setSettingsPayload] = useState<SettingsPayload | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -49,7 +61,7 @@ export function App() {
   const refreshAll = useCallback(async () => {
     setRefreshing(true);
     try {
-      const [h, ov, wl, bc, sc, inv, port, al, sh, st] = await Promise.all([
+      const [h, ov, wl, buy, sell, inv, port, al, sh, st] = await Promise.all([
         api.getHealth(),
         api.getOverview(1),
         api.getWatchlists(),
@@ -64,16 +76,16 @@ export function App() {
       setHealth(h);
       setOverview(ov);
       setWatchlists(wl.items);
-      setBuyCandidates(bc.candidates);
-      setSellCandidates(sc.candidates);
-      setInventoryItems(inv.items);
+      setBuyCandidates(buy.candidates);
+      setSellCandidates(sell.candidates);
+      setInventory(inv);
       setPortfolio(port);
       setAlerts(al.alerts);
-      setHealthEvents(sh.events);
+      setSourceHealth(sh);
       setSettingsPayload(st);
       setLoadError(null);
     } catch (err) {
-      setLoadError(err instanceof Error ? err.message : "Unable to reach CS2 Trading Sniper backend.");
+      setLoadError(err instanceof Error ? err.message : "Failed to reach local FastAPI server.");
     } finally {
       setRefreshing(false);
     }
@@ -83,123 +95,147 @@ export function App() {
     void refreshAll();
     const timer = window.setInterval(() => {
       void refreshAll();
-    }, 15000);
+    }, 30000);
     return () => window.clearInterval(timer);
   }, [refreshAll]);
+
+  const activeTitle = TABS.find((t) => t.id === activeTab)?.label ?? "Dashboard";
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand">
+        <div className="brand-block">
           <div className="brand-title">
-            <ShieldCheck size={20} color="#38bdf8" />
+            <span className="brand-logo">
+              <Radar size={17} />
+            </span>
             CS2 Trading Sniper
           </div>
-          <div className="brand-sub">Read-Only Quantitative Terminal</div>
+          <div className="brand-sub">
+            <ShieldCheck size={12} /> STRICTLY READ-ONLY
+          </div>
         </div>
 
-        <nav className="nav-list" aria-label="Primary navigation">
-          <button className={`nav-btn ${tab === "overview" ? "active" : ""}`} onClick={() => setTab("overview")}>
-            <LayoutDashboard size={17} /> Overview
-          </button>
-          <button className={`nav-btn ${tab === "buy" ? "active" : ""}`} onClick={() => setTab("buy")}>
-            <TrendingDown size={17} /> BUY Sniper
-          </button>
-          <button className={`nav-btn ${tab === "sell" ? "active" : ""}`} onClick={() => setTab("sell")}>
-            <TrendingUp size={17} /> SELL Sniper
-          </button>
-          <button className={`nav-btn ${tab === "portfolio" ? "active" : ""}`} onClick={() => setTab("portfolio")}>
-            <Briefcase size={17} /> Portfolio &amp; 7d Lock
-          </button>
-          <button className={`nav-btn ${tab === "health" ? "active" : ""}`} onClick={() => setTab("health")}>
-            <Activity size={17} /> Alerts &amp; Health
-          </button>
-          <button className={`nav-btn ${tab === "settings" ? "active" : ""}`} onClick={() => setTab("settings")}>
-            <Settings size={17} /> Settings
-          </button>
+        <nav className="nav-list" aria-label="Main Navigation">
+          {TABS.map((t) => {
+            const Icon = t.icon;
+            const badgeCount =
+              t.id === "buy" && overview?.kpis.active_buy_signals
+                ? overview.kpis.active_buy_signals
+                : t.id === "sell" && overview?.kpis.recent_sell_signals
+                  ? overview.kpis.recent_sell_signals
+                  : null;
+            return (
+              <button
+                key={t.id}
+                type="button"
+                aria-label={t.label}
+                className={`nav-btn ${activeTab === t.id ? "active" : ""}`}
+                onClick={() => setActiveTab(t.id)}
+              >
+                <Icon size={16} aria-hidden="true" />
+                <span>{t.label}</span>
+                {badgeCount !== null && (
+                  <span className="nav-badge-count" aria-hidden="true">
+                    {badgeCount}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </nav>
 
-        <div className="safety-card">
-          <div><strong>STRICTLY READ-ONLY</strong></div>
-          <div style={{ marginTop: 4 }}>Zero auto-buy / auto-sell</div>
-          <div>Zero Steam passwords or cookies</div>
-          <div>Single-IP budget ≤ 12 RPM</div>
+        <div className="sidebar-footer">
+          <div style={{ fontSize: "0.75rem", color: "#94a3b8" }}>
+            Steam Wallet Mode &bull; Zero Auth
+          </div>
+          <div className="muted mono" style={{ fontSize: "0.72rem" }}>
+            Hard Ceiling &le; {health?.rpm_ceiling ?? 12} RPM
+          </div>
         </div>
       </aside>
 
       <main className="main-area">
-        <header className="topbar">
+        <header className="top-bar">
           <div>
-            <h1 style={{ margin: 0, fontSize: "1.35rem" }}>
-              {tab === "overview" && "Market Terminal Overview"}
-              {tab === "buy" && "Mode A — BUY SNIPER (Listing Evaluator)"}
-              {tab === "sell" && "Mode B — SELL SNIPER (High Buy-Order Monitor)"}
-              {tab === "portfolio" && "7-Day Restriction & Portfolio Tracker"}
-              {tab === "health" && "Source Health & Alert Audit Log"}
-              {tab === "settings" && "Settings & Free Alert Channels"}
-            </h1>
+            <h1 className="top-bar-title">{activeTitle}</h1>
+            <p className="top-bar-sub">
+              Read-only quantitative CS2 market screener, exact integer fee math &amp; 7-day lock portfolio
+            </p>
           </div>
-          <div className="row-actions">
-            {health && (
-              <span className={`badge ${health.breaker_state === "CLOSED" ? "badge-green" : health.breaker_state === "HALTED" ? "badge-rose" : "badge-amber"}`}>
-                Steam Source: {health.breaker_state}
-              </span>
-            )}
-            <button className="btn" onClick={() => void refreshAll()} disabled={refreshing}>
-              <RefreshCw size={15} /> {refreshing ? "Refreshing..." : "Refresh"}
+
+          <div className="top-bar-actions">
+            <span className="status-pill">
+              <span
+                className={`status-dot ${
+                  health?.is_halted ? "danger" : health?.is_cooling_down ? "warn" : ""
+                }`}
+              />
+              Breaker: {health?.breaker_state ?? "..."}
+            </span>
+            <span className="status-pill">
+              DB: {health?.nameid_mappings_loaded ? "26,935 Verified" : "Booting"}
+            </span>
+            <button type="button" className="btn" disabled={refreshing} onClick={() => void refreshAll()}>
+              <RefreshCw size={14} /> {refreshing ? "Syncing..." : "Refresh"}
             </button>
           </div>
         </header>
 
-        {health && (health.is_halted || health.is_cooling_down) && (
-          <div className="banner-warn" role="alert">
-            <div>
-              <strong>Steam Source Degraded ({health.breaker_state}):</strong>{" "}
-              {health.is_halted
-                ? health.halt_reason || "Polling halted due to HTTP 403 or schema failure."
-                : `HTTP 429 cooldown active (${health.cooldown_remaining_seconds}s remaining).`}
-            </div>
-            <button className="btn" onClick={() => setTab("health")}>Inspect Telemetry →</button>
-          </div>
-        )}
-
         {loadError && (
-          <div className="banner-warn" role="alert">
-            <span>Backend error: {loadError}</span>
+          <div className="banner-warn">
+            <strong>API Connection Issue:</strong>&nbsp;{loadError} — verify local <code>sniper serve</code> backend is running.
           </div>
         )}
 
-        {tab === "overview" && (
+        {health?.is_halted && (
+          <div className="banner-warn">
+            <strong>CIRCUIT BREAKER HALTED:</strong>&nbsp;{health.halt_reason || "Unexpected response"} Inspect Health &amp; Alerts before resetting.
+          </div>
+        )}
+
+        {activeTab === "overview" && (
           <OverviewTab
             overview={overview}
             buyCandidates={buyCandidates}
             sellCandidates={sellCandidates}
-            onNavigate={(next) => setTab(next)}
+            onNavigate={setActiveTab}
           />
         )}
-        {tab === "buy" && (
-          <BuySniperTab watchlists={watchlists} candidates={buyCandidates} onRefresh={refreshAll} />
+        {activeTab === "discover" && (
+          <DiscoverTab
+            defaultMinRoiPct={settingsPayload?.settings.min_roi_pct ?? 5}
+            onRefresh={refreshAll}
+          />
         )}
-        {tab === "sell" && (
-          <SellSniperTab inventoryItems={inventoryItems} sellCandidates={sellCandidates} onRefresh={refreshAll} />
+        {activeTab === "buy" && (
+          <BuySniperTab
+            watchlists={watchlists}
+            candidates={buyCandidates}
+            onRefresh={refreshAll}
+            onNavigate={setActiveTab}
+          />
         )}
-        {tab === "portfolio" && (
-          <PortfolioTab portfolio={portfolio} onRefresh={refreshAll} />
+        {activeTab === "sell" && (
+          <SellSniperTab
+            inventory={inventory}
+            candidates={sellCandidates}
+            onRefresh={refreshAll}
+          />
         )}
-        {tab === "health" && (
+        {activeTab === "portfolio" && <PortfolioTab portfolio={portfolio} onRefresh={refreshAll} />}
+        {activeTab === "health" && (
           <HealthAlertsTab
             health={health}
-            events={healthEvents}
+            events={sourceHealth?.events ?? []}
             alerts={alerts}
             onRefresh={refreshAll}
           />
         )}
-        {tab === "settings" && (
+        {activeTab === "settings" && (
           <SettingsTab settingsPayload={settingsPayload} onRefresh={refreshAll} />
         )}
       </main>
     </div>
   );
 }
-
-export default App;

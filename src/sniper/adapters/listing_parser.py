@@ -514,7 +514,10 @@ def compute_weighted_median_minor(points: list[tuple[int, int]]) -> int:
     return sorted_pts[-1][0]
 
 
-def _extract_valve_ssr_queries(html_content: str) -> list[dict[str, Any]] | None:
+def _extract_valve_ssr_queries(
+    html_content: str,
+    route_substrings: tuple[str, ...] = ("/market/listings/",),
+) -> list[dict[str, Any]] | None:
     """Extract React Query hydration entries from Steam's <script id='valve-ssr-data'> block."""
     if not isinstance(html_content, str) or "valve-ssr-data" not in html_content:
         return None
@@ -532,7 +535,7 @@ def _extract_valve_ssr_queries(html_content: str) -> list[dict[str, Any]] | None
     if not isinstance(outer, dict):
         return None
     route = str(outer.get("route") or "")
-    if "/market/listings/" not in route:
+    if not any(sub in route for sub in route_substrings):
         return None
     rc = outer.get("renderContext")
     if not isinstance(rc, dict):
@@ -813,3 +816,149 @@ def extract_public_price_history(
         results.append((bdate, vwm_minor, total_vol))
 
     return results
+
+
+def _safe_nonneg_int(val: Any) -> int | None:
+    if val is None or type(val) is bool:
+        return None
+    try:
+        n = int(val)
+        return n if n >= 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_ssr_price_str(raw_price: Any, currency: CurrencyConfig) -> int | None:
+    """Parse display price strings like '$12.34 USD' into exact integer minor units."""
+    if not isinstance(raw_price, str):
+        return None
+    cleaned = raw_price.strip()
+    if not cleaned:
+        return None
+    code_suffix = f" {currency.code.upper()}"
+    if cleaned.upper().endswith(code_suffix):
+        cleaned = cleaned[: -len(code_suffix)].strip()
+    try:
+        return currency.parse_to_minor_units(cleaned)
+    except Exception:
+        return None
+
+
+def extract_ssr_search_results(
+    html_content: str,
+    currency: CurrencyConfig | None = None,
+) -> list[dict[str, Any]] | None:
+    """Extract normalized CS2 items from Steam's 2026 `/market/search` SSR hydration cache.
+
+    Returns None when HTML lacks a valid `/market/search` `market_search` payload so callers fail closed.
+    """
+    queries = _extract_valve_ssr_queries(html_content, route_substrings=("/market/search",))
+    if queries is None:
+        return None
+
+    search_data: dict[str, Any] | None = None
+    for q in queries:
+        if not isinstance(q, dict):
+            continue
+        qk = q.get("queryKey")
+        if isinstance(qk, list) and qk and qk[0] == "market_search":
+            st = q.get("state")
+            if isinstance(st, dict) and isinstance(st.get("data"), dict):
+                search_data = st["data"]
+                break
+
+    if search_data is None:
+        return None
+
+    pages = search_data.get("pages")
+    if not isinstance(pages, list):
+        return None
+    if not pages:
+        return []
+
+    first_page = pages[0] if isinstance(pages[0], dict) else {}
+    raw_results = first_page.get("results")
+    if not isinstance(raw_results, list):
+        return None
+
+    total_count = _safe_nonneg_int(first_page.get("total_count"))
+    out: list[dict[str, Any]] = []
+    for row in raw_results:
+        if not isinstance(row, dict):
+            continue
+        desc = row.get("asset_description") if isinstance(row.get("asset_description"), dict) else {}
+        market_hash_name = str(row.get("strHash") or desc.get("market_hash_name") or "").strip()
+        if not market_hash_name:
+            continue
+        e_curr = _safe_nonneg_int(row.get("eCurrency"))
+        raw_min_sell = str(row.get("strMinSellSubtotal") or "").strip() or None
+        min_sell_minor = (
+            _parse_ssr_price_str(raw_min_sell, currency)
+            if currency is not None and raw_min_sell and e_curr == currency.currency_id
+            else None
+        )
+        icon_path = str(desc.get("icon_url") or "").strip()
+        out.append(
+            {
+                "market_hash_name": market_hash_name,
+                "sell_listings": _safe_nonneg_int(row.get("cSellOrders")) or 0,
+                "buy_orders": _safe_nonneg_int(row.get("cBuyOrders")),
+                "min_sell_display": raw_min_sell,
+                "min_sell_price_minor": min_sell_minor,
+                "currency_id": e_curr,
+                "item_type": str(desc.get("type") or "").strip() or None,
+                "name_color": str(desc.get("name_color") or "").strip() or None,
+                "icon_url": f"https://community.fastly.steamstatic.com/economy/image/{icon_path}" if icon_path else None,
+                "total_count": total_count,
+            }
+        )
+    return out
+
+
+def extract_ssr_orderbook_snapshot(
+    html_content: str,
+    expected_market_hash_name: str,
+    expected_currency_id: int,
+) -> dict[str, Any] | None:
+    """Extract top bid/ask counts and prices from Steam's 2026 SSR `orderbook` cache when present."""
+    queries = _extract_valve_ssr_queries(html_content, route_substrings=("/market/listings/",))
+    if queries is None:
+        return None
+
+    for q in queries:
+        if not isinstance(q, dict):
+            continue
+        qk = q.get("queryKey")
+        if (
+            isinstance(qk, list)
+            and len(qk) >= 4
+            and qk[0] == "market"
+            and qk[1] == "orderbook"
+            and qk[2] == 730
+            and str(qk[3]) == expected_market_hash_name
+        ):
+            st = q.get("state")
+            data = st.get("data") if isinstance(st, dict) else None
+            if not isinstance(data, dict):
+                return None
+            if _safe_nonneg_int(data.get("eCurrency")) != expected_currency_id:
+                return None
+            max_buy = _safe_nonneg_int(data.get("amtMaxBuyOrder"))
+            min_sell = _safe_nonneg_int(data.get("amtMinSellOrder"))
+            compact_buys = data.get("rgCompactBuyOrders")
+            top_buy_qty: int | None = None
+            if isinstance(compact_buys, list) and compact_buys:
+                first_entry = compact_buys[0]
+                if isinstance(first_entry, dict):
+                    top_buy_qty = _safe_nonneg_int(first_entry.get("quantity") or first_entry.get("nQuantity"))
+                elif len(compact_buys) >= 2:
+                    top_buy_qty = _safe_nonneg_int(compact_buys[1])
+            return {
+                "currency_id": expected_currency_id,
+                "highest_buy_order_minor": max_buy if max_buy and max_buy > 0 else None,
+                "lowest_sell_order_minor": min_sell if min_sell and min_sell > 0 else None,
+                "buy_order_count": _safe_nonneg_int(data.get("cBuyOrders")) or 0,
+                "sell_order_count": _safe_nonneg_int(data.get("cSellOrders")) or 0,
+                "top_level_buy_quantity": top_buy_qty,
+            }
+    return None

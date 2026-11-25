@@ -40,6 +40,7 @@ DEFAULT_ALLOWED_SCHEMES = frozenset({"https"})
 DEFAULT_ALLOWED_HOSTS = frozenset({"steamcommunity.com"})
 DEFAULT_ALLOWED_EXACT_PATHS = frozenset({
     "/market/itemordershistogram",
+    "/market/search",
 })
 DEFAULT_ALLOWED_PATH_PREFIXES = (
     "/market/listings/730/",

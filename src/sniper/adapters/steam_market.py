@@ -25,6 +25,8 @@ from sniper.adapters.listing_parser import (
     _SsrScriptExtractor,
     extract_public_price_history,
     extract_ssr_listing_render_response,
+    extract_ssr_orderbook_snapshot,
+    extract_ssr_search_results,
 )
 from sniper.core.currency import CurrencyConfig
 from sniper.core.http_client import ReadOnlyHttpClient
@@ -297,13 +299,41 @@ class SteamMarketAdapter:
         encoded_name = quote(identity.market_hash_name.strip(), safe="")
         return f"https://steamcommunity.com/market/listings/730/{encoded_name}"
 
-    async def get_ssr_market_page(
+    async def search_market_ssr(
+        self,
+        query: str = "",
+        currency: CurrencyConfig | None = None,
+        start: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Execute a strictly read-only CS2 Market search via Steam's SSR `/market/search` page."""
+        if start < 0:
+            raise ValueError("start must be >= 0.")
+        params: dict[str, Any] = {"appid": 730, "q": query.strip()}
+        if start > 0:
+            params["start"] = start
+
+        def parser_callback(response: httpx.Response) -> list[dict[str, Any]]:
+            results = extract_ssr_search_results(response.text or "", currency=currency)
+            if results is None:
+                raise ValueError(
+                    f"Missing valid SSR market_search cache in HTML response from {response.url}."
+                )
+            return results
+
+        return await self.http_client.get_parsed(
+            "https://steamcommunity.com/market/search",
+            parser_callback=parser_callback,
+            params=params,
+            expect_json=False,
+        )
+
+    async def get_ssr_market_bundle(
         self,
         identity: ItemIdentityResult,
         currency: CurrencyConfig,
         source_url: str | None = None,
-    ) -> tuple[ListingRenderResponse, list[tuple[str, int, int]]]:
-        """Fetch Steam's 2026 SSR listing HTML and extract BOTH live listings and cookie-free history in 1 GET."""
+    ) -> tuple[ListingRenderResponse, list[tuple[str, int, int]], dict[str, Any] | None]:
+        """Fetch Steam's 2026 SSR listing HTML and extract live listings, chart history, and orderbook top in 1 GET."""
         if not isinstance(identity, ItemIdentityResult):
             raise TypeError(f"identity must be an ItemIdentityResult, got {type(identity).__name__}.")
         if identity.appid != 730:
@@ -315,7 +345,9 @@ class SteamMarketAdapter:
 
         target_url = self._build_ssr_page_url(identity, source_url=source_url)
 
-        def parser_callback(response: httpx.Response) -> tuple[ListingRenderResponse, list[tuple[str, int, int]]]:
+        def parser_callback(
+            response: httpx.Response,
+        ) -> tuple[ListingRenderResponse, list[tuple[str, int, int]], dict[str, Any] | None]:
             text = response.text or ""
             render = extract_ssr_listing_render_response(text)
             if render is None:
@@ -327,13 +359,32 @@ class SteamMarketAdapter:
                 currency,
                 expected_market_hash_name=identity.market_hash_name,
             )
-            return render, hist
+            orderbook_snap = extract_ssr_orderbook_snapshot(
+                text,
+                expected_market_hash_name=identity.market_hash_name,
+                expected_currency_id=currency.currency_id,
+            )
+            return render, hist, orderbook_snap
 
         return await self.http_client.get_parsed(
             target_url,
             parser_callback=parser_callback,
             expect_json=False,
         )
+
+    async def get_ssr_market_page(
+        self,
+        identity: ItemIdentityResult,
+        currency: CurrencyConfig,
+        source_url: str | None = None,
+    ) -> tuple[ListingRenderResponse, list[tuple[str, int, int]]]:
+        """Fetch Steam's 2026 SSR listing HTML and extract BOTH live listings and cookie-free history in 1 GET."""
+        render, hist, _ = await self.get_ssr_market_bundle(
+            identity=identity,
+            currency=currency,
+            source_url=source_url,
+        )
+        return render, hist
 
     async def get_ssr_listing_context(
         self,

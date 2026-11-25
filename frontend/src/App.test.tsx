@@ -164,13 +164,94 @@ function mockFetchRoutes() {
         steam_credentials_stored: false,
       },
     },
+    "/api/catalog/search?": {
+      query: "",
+      mappings_loaded: true,
+      items: [
+        {
+          market_hash_name: "AK-47 | Redline (Field-Tested)",
+          item_nameid: 175971494,
+          exterior: "Field-Tested",
+          is_stattrak: false,
+          is_souvenir: false,
+          steam_listing_url: "https://steamcommunity.com/market/listings/730/AK-47%20%7C%20Redline%20%28Field-Tested%29",
+        },
+      ],
+      presets: [
+        {
+          id: "play_skins",
+          label: "Liquid Play Skins",
+          description: "High-turnover skins",
+          items: [
+            {
+              market_hash_name: "AK-47 | Redline (Field-Tested)",
+              item_nameid: 175971494,
+              exterior: "Field-Tested",
+              is_stattrak: false,
+              is_souvenir: false,
+              steam_listing_url: "https://steamcommunity.com/market/listings/730/AK-47%20%7C%20Redline%20%28Field-Tested%29",
+            },
+          ],
+        },
+      ],
+    },
+    "/api/discover/screen": {
+      screened: 1,
+      actionable: 1,
+      candidates: [
+        {
+          market_hash_name: "AK-47 | Redline (Field-Tested)",
+          exterior: "Field-Tested",
+          item_nameid: 175971494,
+          has_trusted_nameid: true,
+          currency_id: 1,
+          currency_code: "USD",
+          currency_symbol: "$",
+          steam_listing_url: "https://steamcommunity.com/market/listings/730/AK-47%20%7C%20Redline%20%28Field-Tested%29",
+          lowest_ask_minor: 2000,
+          floor_median_minor: 2050,
+          highest_buy_order_minor: 1850,
+          buy_order_count: 100,
+          sell_order_count: 80,
+          bid_ask_spread_pct: 7.5,
+          vwm_7d_minor: 2600,
+          vwm_14d_minor: 2700,
+          vwm_30d_minor: 2700,
+          sales_7d: 45,
+          sales_30d: 180,
+          dip_vs_30d_pct: 25.9,
+          baseline_exit_gross_minor: 2700,
+          net_at_baseline_exit_minor: 2349,
+          profit_at_baseline_minor: 349,
+          roi_at_baseline_pct: 17.45,
+          cons_exit_gross_minor: 2565,
+          cons_net_minor: 2231,
+          cons_profit_minor: 231,
+          cons_roi_pct: 11.55,
+          breakeven_exit_for_ask_minor: 2300,
+          breakeven_buy_minor: 2349,
+          target_buy_minor: 2237,
+          lowest_float: 0.1621,
+          has_notable_craft: true,
+          notable_stickers: ["Crown (Foil)"],
+          best_inspect_link: null,
+          active_listings_count: 10,
+          verdict: "STRONG BUY NOW",
+          verdict_tone: "good",
+          screener_score: 89.5,
+          watchlist_added: false,
+          error: null,
+        },
+      ],
+    },
   };
 
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      const body = responses[url] ?? {};
+      const matchedKey = url.startsWith("/api/catalog/search") ? "/api/catalog/search?" : url;
+      const body = responses[matchedKey] ?? {};
       return new Response(JSON.stringify(body), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -188,13 +269,24 @@ describe("CS2 Trading Sniper Dashboard", () => {
     vi.unstubAllGlobals();
   });
 
-  it("renders read-only overview, wallet disclaimer, BUY candidates, and separate SELL depths", async () => {
+  it("renders read-only overview, wallet disclaimer, BUY candidates, Discover Deals, and separate SELL depths", async () => {
     render(<App />);
 
     await waitFor(() => {
       expect(screen.getByText("STRICTLY READ-ONLY")).toBeInTheDocument();
       expect(screen.getByText(/closed-loop virtual balances/i)).toBeInTheDocument();
       expect(screen.getByText("listing_9001")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Discover Deals$/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Liquid Play Skins")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Analyze 1/i }));
+    await waitFor(() => {
+      expect(screen.getByText("STRONG BUY NOW")).toBeInTheDocument();
+      expect(screen.getByText("+$3.49")).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole("button", { name: /^SELL Sniper$/i }));

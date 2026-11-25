@@ -557,8 +557,9 @@ class SellSniperEngine:
         owner_id: str | None = None,
         dispatch_notifications: bool = True,
         max_unique_items: int | None = None,
+        market_hash_names: list[str] | None = None,
     ) -> list[SellCandidateEvaluation]:
-        """Scan all marketable items in the specified or latest inventory snapshot."""
+        """Scan all or selected marketable items in the specified or latest inventory snapshot."""
         if snapshot_id is not None:
             items = self._inventory_repo.get_items_for_snapshot(snapshot_id)
         else:
@@ -573,6 +574,13 @@ class SellSniperEngine:
         if not marketable_items:
             logger.info("No marketable items found in inventory snapshot.")
             return []
+
+        allowed_names = {n.strip() for n in market_hash_names if n.strip()} if market_hash_names else None
+        if allowed_names is not None:
+            marketable_items = [i for i in marketable_items if i.market_hash_name in allowed_names]
+            if not marketable_items:
+                logger.info("No matching marketable items found for requested market_hash_names filter.")
+                return []
 
         # Deduplicate by market_hash_name
         seen_names: set[str] = set()

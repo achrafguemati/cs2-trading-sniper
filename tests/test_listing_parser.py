@@ -10,6 +10,8 @@ from sniper.adapters.listing_parser import (
     compute_weighted_median_minor,
     extract_public_price_history,
     extract_ssr_listing_render_response,
+    extract_ssr_orderbook_snapshot,
+    extract_ssr_search_results,
     parse_listing_render_cards,
 )
 from sniper.core.currency import CurrencyConfig
@@ -286,6 +288,97 @@ class TestListingParser(unittest.TestCase):
             extract_public_price_history(html_doc, usd, expected_market_hash_name="Wrong Item"),
             [],
         )
+
+    def test_extract_ssr_search_results_and_orderbook_snapshot(self) -> None:
+        """Verify 2026 Steam /market/search SSR hydration and listing orderbook snapshot parsing."""
+        usd = CurrencyConfig(
+            currency_id=1,
+            code="USD",
+            symbol="$",
+            minor_unit_precision=2,
+            is_metadata_verified=True,
+            is_fee_verified=True,
+        )
+        search_qd = {
+            "queries": [
+                {
+                    "queryKey": ["market_search", {"appid": 730, "q": "Redline"}],
+                    "state": {
+                        "data": {
+                            "pages": [
+                                {
+                                    "total_count": 42,
+                                    "results": [
+                                        {
+                                            "strHash": "AK-47 | Redline (Field-Tested)",
+                                            "cSellOrders": 1280,
+                                            "cBuyOrders": 9400,
+                                            "strMinSellSubtotal": "$28.45 USD",
+                                            "eCurrency": 1,
+                                            "asset_description": {
+                                                "type": "Classified Rifle",
+                                                "name_color": "D32CE6",
+                                                "icon_url": "abc/icon",
+                                            },
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    },
+                }
+            ]
+        }
+        search_html = (
+            '<script type="application/json" id="valve-ssr-data">'
+            + json.dumps({
+                "route": "/market/search",
+                "renderContext": {"queryData": json.dumps(search_qd)},
+            })
+            + "</script>"
+        )
+        parsed = extract_ssr_search_results(search_html, currency=usd)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["market_hash_name"], "AK-47 | Redline (Field-Tested)")
+        self.assertEqual(parsed[0]["min_sell_price_minor"], 2845)
+        self.assertEqual(parsed[0]["sell_listings"], 1280)
+        self.assertTrue(parsed[0]["icon_url"].endswith("abc/icon"))
+
+        # Challenge HTML or listing route fails closed for market_search
+        self.assertIsNone(extract_ssr_search_results("<html>Cloudflare check</html>", currency=usd))
+
+        ob_qd = {
+            "queries": [
+                {
+                    "queryKey": ["market", "orderbook", 730, "AK-47 | Redline (Field-Tested)"],
+                    "state": {
+                        "data": {
+                            "eCurrency": 1,
+                            "amtMaxBuyOrder": 2410,
+                            "amtMinSellOrder": 2845,
+                            "cBuyOrders": 9400,
+                            "cSellOrders": 1280,
+                            "rgCompactBuyOrders": [{"quantity": 4}],
+                        }
+                    },
+                }
+            ]
+        }
+        ob_html = (
+            '<script type="application/json" id="valve-ssr-data">'
+            + json.dumps({
+                "route": "/market/listings/:appid/:name",
+                "renderContext": {"queryData": json.dumps(ob_qd)},
+            })
+            + "</script>"
+        )
+        snap = extract_ssr_orderbook_snapshot(ob_html, "AK-47 | Redline (Field-Tested)", 1)
+        self.assertIsNotNone(snap)
+        self.assertEqual(snap["highest_buy_order_minor"], 2410)
+        self.assertEqual(snap["lowest_sell_order_minor"], 2845)
+        self.assertEqual(snap["top_level_buy_quantity"], 4)
+        self.assertIsNone(extract_ssr_orderbook_snapshot(ob_html, "AK-47 | Redline (Field-Tested)", 3))
 
 
 if __name__ == "__main__":

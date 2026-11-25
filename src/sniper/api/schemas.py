@@ -93,3 +93,27 @@ class AppSettingsUpdateRequest(BaseModel):
         if v <= 0 or v > 12.0:
             raise ValueError("requests_per_minute must remain within (0, 12.0] safety limit.")
         return float(v)
+
+
+class DiscoverSteamSearchRequest(BaseModel):
+    query: str = ""
+    start: int = Field(0, ge=0, le=300)
+    min_price_minor: int | None = Field(None, ge=1)
+    max_price_minor: int | None = Field(None, ge=1)
+    min_supply: int = Field(0, ge=0)
+    currency_id: int = Field(1, ge=1)
+    only_verified_nameid: bool = False
+
+
+class DiscoverScreenRequest(BaseModel):
+    market_hash_names: list[str] = Field(..., min_length=1, max_length=8)
+    currency_id: int = Field(1, ge=1)
+    min_roi_pct: float = Field(5.0, ge=0.0, le=500.0)
+    auto_watchlist: bool = False
+    max_budget_minor: int | None = Field(None, ge=1)
+
+
+class SellScanRequest(BaseModel):
+    dispatch_notifications: bool = True
+    limit: int | None = Field(None, ge=1, le=200)
+    market_hash_names: list[str] | None = None

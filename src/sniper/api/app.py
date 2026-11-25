@@ -13,7 +13,7 @@ from typing import Any
 from urllib.parse import quote
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -23,22 +23,37 @@ from sniper.adapters.steam_market import SteamMarketAdapter
 from sniper.api.schemas import (
     AppSettingsUpdateRequest,
     BreakerResetRequest,
+    DiscoverScreenRequest,
+    DiscoverSteamSearchRequest,
     HistoryImportRequest,
     HoldingCreateRequest,
     HoldingSellRequest,
     ManualInventoryImportRequest,
     NotificationTestRequest,
+    SellScanRequest,
     SteamInventoryImportRequest,
     WatchlistCreateRequest,
     WatchlistToggleRequest,
 )
 from sniper.core.http_client import ReadOnlyHttpClient
-from sniper.core.identity import ItemNameIdDatabase, ResolutionStatus
+from sniper.core.identity import (
+    ItemNameIdDatabase,
+    ResolutionStatus,
+    decompose_market_hash_name,
+    is_trusted_mapping_source,
+)
 from sniper.core.rate_limiter import RateLimiterConfig, SequentialRateLimiter
 from sniper.engine.buy_engine import (
     BuyEvaluationConfig,
     BuySniperEngine,
     import_manual_price_history_json,
+)
+from sniper.engine.discovery import (
+    build_grouped_inventory_views,
+    compute_target_buy_price_minor,
+    get_presets_with_metadata,
+    load_currency_config,
+    screen_market_items,
 )
 from sniper.engine.portfolio_service import PortfolioService
 from sniper.engine.scheduler import SchedulerConfig, SniperScheduler
@@ -391,9 +406,12 @@ def create_app(
             actionable_only=actionable_only,
             limit=limit,
         )
+        settings = _read_app_settings(c.db)
+        min_roi_pct = float(settings.get("min_roi_pct", 5.0))
         item_repo = ItemRepository(c.db)
         curr_repo = CurrencyRepository(c.db)
         curr_cache: dict[int, Any] = {}
+        curr_cfg_cache: dict[int, Any] = {}
         item_cache: dict[int, ItemRecord | None] = {}
         out = []
         for r in rows:
@@ -401,8 +419,20 @@ def create_app(
                 item_cache[r.item_id] = item_repo.get_by_id(r.item_id)
             if r.currency_id not in curr_cache:
                 curr_cache[r.currency_id] = curr_repo.get_by_id(r.currency_id)
+            if r.currency_id not in curr_cfg_cache:
+                try:
+                    cfg, _ = load_currency_config(c.db, r.currency_id)
+                    curr_cfg_cache[r.currency_id] = cfg
+                except Exception:
+                    curr_cfg_cache[r.currency_id] = None
             it = item_cache[r.item_id]
             cr = curr_cache[r.currency_id]
+            cfg = curr_cfg_cache[r.currency_id]
+            breakeven_buy_minor, target_buy_minor = (
+                compute_target_buy_price_minor(r.reference_price_minor, min_roi_pct, cfg)
+                if cfg is not None
+                else (0, 0)
+            )
             mname = it.market_hash_name if it else f"item#{r.item_id}"
             out.append({
                 **r.model_dump(),
@@ -412,6 +442,8 @@ def create_app(
                 "currency_symbol": cr.symbol if cr else "$",
                 "stickers": json.loads(r.stickers_json or "[]"),
                 "warning_tags": json.loads(r.warning_tags or "[]"),
+                "breakeven_buy_price_minor": breakeven_buy_minor or None,
+                "target_buy_price_minor": target_buy_minor or None,
                 "steam_listing_url": f"https://steamcommunity.com/market/listings/730/{quote(mname, safe='')}",
             })
         return {"candidates": out}
@@ -432,19 +464,149 @@ def create_app(
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     # -------------------------------------------------------------------------
+    # Self-Discovering Catalog Search & Auto-Hunt Screener (Strictly Read-Only)
+    # -------------------------------------------------------------------------
+
+    @app.get("/api/catalog/search")
+    def search_local_catalog(
+        q: str = "",
+        category: str | None = None,
+        exterior: str | None = None,
+        stattrak_only: bool = False,
+        limit: int = Query(40, ge=1, le=100),
+    ) -> dict[str, Any]:
+        c = _ctx()
+        items = (
+            c.nameid_db.search_mappings(
+                query=q,
+                category=category,
+                exterior=exterior,
+                stattrak_only=stattrak_only,
+                limit=limit,
+            )
+            if c.nameid_db is not None
+            else []
+        )
+        return {
+            "query": q,
+            "mappings_loaded": bool(c.nameid_db and c.nameid_db.has_verified_metadata()),
+            "items": items,
+            "presets": get_presets_with_metadata(c.nameid_db),
+        }
+
+    @app.post("/api/discover/steam")
+    async def search_steam_market_live(req: DiscoverSteamSearchRequest) -> dict[str, Any]:
+        c = _ctx()
+        try:
+            cfg, _ = load_currency_config(c.db, req.currency_id)
+            raw_items = await c.scheduler.adapter.search_market_ssr(
+                query=req.query,
+                currency=cfg,
+                start=req.start,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+        filtered: list[dict[str, Any]] = []
+        for row in raw_items:
+            mname = str(row["market_hash_name"])
+            price_minor = row.get("min_sell_price_minor")
+            supply = int(row.get("sell_listings") or 0)
+
+            if req.min_price_minor is not None and (price_minor is None or price_minor < req.min_price_minor):
+                continue
+            if req.max_price_minor is not None and (price_minor is None or price_minor > req.max_price_minor):
+                continue
+            if supply < req.min_supply:
+                continue
+
+            mapping = c.nameid_db.lookup_verified_mapping(mname) if c.nameid_db is not None else None
+            has_verified = bool(
+                mapping is not None
+                and is_trusted_mapping_source(
+                    mapping.get("item_nameid_source"),
+                    mapping.get("item_nameid_revision"),
+                )
+            )
+            if req.only_verified_nameid and not has_verified:
+                continue
+
+            _, ext, is_st, is_souv = decompose_market_hash_name(mname)
+            filtered.append({
+                **row,
+                "exterior": ext.value if ext else None,
+                "is_stattrak": is_st,
+                "is_souvenir": is_souv,
+                "item_nameid": int(mapping["item_nameid"]) if mapping else None,
+                "has_trusted_nameid": has_verified,
+                "currency_code": cfg.code,
+                "currency_symbol": cfg.symbol,
+                "steam_listing_url": f"https://steamcommunity.com/market/listings/730/{quote(mname, safe='')}",
+            })
+
+        return {
+            "query": req.query,
+            "total_raw": len(raw_items),
+            "currency": {
+                "currency_id": cfg.currency_id,
+                "code": cfg.code,
+                "symbol": cfg.symbol,
+            },
+            "items": filtered,
+        }
+
+    @app.post("/api/discover/screen")
+    async def screen_discover_candidates(req: DiscoverScreenRequest) -> dict[str, Any]:
+        c = _ctx()
+        try:
+            candidates = await screen_market_items(
+                market_hash_names=req.market_hash_names,
+                adapter=c.scheduler.adapter,
+                identity_service=c.identity_service,
+                db=c.db,
+                currency_id=req.currency_id,
+                min_roi_pct=req.min_roi_pct,
+                auto_watchlist=req.auto_watchlist,
+                max_budget_minor=req.max_budget_minor,
+            )
+            return {
+                "screened": len(candidates),
+                "actionable": sum(1 for item in candidates if item["verdict_tone"] == "good"),
+                "candidates": candidates,
+            }
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    # -------------------------------------------------------------------------
     # SELL Engine & Inventory Routes
     # -------------------------------------------------------------------------
 
     @app.get("/api/inventory/latest")
     def get_latest_inventory() -> dict[str, Any]:
-        inv_repo = InventoryRepository(_ctx().db)
+        c = _ctx()
+        inv_repo = InventoryRepository(c.db)
         snap = inv_repo.get_latest_snapshot()
         if snap is None or snap.snapshot_id is None:
-            return {"snapshot": None, "items": []}
+            return {"snapshot": None, "items": [], "grouped_items": [], "min_samples_needed": 3}
         items = inv_repo.get_items_for_snapshot(snap.snapshot_id)
+        settings = _read_app_settings(c.db)
+        curr_id = int(settings.get("default_currency_id", 1))
+        min_needed = c.scheduler.sell_engine._config.min_historical_samples
+        _, grouped = build_grouped_inventory_views(
+            c.db,
+            currency_id=curr_id,
+            min_samples_needed=min_needed,
+            nameid_db=c.nameid_db,
+        )
         return {
             "snapshot": snap.model_dump(),
             "items": [i.model_dump() for i in items],
+            "grouped_items": grouped,
+            "min_samples_needed": min_needed,
         }
 
     @app.post("/api/inventory/import-steam")
@@ -510,11 +672,43 @@ def create_app(
         return {"candidates": out}
 
     @app.post("/api/sell/scan")
-    async def trigger_sell_scan(dispatch_notifications: bool = True) -> dict[str, Any]:
+    async def trigger_sell_scan(
+        dispatch_notifications: bool = True,
+        req: SellScanRequest | None = Body(default=None),
+    ) -> dict[str, Any]:
         c = _ctx()
+        eff_dispatch = dispatch_notifications and (req.dispatch_notifications if req else True)
+        selected_names = req.market_hash_names if req else None
+        limit = req.limit if req else None
+
+        if selected_names is None and limit is not None:
+            settings = _read_app_settings(c.db)
+            curr_id = int(settings.get("default_currency_id", 1))
+            min_needed = c.scheduler.sell_engine._config.min_historical_samples
+            _, grouped = build_grouped_inventory_views(
+                c.db,
+                currency_id=curr_id,
+                min_samples_needed=min_needed,
+                nameid_db=c.nameid_db,
+            )
+            marketable_groups = [g for g in grouped if g["marketable_count"] > 0]
+            # Prioritize items with trusted nameid that still need baseline warmup, then highest quantity/value
+            marketable_groups.sort(
+                key=lambda g: (
+                    0 if g["has_trusted_nameid"] else 1,
+                    0 if g["baseline_samples_count"] < min_needed else 1,
+                    g["baseline_samples_count"],
+                    -int(g["quantity"]),
+                    g["market_hash_name"],
+                )
+            )
+            selected_names = [g["market_hash_name"] for g in marketable_groups[:limit]]
+
         try:
             evals = await c.scheduler.sell_engine.scan_inventory(
-                dispatch_notifications=dispatch_notifications
+                dispatch_notifications=eff_dispatch,
+                max_unique_items=limit if selected_names is None else None,
+                market_hash_names=selected_names,
             )
             return {
                 "evaluated": len(evals),

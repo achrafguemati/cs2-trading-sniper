@@ -701,6 +701,25 @@ class TestItemIdentityResolver(unittest.TestCase):
                     db=db,
                 )
 
+    def test_verified_catalog_search_filters_by_query_category_exterior_and_fails_closed(self):
+        with ItemNameIdDatabase(":memory:") as empty_db:
+            self.assertEqual(empty_db.search_mappings(query="Redline"), [])
+
+        with ItemNameIdDatabase(":memory:") as db:
+            db.import_verified_dataset(VERIFIED_SEED_PATH, verified_seed_metadata())
+
+            redlines = db.search_mappings(query="Redline", exterior="Field-Tested", limit=10)
+            names = [r["market_hash_name"] for r in redlines]
+            self.assertIn("AK-47 | Redline (Field-Tested)", names)
+            self.assertTrue(all(r["exterior"] == "Field-Tested" for r in redlines))
+
+            knives = db.search_mappings(query="Bowie", category="knives", stattrak_only=True, limit=10)
+            self.assertGreater(len(knives), 0)
+            self.assertTrue(all(k["is_stattrak"] and k["market_hash_name"].startswith("★ ") for k in knives))
+
+            cases = db.search_mappings(query="Kilowatt", category="cases", limit=5)
+            self.assertTrue(any(c["market_hash_name"] == "Kilowatt Case" for c in cases))
+
 
 if __name__ == "__main__":
     unittest.main()
